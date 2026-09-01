@@ -61,7 +61,12 @@ fn main() {
     let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     std::fs::create_dir_all(&out_dir).unwrap();
 
-    for (name, pages) in [("one_page.pdf", 1), ("two_pages.pdf", 2), ("four_pages.pdf", 4)] {
+    for (name, pages) in [
+        ("one_page.pdf", 1),
+        ("two_pages.pdf", 2),
+        ("four_pages.pdf", 4),
+        ("ten_pages.pdf", 10),
+    ] {
         let mut doc = multi_page_document(pages);
         doc.save(out_dir.join(name)).unwrap();
         println!("wrote {}", out_dir.join(name).display());

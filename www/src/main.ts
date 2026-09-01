@@ -14,6 +14,13 @@ import {
 } from "./pdfrs-worker-client";
 import { bytesToObjectUrl, downloadBytes, fileToUint8Array, setupFileInput } from "./pdf-io";
 import { parseLayout, parseRanges, parseRotations } from "./parsers";
+import { renderPagesInParallel } from "./preview-worker-pool";
+
+// Above this many pages, Preview spreads rendering across a pool of workers
+// (see preview-worker-pool.ts) instead of one page at a time on the single
+// shared worker - each pool worker carries its own copy of the wasm module,
+// so it's only worth it once there's enough pages to amortize that cost.
+const PARALLEL_PREVIEW_THRESHOLD = 6;
 
 function byId<T extends HTMLElement>(id: string): T {
   const el = document.getElementById(id);
@@ -113,14 +120,15 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
       const bytes = await fileToUint8Array(file);
       const count = await page_count(bytes);
 
+      // One placeholder card per page, created up front: when rendering runs
+      // on a worker pool, pages complete out of order, so each card needs a
+      // fixed slot to be filled into rather than being appended as it arrives.
+      const cardImages = new Map<number, HTMLImageElement>();
       for (let page = 1; page <= count; page++) {
-        const png = await render_page_preview(bytes, page, 0.4);
-
         const card = document.createElement("div");
         card.className = "preview-card";
 
         const img = document.createElement("img");
-        img.src = bytesToObjectUrl(png, "image/png");
         img.alt = `Pagina ${page}`;
 
         const label = document.createElement("span");
@@ -128,6 +136,20 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
 
         card.append(img, label);
         grid.appendChild(card);
+        cardImages.set(page, img);
+      }
+
+      const fillCard = (page: number, png: Uint8Array) => {
+        const img = cardImages.get(page);
+        if (img) img.src = bytesToObjectUrl(png, "image/png");
+      };
+
+      if (count > PARALLEL_PREVIEW_THRESHOLD) {
+        await renderPagesInParallel(bytes, count, 0.4, fillCard);
+      } else {
+        for (let page = 1; page <= count; page++) {
+          fillCard(page, await render_page_preview(bytes, page, 0.4));
+        }
       }
 
       setStatus(status, `Fatto: ${count} pagine renderizzate`, "ok");

@@ -78,6 +78,17 @@ async function main() {
   const previewCardCount = await page.locator("#preview-grid .preview-card").count();
   const heartbeatKeptTickingDuringPreview = (await readHeartbeat()) > heartbeatBeforePreview;
 
+  // --- Preview with a worker pool: ten_pages.pdf has more pages than
+  // PARALLEL_PREVIEW_THRESHOLD (6), so this run should fan out across
+  // several workers instead of the single shared one used above. ---
+  await page.setInputFiles("#preview-input", [path.join(fixtures, "ten_pages.pdf")]);
+  const parallelPreviewStatus = await waitForSettledStatus("#preview-status");
+  const parallelPreviewCardCount = await page.locator("#preview-grid .preview-card").count();
+  const parallelPreviewImageCount = await page
+    .locator("#preview-grid .preview-card img")
+    .evaluateAll((imgs) => imgs.filter((img) => img.getAttribute("src")).length);
+  const previewPoolSize = await page.evaluate(() => window.__pdfrsLastPreviewPoolSize);
+
   // --- Merge: two_pages.pdf + one_page.pdf -> expect a download ---
   await page.setInputFiles("#merge-input", [
     path.join(fixtures, "two_pages.pdf"),
@@ -140,6 +151,10 @@ async function main() {
     "heartbeat keeps ticking during a wasm call (worker, not main thread)": heartbeatKeptTickingDuringPreview,
     "preview status succeeds": previewStatus.startsWith("Fatto"),
     "preview renders one card per page": previewCardCount === 2,
+    "parallel preview (worker pool) status succeeds": parallelPreviewStatus.startsWith("Fatto"),
+    "parallel preview renders one card per page": parallelPreviewCardCount === 10,
+    "parallel preview fills every card with an image": parallelPreviewImageCount === 10,
+    "parallel preview actually used more than one worker": previewPoolSize > 1,
     "merge downloads merged.pdf": mergeDownload.suggestedFilename() === "merged.pdf",
     "merge status succeeds": mergeStatus.startsWith("Fatto"),
     "split downloads 2 files": splitDownloads.length === 2,

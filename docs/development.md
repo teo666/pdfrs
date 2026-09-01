@@ -49,6 +49,17 @@ Per questo `www/src/main.ts` non importa mai `"pdfrs"` direttamente. La catena �
 
 **Prova visibile che funziona**: in cima alla pagina c'è un contatore ("UI thread libero — tick: N") che incrementa a ogni `requestAnimationFrame`. Se il thread principale fosse bloccato da una chiamata wasm, si fermerebbe; nello smoke test (`www/e2e/smoke.mjs`) questo è verificato esplicitamente confrontando il valore del contatore prima e dopo un'operazione.
 
+### Preview su documenti grandi: pool di worker con coda dinamica
+
+Un solo worker rende le pagine una alla volta — non blocca la UI, ma per un documento con molte pagine il rendering totale resta comunque lento in wall-clock, perché una sola pagina alla volta gira su un solo core. `src/preview-worker-pool.ts` risolve questo caso specifico: sopra `PARALLEL_PREVIEW_THRESHOLD` pagine (6, in `main.ts`), il pannello Preview crea un piccolo pool di worker (`Math.min(navigator.hardwareConcurrency, pageCount, 8)`, ognuno con la propria copia del modulo wasm) e distribuisce le pagine da una **coda condivisa**: ogni worker libero prende la pagina successiva, invece di ricevere in anticipo un blocco fisso di pagine. Questo evita che un worker resti bloccato su un blocco di pagine pesanti mentre un altro, con pagine leggere, ha già finito ed è inattivo — il bilanciamento del carico è automatico.
+
+Conseguenze pratiche di questo design:
+
+- **`onPage` completa fuori ordine**: le pagine finiscono nell'ordine in cui i worker le processano, non nell'ordine 1, 2, 3... Per questo il pannello Preview crea prima una card segnaposto per ogni pagina (`cardImages: Map<number, HTMLImageElement>` in `main.ts`) e riempie l'immagine giusta quando arriva, invece di fare `appendChild` man mano — se aggiungi un altro consumatore di `renderPagesInParallel`, tienilo a mente.
+- **Costo per worker aggiuntivo**: ogni worker del pool istanzia una copia indipendente del modulo wasm (~4.3 MB, per via di `hayro`). Per pochi worker e documenti grandi ne vale la pena; per documenti piccoli l'overhead di avvio supererebbe il guadagno — da qui la soglia `PARALLEL_PREVIEW_THRESHOLD`, sotto la quale si usa il singolo worker condiviso già esistente (`pdfrs-worker-client.ts`).
+- **Ciclo di vita**: i worker del pool sono creati per la singola chiamata a `renderPagesInParallel` e terminati (`worker.terminate()`) alla fine, con o senza errore — non sono un pool persistente riusato tra una preview e l'altra.
+- **Verifica nello smoke test**: `tests/fixtures/ten_pages.pdf` (10 pagine, sopra soglia) esercita il pool; `preview-worker-pool.ts` espone `window.__pdfrsLastPreviewPoolSize` proprio per permettere allo smoke test di verificare concretamente che siano stati usati più worker (`previewPoolSize > 1`), invece di dedurlo indirettamente dai tempi.
+
 ### Trabocchetto da evitare — `Transferable` e buffer riusati
 
 Per default `postMessage(dato)` fa una **structured clone**: copia il dato (ricorsivamente) e manda la copia all'altro thread. Va benissimo per un `Uint8Array` di poche decine di KB come i nostri PDF di test, ma per un file grande vorresti evitare di duplicarlo in memoria solo per passarlo da un thread all'altro. Per questo `postMessage` accetta un secondo argomento:
@@ -103,7 +114,7 @@ Il pannello **Preview** è diverso dagli altri: appena rilasci/selezioni un PDF,
 - un pulsante "Esegui" che chiama la funzione wasm corrispondente e scarica il PDF risultante;
 - un'area di stato che mostra l'esito o l'errore (utile per verificare che gli errori Rust arrivino come messaggi leggibili, non come crash).
 
-Usa i PDF già presenti in `tests/fixtures/` (`one_page.pdf`, `two_pages.pdf`, `four_pages.pdf`) per provare rapidamente ogni pannello.
+Usa i PDF già presenti in `tests/fixtures/` (`one_page.pdf`, `two_pages.pdf`, `four_pages.pdf`, `ten_pages.pdf`) per provare rapidamente ogni pannello — `ten_pages.pdf` supera `PARALLEL_PREVIEW_THRESHOLD` ed è utile per vedere il pool di worker in azione nel pannello Preview.
 
 ### Smoke test end-to-end (`www/e2e/smoke.mjs`)
 
