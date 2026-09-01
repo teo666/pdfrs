@@ -37,6 +37,20 @@ cargo run --example render_preview [percorso/al/file.pdf]   # default: tests/fix
 
 Piccolo progetto Vite + TypeScript puro (nessun framework), con un pannello per ciascuna operazione esposta dal wasm. Consuma il pacchetto locale generato in `pkg/` tramite `"pdfrs": "file:../pkg"` in `www/package.json` — va quindi rigenerato (`wasm-pack build --target web`) ogni volta che cambia l'API Rust.
 
+### Il modulo wasm gira in un Web Worker, non sul thread principale
+
+Le funzioni `async`/`Promise` di per sé **non bastano** a evitare che la UI si blocchi: il lavoro (parsing, merge, rendering) è comunque CPU-bound e, se chiamato direttamente, gira sullo stesso thread che disegna la pagina — la Promise si risolve solo a lavoro finito, ma nel frattempo il browser resta fermo se il PDF è grande.
+
+Per questo `www/src/main.ts` non importa mai `"pdfrs"` direttamente. La catena è:
+
+- `src/pdfrs.worker.ts` — gira **dentro un Web Worker**, importa il pacchetto wasm vero (`"pdfrs"`), chiama `init()` una volta, e risponde ai messaggi `{ id, method, args }` eseguendo la funzione corrispondente.
+- `src/pdfrs-worker-client.ts` — lato thread principale, espone le stesse firme (`merge_pdfs`, `split_pdf`, ...) ma ogni chiamata è in realtà un giro di `postMessage` verso il worker, incapsulato in una `Promise` tramite una mappa `id -> {resolve, reject}`. I call site (`main.ts`) non sanno che c'è un worker di mezzo.
+- `src/worker-protocol.ts` — le forme dei messaggi (`WorkerRequest`/`WorkerResponse`) condivise tra le due parti, così non possono disallinearsi.
+
+**Prova visibile che funziona**: in cima alla pagina c'è un contatore ("UI thread libero — tick: N") che incrementa a ogni `requestAnimationFrame`. Se il thread principale fosse bloccato da una chiamata wasm, si fermerebbe; nello smoke test (`www/e2e/smoke.mjs`) questo è verificato esplicitamente confrontando il valore del contatore prima e dopo un'operazione.
+
+**Trabocchetto da evitare — `Transferable` e buffer riusati**: i *risultati* dal worker verso il thread principale vengono trasferiti (`postMessage(response, { transfer: [...] })`, in `pdfrs.worker.ts`) invece di essere copiati, perché ogni risultato è generato una volta sola e usato una volta sola. Le *richieste* dal thread principale verso il worker invece **non** vengono trasferite (solo clonate): il pannello Preview, ad esempio, riusa lo stesso `Uint8Array` per `page_count` e poi per una `render_page_preview` per pagina — trasferire il buffer alla prima chiamata lo "svuoterebbe" (`detached`), rompendo tutte le chiamate successive con lo stesso file. Se in futuro serve ottimizzare il trasferimento delle richieste per PDF molto grandi, va fatto clonando il buffer lato chiamante prima di trasferirlo, non trasferendo l'originale.
+
 **Importante**: dopo ogni `wasm-pack build`, rilancia anche `pnpm install` dentro `www/`. A differenza di npm, **pnpm non fa un vero symlink live** per le dipendenze `file:` — ne clona un contenuto in `node_modules/.pnpm/` al momento dell'`install`, e quel contenuto non si aggiorna da solo quando `pkg/` cambia sul disco. Se te ne dimentichi, il frontend continua a chiamare funzioni vecchie/mancanti (es. `wasm.page_count is not a function`) o serializza opzioni in un formato che l'API attuale non si aspetta più, con errori che sembrano bug nel codice Rust ma sono solo un pacchetto stantio.
 
 ```bash
@@ -60,7 +74,7 @@ Usa i PDF già presenti in `tests/fixtures/` (`one_page.pdf`, `two_pages.pdf`, `
 
 ### Smoke test end-to-end (`www/e2e/smoke.mjs`)
 
-`pnpm test:e2e` avvia da solo un server Vite su una porta dedicata, pilota un vero Chromium headless via Playwright ed esercita tutti i pannelli attraverso la UI reale (non chiamando le funzioni wasm direttamente): preview (conta le card generate), merge, split, rotate, compose, encrypt, e decrypt sia con password corretta che sbagliata. È l'unico test che valida realmente il confine JS↔wasm (init del modulo, serializzazione `JsValue`, download dei risultati) in questo ambiente, dato che `wasm-pack test --headless` non è eseguibile senza `geckodriver`/`chromedriver`.
+`pnpm test:e2e` avvia da solo un server Vite su una porta dedicata, pilota un vero Chromium headless via Playwright ed esercita tutti i pannelli attraverso la UI reale (non chiamando le funzioni wasm direttamente): il contatore heartbeat (verifica che non si fermi durante un'operazione), preview (conta le card generate), merge, split, rotate, compose, encrypt, e decrypt sia con password corretta che sbagliata. È l'unico test che valida realmente il confine JS↔worker↔wasm (init del modulo nel worker, `postMessage`, serializzazione `JsValue`, download dei risultati) in questo ambiente, dato che `wasm-pack test --headless` non è eseguibile senza `geckodriver`/`chromedriver`.
 
 Se aggiungi un pannello o un'operazione, aggiungi anche il relativo scenario in `smoke.mjs` — non lasciarlo solo come verifica manuale.
 

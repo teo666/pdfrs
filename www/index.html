@@ -109,13 +109,26 @@
         font-size: 0.75rem;
         color: #666;
       }
+      .heartbeat {
+        display: inline-block;
+        font-size: 0.8rem;
+        color: #16a34a;
+        background: #16a34a11;
+        border: 1px solid #16a34a44;
+        border-radius: 999px;
+        padding: 0.25rem 0.75rem;
+        margin: 0 0 1rem;
+      }
     </style>
   </head>
   <body>
     <h1>pdfrs — banco di prova delle API wasm</h1>
     <p class="hint">
-      Ogni pannello chiama direttamente la funzione wasm corrispondente e scarica il PDF risultante. Usa i PDF in
-      <code>tests/fixtures/</code> per provare rapidamente.
+      Ogni pannello chiama la funzione wasm corrispondente <strong>dentro un Web Worker</strong> e scarica il PDF
+      risultante. Usa i PDF in <code>tests/fixtures/</code> per provare rapidamente.
+    </p>
+    <p class="heartbeat" id="heartbeat" title="Incrementa a ogni frame: se si blocca durante un'operazione, la UI è bloccata">
+      UI thread libero — tick: <strong id="heartbeat-count">0</strong>
     </p>
 
     <section class="panel" id="panel-preview">

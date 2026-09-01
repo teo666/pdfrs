@@ -60,10 +60,23 @@ async function main() {
     return (await page.textContent(selector)).trim();
   }
 
+  function readHeartbeat() {
+    return page.$eval("#heartbeat-count", (el) => Number(el.textContent));
+  }
+
+  // --- Heartbeat: ticks via requestAnimationFrame on the main thread. If it
+  // stops advancing while a wasm call is in flight, the UI is blocked - since
+  // every call goes through pdfrs.worker.ts, it shouldn't. ---
+  const heartbeatBeforeCalls = await readHeartbeat();
+  await page.waitForTimeout(100);
+  const heartbeatIsTicking = (await readHeartbeat()) > heartbeatBeforeCalls;
+
   // --- Preview: drop two_pages.pdf, expect one thumbnail card per page ---
+  const heartbeatBeforePreview = await readHeartbeat();
   await page.setInputFiles("#preview-input", [path.join(fixtures, "two_pages.pdf")]);
   const previewStatus = await waitForSettledStatus("#preview-status");
   const previewCardCount = await page.locator("#preview-grid .preview-card").count();
+  const heartbeatKeptTickingDuringPreview = (await readHeartbeat()) > heartbeatBeforePreview;
 
   // --- Merge: two_pages.pdf + one_page.pdf -> expect a download ---
   await page.setInputFiles("#merge-input", [
@@ -123,6 +136,8 @@ async function main() {
   await browser.close();
 
   const results = {
+    "heartbeat ticks on the main thread": heartbeatIsTicking,
+    "heartbeat keeps ticking during a wasm call (worker, not main thread)": heartbeatKeptTickingDuringPreview,
     "preview status succeeds": previewStatus.startsWith("Fatto"),
     "preview renders one card per page": previewCardCount === 2,
     "merge downloads merged.pdf": mergeDownload.suggestedFilename() === "merged.pdf",

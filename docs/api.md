@@ -13,6 +13,8 @@ import init, {
 await init();
 ```
 
+Chiamarle così, direttamente sul thread principale, **blocca la UI** per la durata dell'operazione (sono `async` solo nel senso che ritornano una `Promise`, non nel senso che girano su un altro thread). Per non bloccare la pagina vanno eseguite dentro un **Web Worker** — vedi [`development.md`](development.md#il-modulo-wasm-gira-in-un-web-worker-non-sul-thread-principale) per il pattern completo (`www/src/pdfrs.worker.ts` + `www/src/pdfrs-worker-client.ts`), che espone queste stesse funzioni con le stesse firme ma passando da un worker.
+
 ## `merge_pdfs(files: Uint8Array[]): Promise<Uint8Array>`
 
 Concatena le pagine di più PDF, nell'ordine dell'array, in un unico PDF.

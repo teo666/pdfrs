@@ -1,4 +1,8 @@
-import init, {
+// Every call below goes through a Web Worker (see pdfrs-worker-client.ts /
+// pdfrs.worker.ts), not the "pdfrs" wasm package directly - the actual CPU
+// work happens off this thread, so the UI never freezes while it runs. The
+// heartbeat counter further down is the visible proof of that.
+import {
   compose_pdf,
   decrypt_pdf,
   encrypt_pdf,
@@ -7,16 +11,28 @@ import init, {
   render_page_preview,
   rotate_pages,
   split_pdf,
-} from "pdfrs";
+} from "./pdfrs-worker-client";
 import { bytesToObjectUrl, downloadBytes, fileToUint8Array, setupFileInput } from "./pdf-io";
 import { parseLayout, parseRanges, parseRotations } from "./parsers";
-
-await init();
 
 function byId<T extends HTMLElement>(id: string): T {
   const el = document.getElementById(id);
   if (!el) throw new Error(`Elemento #${id} non trovato`);
   return el as T;
+}
+
+// Ticks every animation frame purely to prove the main thread stays
+// responsive while a wasm call is in flight on the worker: if this counter
+// froze during an operation, the UI would be blocked.
+{
+  const counter = byId<HTMLElement>("heartbeat-count");
+  let ticks = 0;
+  const tick = () => {
+    ticks += 1;
+    counter.textContent = String(ticks);
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
 }
 
 function setStatus(el: HTMLElement, message: string, kind: "ok" | "error" | "" = "") {
