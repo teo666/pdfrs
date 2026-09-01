@@ -98,6 +98,23 @@ pub async fn decrypt_pdf(file: Uint8Array, password: String) -> std::result::Res
     Ok(save(&mut doc)?)
 }
 
+/// Returns the number of pages in a PDF file (useful to know how many
+/// preview thumbnails to request from `render_page_preview`).
+#[wasm_bindgen]
+pub async fn page_count(file: Uint8Array) -> std::result::Result<u32, JsValue> {
+    let doc = load(&file.to_vec())?;
+    Ok(doc.get_pages().len() as u32)
+}
+
+/// Renders `page` (1-indexed) of a PDF file to a PNG image, for use as a
+/// browser preview thumbnail. `scale` multiplies the page's native size (e.g.
+/// `1.5` for a sharper-than-1:1 preview). Expects already-decrypted bytes.
+#[wasm_bindgen]
+pub async fn render_page_preview(file: Uint8Array, page: u32, scale: f32) -> std::result::Result<Uint8Array, JsValue> {
+    let png = operations::preview::render_page_preview(&file.to_vec(), page, scale)?;
+    Ok(Uint8Array::from(png.as_slice()))
+}
+
 #[wasm_bindgen(start)]
 pub fn main() {
     utils::set_panic_hook();

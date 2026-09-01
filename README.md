@@ -2,12 +2,12 @@
 
 Motore di manipolazione PDF scritto in Rust, compilato in WebAssembly, pensato per essere consumato da un frontend JS/TS (in prospettiva una SPA Vue, in un repo separato). Ogni operazione è esposta come funzione `async` che ritorna una `Promise`, così il frontend può fare semplicemente `await pdfrs.merge_pdfs(...)`.
 
-Operazioni disponibili: **merge**, **split**, **rotazione pagine**, **composizione** (riordino/interleaving di pagine tra più documenti), **cifratura/decifratura** (AES-256).
+Operazioni disponibili: **merge**, **split**, **rotazione pagine**, **composizione** (riordino/interleaving di pagine tra più documenti), **cifratura/decifratura** (AES-256), **preview** (rendering di una pagina in PNG, per mostrare una thumbnail per pagina nel frontend).
 
 Documentazione completa in [`docs/`](docs/):
 
-- [`docs/architecture.md`](docs/architecture.md) — perché `lopdf`, struttura del progetto, scelte tecniche per wasm
-- [`docs/api.md`](docs/api.md) — le 6 funzioni esposte, firme ed esempi d'uso da JS/TS
+- [`docs/architecture.md`](docs/architecture.md) — perché `lopdf` e `hayro`, struttura del progetto, scelte tecniche per wasm
+- [`docs/api.md`](docs/api.md) — le funzioni esposte, firme ed esempi d'uso da JS/TS
 - [`docs/development.md`](docs/development.md) — come buildare, testare (Rust e frontend), e usare la pagina di test in `www/`
 
 ## Quick start

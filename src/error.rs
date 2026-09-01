@@ -14,6 +14,8 @@ pub enum PdfrsError {
     NoInput,
     #[error("failed to decode options: {0}")]
     Options(String),
+    #[error("failed to render preview: {0}")]
+    Preview(String),
 }
 
 impl From<PdfrsError> for JsValue {

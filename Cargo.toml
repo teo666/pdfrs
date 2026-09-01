@@ -35,6 +35,13 @@ rand = "0.10"
 # code size when deploying.
 console_error_panic_hook = { version = "0.1.7", optional = true }
 
+# Pure-Rust PDF rasterizer, used for the browser preview (renders a page to a
+# PNG so the frontend can display it without needing pdf.js or an external
+# pdfium.wasm binary). `embed-cmaps` (CJK CMaps, ~250KB) is dropped since we
+# don't need CJK support for previews; `simd` is a no-op on wasm32 targets so
+# it's dropped too, both to keep the wasm bundle smaller.
+hayro = { version = "0.7", default-features = false, features = ["embed-fonts"] }
+
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"
 

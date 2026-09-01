@@ -3,10 +3,12 @@ import init, {
   decrypt_pdf,
   encrypt_pdf,
   merge_pdfs,
+  page_count,
+  render_page_preview,
   rotate_pages,
   split_pdf,
 } from "pdfrs";
-import { downloadBytes, fileToUint8Array, setupFileInput } from "./pdf-io";
+import { bytesToObjectUrl, downloadBytes, fileToUint8Array, setupFileInput } from "./pdf-io";
 import { parseLayout, parseRanges, parseRotations } from "./parsers";
 
 await init();
@@ -76,6 +78,45 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
   });
 
   return { getFile: () => file };
+}
+
+// --- Preview: drop a PDF, render one thumbnail card per page ---
+{
+  const status = byId<HTMLElement>("preview-status");
+  const grid = byId<HTMLElement>("preview-grid");
+  const drop = byId<HTMLElement>("preview-drop");
+  const input = byId<HTMLInputElement>("preview-input");
+
+  setupFileInput(drop, input, (files) => {
+    const file = files[0];
+    if (!file) return;
+
+    void runWithStatus(status, async () => {
+      grid.innerHTML = "";
+
+      const bytes = await fileToUint8Array(file);
+      const count = await page_count(bytes);
+
+      for (let page = 1; page <= count; page++) {
+        const png = await render_page_preview(bytes, page, 0.4);
+
+        const card = document.createElement("div");
+        card.className = "preview-card";
+
+        const img = document.createElement("img");
+        img.src = bytesToObjectUrl(png, "image/png");
+        img.alt = `Pagina ${page}`;
+
+        const label = document.createElement("span");
+        label.textContent = `Pagina ${page}`;
+
+        card.append(img, label);
+        grid.appendChild(card);
+      }
+
+      setStatus(status, `Fatto: ${count} pagine renderizzate`, "ok");
+    });
+  });
 }
 
 // --- Merge ---

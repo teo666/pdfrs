@@ -60,6 +60,11 @@ async function main() {
     return (await page.textContent(selector)).trim();
   }
 
+  // --- Preview: drop two_pages.pdf, expect one thumbnail card per page ---
+  await page.setInputFiles("#preview-input", [path.join(fixtures, "two_pages.pdf")]);
+  const previewStatus = await waitForSettledStatus("#preview-status");
+  const previewCardCount = await page.locator("#preview-grid .preview-card").count();
+
   // --- Merge: two_pages.pdf + one_page.pdf -> expect a download ---
   await page.setInputFiles("#merge-input", [
     path.join(fixtures, "two_pages.pdf"),
@@ -118,6 +123,8 @@ async function main() {
   await browser.close();
 
   const results = {
+    "preview status succeeds": previewStatus.startsWith("Fatto"),
+    "preview renders one card per page": previewCardCount === 2,
     "merge downloads merged.pdf": mergeDownload.suggestedFilename() === "merged.pdf",
     "merge status succeeds": mergeStatus.startsWith("Fatto"),
     "split downloads 2 files": splitDownloads.length === 2,

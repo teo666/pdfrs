@@ -7,6 +7,7 @@ Prima di chiamarle va inizializzato il modulo wasm una sola volta:
 ```ts
 import init, {
   merge_pdfs, split_pdf, rotate_pages, compose_pdf, encrypt_pdf, decrypt_pdf,
+  page_count, render_page_preview,
 } from "pdfrs";
 
 await init();
@@ -68,6 +69,27 @@ Decifra un PDF usando la password owner o user. Se il file non è cifrato, la fu
 const decrypted = await decrypt_pdf(encryptedBytes, "user-secret");
 ```
 
+## `page_count(file: Uint8Array): Promise<number>`
+
+Ritorna il numero di pagine di un PDF. Utile per sapere quante anteprime richiedere a `render_page_preview`.
+
+```ts
+const count = await page_count(bytes);
+```
+
+## `render_page_preview(file: Uint8Array, page: number, scale: number): Promise<Uint8Array>`
+
+Renderizza `page` (1-indicizzata) in un'immagine PNG, per una preview/thumbnail nel frontend. `scale` moltiplica la dimensione nativa della pagina (es. `0.4` per una miniatura piccola, `1.5` per una preview più nitida). Si aspetta byte **già decriptati** — per un PDF cifrato, passa prima l'output di `decrypt_pdf`.
+
+```ts
+const count = await page_count(bytes);
+for (let page = 1; page <= count; page++) {
+  const png = await render_page_preview(bytes, page, 0.4);
+  const url = URL.createObjectURL(new Blob([png], { type: "image/png" }));
+  // usa `url` come src di un <img> per mostrare la card della pagina
+}
+```
+
 ## Gestione errori
 
 Ogni funzione rigetta la Promise invece di lanciare un'eccezione non gestita o mandare in panic il modulo wasm. Esempio:
@@ -80,4 +102,4 @@ try {
 }
 ```
 
-Vedi anche [`../www/src/main.ts`](../www/src/main.ts) per un esempio completo di integrazione di tutte e 6 le funzioni in una pagina reale.
+Vedi anche [`../www/src/main.ts`](../www/src/main.ts) per un esempio completo di integrazione di tutte le funzioni in una pagina reale.

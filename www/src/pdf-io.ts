@@ -12,6 +12,11 @@ export function downloadBytes(bytes: Uint8Array, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
+/** Wraps bytes in a Blob and returns an object URL (e.g. for an `<img src>`), unlike `downloadBytes` which forces a save. */
+export function bytesToObjectUrl(bytes: Uint8Array, mimeType: string): string {
+  return URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: mimeType }));
+}
+
 function isPdf(file: File): boolean {
   return file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
 }

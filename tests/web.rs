@@ -38,7 +38,9 @@ fn js_array(items: Vec<JsValue>) -> JsValue {
     arr.into()
 }
 
-fn page_count(pdf_bytes: &Uint8Array) -> u32 {
+/// Independent page count via `lopdf`, to check `pdfrs::page_count` and the
+/// output of other operations against - not the function under test.
+fn expected_page_count(pdf_bytes: &Uint8Array) -> u32 {
     let doc = lopdf::Document::load_mem(&pdf_bytes.to_vec()).expect("saved PDF should be loadable");
     doc.get_pages().len() as u32
 }
@@ -49,7 +51,7 @@ async fn merge_concatenates_pages_in_order() {
         .await
         .expect("merge should succeed");
 
-    assert_eq!(page_count(&merged), 3);
+    assert_eq!(expected_page_count(&merged), 3);
 }
 
 #[wasm_bindgen_test]
@@ -63,8 +65,8 @@ async fn split_produces_one_document_per_range() {
     assert_eq!(parts.length(), 2);
     let first: Uint8Array = parts.get(0).into();
     let second: Uint8Array = parts.get(1).into();
-    assert_eq!(page_count(&first), 2);
-    assert_eq!(page_count(&second), 2);
+    assert_eq!(expected_page_count(&first), 2);
+    assert_eq!(expected_page_count(&second), 2);
 }
 
 #[wasm_bindgen_test]
@@ -93,7 +95,7 @@ async fn compose_reorders_pages_across_sources() {
         .await
         .expect("compose should succeed");
 
-    assert_eq!(page_count(&composed), 3);
+    assert_eq!(expected_page_count(&composed), 3);
 }
 
 #[wasm_bindgen_test]
@@ -106,7 +108,7 @@ async fn encrypt_then_decrypt_round_trips() {
         .await
         .expect("decrypt should succeed");
 
-    assert_eq!(page_count(&decrypted), 1);
+    assert_eq!(expected_page_count(&decrypted), 1);
 }
 
 #[wasm_bindgen_test]
@@ -116,5 +118,27 @@ async fn decrypt_rejects_wrong_password() {
         .expect("encrypt should succeed");
 
     let result = pdfrs::decrypt_pdf(encrypted, "wrong-password".to_string()).await;
+    assert!(result.is_err());
+}
+
+#[wasm_bindgen_test]
+async fn page_count_matches_the_document() {
+    let count = pdfrs::page_count(bytes(TWO_PAGES)).await.expect("page_count should succeed");
+    assert_eq!(count, 2);
+}
+
+#[wasm_bindgen_test]
+async fn render_page_preview_produces_a_png() {
+    let png = pdfrs::render_page_preview(bytes(TWO_PAGES), 1, 1.0)
+        .await
+        .expect("render_page_preview should succeed");
+
+    let png = png.to_vec();
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "output should start with the PNG magic bytes");
+}
+
+#[wasm_bindgen_test]
+async fn render_page_preview_rejects_out_of_bounds_page() {
+    let result = pdfrs::render_page_preview(bytes(ONE_PAGE), 5, 1.0).await;
     assert!(result.is_err());
 }

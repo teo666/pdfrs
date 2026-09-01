@@ -2,7 +2,7 @@
 
 ## Panoramica
 
-`pdfrs` è una crate Rust compilata in WebAssembly (`wasm32-unknown-unknown`, target `web` di `wasm-bindgen`/`wasm-pack`) che espone operazioni di manipolazione PDF come funzioni `async` chiamabili da JavaScript/TypeScript. Non c'è rendering/rasterizzazione delle pagine: quella parte è delegata al frontend (es. `pdf.js`), perché rasterizzare PDF in Rust/wasm richiederebbe librerie pure-Rust ancora immature oppure `pdfium-render` con un binario `pdfium.wasm` costruito con Emscripten a parte (due moduli wasm distinti, gestione memoria separata) — complessità sproporzionata per questo progetto.
+`pdfrs` è una crate Rust compilata in WebAssembly (`wasm32-unknown-unknown`, target `web` di `wasm-bindgen`/`wasm-pack`) che espone operazioni di manipolazione PDF come funzioni `async` chiamabili da JavaScript/TypeScript, incluso il rendering di una pagina in PNG per le preview (vedi sezione `hayro` sotto).
 
 ## Libreria PDF: `lopdf`
 
@@ -20,6 +20,16 @@ lopdf = { version = "0.44", default-features = false, features = ["wasm_js"] }
 - `default-features = false` disattiva `rayon` (thread pool nativo, non disponibile su `wasm32-unknown-unknown` senza plumbing aggiuntivo) e `chrono-clock` (legge il fuso orario di sistema, non significativo in una sandbox wasm).
 - `wasm_js` seleziona il backend `wasm_js` di `getrandom`, necessario dalla 0.36 di `lopdf` in poi per compilare su `wasm32-unknown-unknown` (usato per la generazione di chiavi in fase di cifratura).
 
+## Rendering delle preview: `hayro`
+
+Per la preview delle pagine (una card/immagine per pagina nel frontend) si usa **`hayro`**, un interprete/rasterizzatore PDF pure Rust ([laurenzv/hayro](https://github.com/laurenzv/hayro)):
+
+- **Pure Rust**, nessun binario esterno da costruire con Emscripten (a differenza di `pdfium-render`, che richiederebbe un secondo modulo wasm `pdfium.wasm` separato, con gestione memoria indipendente — complessità valutata e scartata). `hayro` compila con lo stesso `wasm-pack build` del resto della crate.
+- In `Cargo.toml`: `hayro = { version = "0.7", default-features = false, features = ["embed-fonts"] }`. `embed-fonts` incorpora i font standard (necessari per renderizzare testo con font non incorporati nel PDF, es. Courier/Helvetica); `embed-cmaps` (supporto CJK) e `simd` (no-op su wasm32) sono disattivati per contenere la dimensione del bundle.
+- **Compromesso principale: dimensione del bundle.** Aggiungere `hayro` porta il `.wasm` da ~650 KB a **~4.3 MB** — è il costo di un motore di rendering PDF completo in Rust puro (font shaping, color management, decoder immagine), non riducibile granché via feature flag (la maggior parte della dimensione viene da `vello_cpu`/`skrifa`/`moxcms`, non dai font embedded).
+- **Limiti noti**: progetto dichiaratamente "sperimentale"; non gestisce direttamente PDF cifrati (per questo `render_page_preview` si aspetta byte già decriptati, coerente col resto della pipeline che decripta separatamente con `operations::crypto::load_decrypted`).
+- Verificato concretamente in Chromium reale (non solo `cargo check`): stesso output PNG del rendering nativo, nessun errore console.
+
 ## Struttura della crate
 
 ```
@@ -33,6 +43,7 @@ src/
     rotate.rs          # rotate_pages
     compose.rs         # riordino/interleaving di pagine tra documenti diversi
     crypto.rs          # encrypt_pdf / decrypt_pdf
+    preview.rs         # render_page_preview (rendering pagina -> PNG, via hayro)
 ```
 
 Ogni modulo in `operations/` contiene funzioni Rust pure (`fn merge(docs: Vec<Document>) -> Result<Document, PdfrsError>`, ecc.), testabili con `cargo test` senza bisogno di una build wasm. `src/lib.rs` fa da adattatore verso JS: decodifica `Uint8Array`/`JsValue`, chiama la funzione pura corrispondente, e ri-serializza il risultato.
