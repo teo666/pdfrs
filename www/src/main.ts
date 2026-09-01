@@ -1,0 +1,202 @@
+import init, {
+  compose_pdf,
+  decrypt_pdf,
+  encrypt_pdf,
+  merge_pdfs,
+  rotate_pages,
+  split_pdf,
+} from "pdfrs";
+import { downloadBytes, fileToUint8Array, setupFileInput } from "./pdf-io";
+import { parseLayout, parseRanges, parseRotations } from "./parsers";
+
+await init();
+
+function byId<T extends HTMLElement>(id: string): T {
+  const el = document.getElementById(id);
+  if (!el) throw new Error(`Elemento #${id} non trovato`);
+  return el as T;
+}
+
+function setStatus(el: HTMLElement, message: string, kind: "ok" | "error" | "" = "") {
+  el.textContent = message;
+  el.className = `status ${kind ? `status--${kind}` : ""}`.trim();
+}
+
+async function runWithStatus(statusEl: HTMLElement, action: () => Promise<void>) {
+  setStatus(statusEl, "In corso…");
+  try {
+    await action();
+  } catch (err) {
+    setStatus(statusEl, `Errore: ${err instanceof Error ? err.message : String(err)}`, "error");
+  }
+}
+
+/** Wires a multi-file panel (merge/compose): dropzone + input accumulate files, shown as an indexed list. */
+function setupMultiFilePanel(prefix: string): { getFiles: () => File[] } {
+  const drop = byId<HTMLElement>(`${prefix}-drop`);
+  const input = byId<HTMLInputElement>(`${prefix}-input`);
+  const list = byId<HTMLUListElement>(`${prefix}-filelist`);
+  const clearBtn = byId<HTMLButtonElement>(`${prefix}-clear`);
+
+  let files: File[] = [];
+
+  function render() {
+    list.innerHTML = "";
+    files.forEach((file, index) => {
+      const li = document.createElement("li");
+      li.textContent = `[${index}] ${file.name}`;
+      list.appendChild(li);
+    });
+  }
+
+  setupFileInput(drop, input, (dropped) => {
+    files = [...files, ...dropped];
+    render();
+  });
+
+  clearBtn.addEventListener("click", () => {
+    files = [];
+    render();
+  });
+
+  return { getFiles: () => files };
+}
+
+/** Wires a single-file panel: dropzone + input keep only the latest file. */
+function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
+  const drop = byId<HTMLElement>(`${prefix}-drop`);
+  const input = byId<HTMLInputElement>(`${prefix}-input`);
+  const filenameEl = byId<HTMLElement>(`${prefix}-filename`);
+
+  let file: File | null = null;
+
+  setupFileInput(drop, input, (dropped) => {
+    file = dropped[0] ?? null;
+    filenameEl.textContent = file ? file.name : "Nessun file selezionato";
+  });
+
+  return { getFile: () => file };
+}
+
+// --- Merge ---
+{
+  const status = byId<HTMLElement>("merge-status");
+  const { getFiles } = setupMultiFilePanel("merge");
+
+  byId<HTMLButtonElement>("merge-run").addEventListener("click", () =>
+    runWithStatus(status, async () => {
+      const files = getFiles();
+      if (files.length === 0) throw new Error("aggiungi almeno un PDF");
+
+      const buffers = await Promise.all(files.map(fileToUint8Array));
+      const merged = await merge_pdfs(buffers);
+      downloadBytes(merged, "merged.pdf");
+      setStatus(status, `Fatto: ${files.length} file uniti in merged.pdf`, "ok");
+    }),
+  );
+}
+
+// --- Split ---
+{
+  const status = byId<HTMLElement>("split-status");
+  const { getFile } = setupSingleFilePanel("split");
+  const rangesInput = byId<HTMLInputElement>("split-ranges");
+
+  byId<HTMLButtonElement>("split-run").addEventListener("click", () =>
+    runWithStatus(status, async () => {
+      const file = getFile();
+      if (!file) throw new Error("seleziona un PDF");
+
+      const ranges = parseRanges(rangesInput.value);
+      if (ranges.length === 0) throw new Error("inserisci almeno un range, es. 1-2");
+
+      const bytes = await fileToUint8Array(file);
+      const parts = (await split_pdf(bytes, ranges)) as Uint8Array[];
+      parts.forEach((part, index) => downloadBytes(part, `split-${index + 1}.pdf`));
+      setStatus(status, `Fatto: ${parts.length} file generati`, "ok");
+    }),
+  );
+}
+
+// --- Rotate ---
+{
+  const status = byId<HTMLElement>("rotate-status");
+  const { getFile } = setupSingleFilePanel("rotate");
+  const rotationsInput = byId<HTMLInputElement>("rotate-rotations");
+
+  byId<HTMLButtonElement>("rotate-run").addEventListener("click", () =>
+    runWithStatus(status, async () => {
+      const file = getFile();
+      if (!file) throw new Error("seleziona un PDF");
+
+      const rotations = parseRotations(rotationsInput.value);
+      if (rotations.length === 0) throw new Error("inserisci almeno una rotazione, es. 1:90");
+
+      const bytes = await fileToUint8Array(file);
+      const rotated = await rotate_pages(bytes, rotations);
+      downloadBytes(rotated, "rotated.pdf");
+      setStatus(status, "Fatto: rotated.pdf", "ok");
+    }),
+  );
+}
+
+// --- Compose ---
+{
+  const status = byId<HTMLElement>("compose-status");
+  const { getFiles } = setupMultiFilePanel("compose");
+  const layoutInput = byId<HTMLInputElement>("compose-layout");
+
+  byId<HTMLButtonElement>("compose-run").addEventListener("click", () =>
+    runWithStatus(status, async () => {
+      const files = getFiles();
+      if (files.length === 0) throw new Error("aggiungi almeno un PDF sorgente");
+
+      const layout = parseLayout(layoutInput.value);
+      if (layout.length === 0) throw new Error("inserisci almeno una voce di layout, es. 0:1");
+
+      const buffers = await Promise.all(files.map(fileToUint8Array));
+      const composed = await compose_pdf(buffers, layout);
+      downloadBytes(composed, "composed.pdf");
+      setStatus(status, "Fatto: composed.pdf", "ok");
+    }),
+  );
+}
+
+// --- Encrypt ---
+{
+  const status = byId<HTMLElement>("encrypt-status");
+  const { getFile } = setupSingleFilePanel("encrypt");
+  const ownerInput = byId<HTMLInputElement>("encrypt-owner");
+  const userInput = byId<HTMLInputElement>("encrypt-user");
+
+  byId<HTMLButtonElement>("encrypt-run").addEventListener("click", () =>
+    runWithStatus(status, async () => {
+      const file = getFile();
+      if (!file) throw new Error("seleziona un PDF");
+
+      const bytes = await fileToUint8Array(file);
+      const encrypted = await encrypt_pdf(bytes, ownerInput.value, userInput.value);
+      downloadBytes(encrypted, "encrypted.pdf");
+      setStatus(status, "Fatto: encrypted.pdf", "ok");
+    }),
+  );
+}
+
+// --- Decrypt ---
+{
+  const status = byId<HTMLElement>("decrypt-status");
+  const { getFile } = setupSingleFilePanel("decrypt");
+  const passwordInput = byId<HTMLInputElement>("decrypt-password");
+
+  byId<HTMLButtonElement>("decrypt-run").addEventListener("click", () =>
+    runWithStatus(status, async () => {
+      const file = getFile();
+      if (!file) throw new Error("seleziona un PDF");
+
+      const bytes = await fileToUint8Array(file);
+      const decrypted = await decrypt_pdf(bytes, passwordInput.value);
+      downloadBytes(decrypted, "decrypted.pdf");
+      setStatus(status, "Fatto: decrypted.pdf", "ok");
+    }),
+  );
+}

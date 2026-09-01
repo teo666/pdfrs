@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pdfrs — test API wasm</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, sans-serif;
+      }
+      body {
+        max-width: 960px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+      }
+      h1 {
+        font-size: 1.4rem;
+      }
+      .panel {
+        border: 1px solid #8884;
+        border-radius: 8px;
+        padding: 1rem;
+        margin-bottom: 1.5rem;
+      }
+      .panel h2 {
+        margin-top: 0;
+        font-size: 1.1rem;
+      }
+      .dropzone {
+        border: 2px dashed #8888;
+        border-radius: 6px;
+        padding: 1.5rem;
+        text-align: center;
+        cursor: pointer;
+        color: #666;
+      }
+      .dropzone--active {
+        border-color: #3b82f6;
+        color: #3b82f6;
+        background: #3b82f611;
+      }
+      .filelist {
+        list-style: none;
+        padding: 0;
+        margin: 0.75rem 0;
+      }
+      .filelist li {
+        padding: 0.15rem 0;
+        font-size: 0.9rem;
+      }
+      .row {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        margin: 0.5rem 0;
+        flex-wrap: wrap;
+      }
+      .row label {
+        font-size: 0.85rem;
+        min-width: 6rem;
+      }
+      input[type="text"],
+      input[type="password"] {
+        flex: 1;
+        padding: 0.35rem;
+        min-width: 12rem;
+      }
+      button {
+        padding: 0.4rem 0.9rem;
+        cursor: pointer;
+      }
+      .status {
+        margin-top: 0.5rem;
+        font-size: 0.9rem;
+        white-space: pre-wrap;
+      }
+      .status--error {
+        color: #dc2626;
+      }
+      .status--ok {
+        color: #16a34a;
+      }
+      .hint {
+        font-size: 0.8rem;
+        color: #888;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>pdfrs — banco di prova delle API wasm</h1>
+    <p class="hint">
+      Ogni pannello chiama direttamente la funzione wasm corrispondente e scarica il PDF risultante. Usa i PDF in
+      <code>tests/fixtures/</code> per provare rapidamente.
+    </p>
+
+    <section class="panel" id="panel-merge">
+      <h2>Merge</h2>
+      <div class="dropzone" id="merge-drop">Trascina uno o più PDF qui, o clicca per scegliere</div>
+      <input type="file" id="merge-input" accept="application/pdf" multiple hidden />
+      <ul class="filelist" id="merge-filelist"></ul>
+      <div class="row">
+        <button id="merge-clear" type="button">Svuota lista</button>
+        <button id="merge-run" type="button">Esegui merge</button>
+      </div>
+      <div class="status" id="merge-status"></div>
+    </section>
+
+    <section class="panel" id="panel-split">
+      <h2>Split</h2>
+      <div class="dropzone" id="split-drop">Trascina un PDF qui, o clicca per scegliere</div>
+      <input type="file" id="split-input" accept="application/pdf" hidden />
+      <div class="hint" id="split-filename">Nessun file selezionato</div>
+      <div class="row">
+        <label for="split-ranges">Range pagine</label>
+        <input type="text" id="split-ranges" placeholder="es. 1-2,3-4" />
+      </div>
+      <button id="split-run" type="button">Esegui split</button>
+      <div class="status" id="split-status"></div>
+    </section>
+
+    <section class="panel" id="panel-rotate">
+      <h2>Rotate</h2>
+      <div class="dropzone" id="rotate-drop">Trascina un PDF qui, o clicca per scegliere</div>
+      <input type="file" id="rotate-input" accept="application/pdf" hidden />
+      <div class="hint" id="rotate-filename">Nessun file selezionato</div>
+      <div class="row">
+        <label for="rotate-rotations">Rotazioni</label>
+        <input type="text" id="rotate-rotations" placeholder="es. 1:90,2:180" />
+      </div>
+      <button id="rotate-run" type="button">Esegui rotate</button>
+      <div class="status" id="rotate-status"></div>
+    </section>
+
+    <section class="panel" id="panel-compose">
+      <h2>Compose</h2>
+      <div class="dropzone" id="compose-drop">Trascina i PDF sorgente qui, o clicca per scegliere</div>
+      <input type="file" id="compose-input" accept="application/pdf" multiple hidden />
+      <ul class="filelist" id="compose-filelist"></ul>
+      <div class="row">
+        <label for="compose-layout">Layout</label>
+        <input type="text" id="compose-layout" placeholder="sorgente:pagina, es. 0:1,1:1,0:2" />
+      </div>
+      <div class="row">
+        <button id="compose-clear" type="button">Svuota lista</button>
+        <button id="compose-run" type="button">Esegui compose</button>
+      </div>
+      <div class="status" id="compose-status"></div>
+    </section>
+
+    <section class="panel" id="panel-encrypt">
+      <h2>Encrypt</h2>
+      <div class="dropzone" id="encrypt-drop">Trascina un PDF qui, o clicca per scegliere</div>
+      <input type="file" id="encrypt-input" accept="application/pdf" hidden />
+      <div class="hint" id="encrypt-filename">Nessun file selezionato</div>
+      <div class="row">
+        <label for="encrypt-owner">Owner password</label>
+        <input type="password" id="encrypt-owner" />
+      </div>
+      <div class="row">
+        <label for="encrypt-user">User password</label>
+        <input type="password" id="encrypt-user" />
+      </div>
+      <button id="encrypt-run" type="button">Esegui encrypt</button>
+      <div class="status" id="encrypt-status"></div>
+    </section>
+
+    <section class="panel" id="panel-decrypt">
+      <h2>Decrypt</h2>
+      <div class="dropzone" id="decrypt-drop">Trascina un PDF qui, o clicca per scegliere</div>
+      <input type="file" id="decrypt-input" accept="application/pdf" hidden />
+      <div class="hint" id="decrypt-filename">Nessun file selezionato</div>
+      <div class="row">
+        <label for="decrypt-password">Password</label>
+        <input type="password" id="decrypt-password" />
+      </div>
+      <button id="decrypt-run" type="button">Esegui decrypt</button>
+      <div class="status" id="decrypt-status"></div>
+    </section>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

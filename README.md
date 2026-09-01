@@ -1,78 +1,42 @@
-<div align="center">
+# pdfrs
 
-  <h1><code>wasm-pack-template</code></h1>
+Motore di manipolazione PDF scritto in Rust, compilato in WebAssembly, pensato per essere consumato da un frontend JS/TS (in prospettiva una SPA Vue, in un repo separato). Ogni operazione è esposta come funzione `async` che ritorna una `Promise`, così il frontend può fare semplicemente `await pdfrs.merge_pdfs(...)`.
 
-  <strong>A template for kick starting a Rust and WebAssembly project using <a href="https://github.com/rustwasm/wasm-pack">wasm-pack</a>.</strong>
+Operazioni disponibili: **merge**, **split**, **rotazione pagine**, **composizione** (riordino/interleaving di pagine tra più documenti), **cifratura/decifratura** (AES-256).
 
-  <h3>
-    <a href="https://rustwasm.github.io/docs/wasm-pack/tutorials/npm-browser-packages/index.html">Tutorial</a>
-    <span> | </span>
-    <a href="https://discordapp.com/channels/442252698964721669/443151097398296587">Chat</a>
-  </h3>
+Documentazione completa in [`docs/`](docs/):
 
-  <sub>Built with Rust and WebAssembly by <a href="https://rustwasm.github.io/">The Rust and WebAssembly Working Group</a></sub>
-</div>
+- [`docs/architecture.md`](docs/architecture.md) — perché `lopdf`, struttura del progetto, scelte tecniche per wasm
+- [`docs/api.md`](docs/api.md) — le 6 funzioni esposte, firme ed esempi d'uso da JS/TS
+- [`docs/development.md`](docs/development.md) — come buildare, testare (Rust e frontend), e usare la pagina di test in `www/`
 
-## About
+## Quick start
 
-[Read this template tutorial][template-docs].
-
-This template is designed for compiling Rust libraries into WebAssembly and
-publishing the resulting package to NPM.
-
-Be sure to check out [other `wasm-pack` tutorials online][tutorials] for other
-templates and usages of `wasm-pack`.
-
-[tutorials]: https://rustwasm.github.io/docs/wasm-pack/tutorials/index.html
-[template-docs]: https://rustwasm.github.io/docs/wasm-pack/tutorials/npm-browser-packages/index.html
-
-## Usage
-
-### Use `wasm-pack new` to Clone this Template
-
-```
-wasm-pack new my-project
-cd my-project
-```
-
-### Build with `wasm-pack build`
-
-```
+```bash
+# build il modulo wasm (output in pkg/)
 wasm-pack build --target web
+
+# test Rust nativi (funzioni pure, senza wasm)
+cargo test
+
+# pagina di test TypeScript per provare le API a mano nel browser
+cd www
+pnpm install
+pnpm dev          # http://localhost:5173
+pnpm test:e2e     # smoke test end-to-end automatico (Playwright)
 ```
 
-### Test in Headless Browsers with `wasm-pack test`
+## Struttura del repository
 
 ```
-wasm-pack test --headless --firefox
+src/            # crate Rust: bindings wasm_bindgen (src/lib.rs) + logica pura (src/operations/)
+tests/          # test wasm-bindgen-test + fixture PDF condivise
+examples/       # gen_fixtures.rs rigenera i PDF di test in tests/fixtures/
+pkg/            # output di `wasm-pack build` (generato, non versionato)
+www/            # pagina di test TypeScript puro per le API esposte (vedi docs/development.md)
+docs/           # documentazione del progetto
 ```
 
-### Publish to NPM with `wasm-pack publish`
+## Licenza
 
-```
-wasm-pack publish
-```
-
-## Batteries Included
-
-* [`wasm-bindgen`](https://github.com/rustwasm/wasm-bindgen) for communicating
-  between WebAssembly and JavaScript.
-* [`console_error_panic_hook`](https://github.com/rustwasm/console_error_panic_hook)
-  for logging panic messages to the developer console.
-* `LICENSE-APACHE` and `LICENSE-MIT`: most Rust projects are licensed this way, so these are included for you.
-
-## License
-
-Licensed under either of
-
-* Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-* MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
-
-### Contribution
-
-Unless you explicitly state otherwise, any contribution intentionally
-submitted for inclusion in the work by you, as defined in the Apache-2.0
-license, shall be dual licensed as above, without any additional terms or
-conditions.
+Doppia licenza, a scelta: [MIT](LICENSE-MIT) o [Apache 2.0](LICENSE-APACHE).
