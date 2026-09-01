@@ -49,7 +49,40 @@ Per questo `www/src/main.ts` non importa mai `"pdfrs"` direttamente. La catena �
 
 **Prova visibile che funziona**: in cima alla pagina c'è un contatore ("UI thread libero — tick: N") che incrementa a ogni `requestAnimationFrame`. Se il thread principale fosse bloccato da una chiamata wasm, si fermerebbe; nello smoke test (`www/e2e/smoke.mjs`) questo è verificato esplicitamente confrontando il valore del contatore prima e dopo un'operazione.
 
-**Trabocchetto da evitare — `Transferable` e buffer riusati**: i *risultati* dal worker verso il thread principale vengono trasferiti (`postMessage(response, { transfer: [...] })`, in `pdfrs.worker.ts`) invece di essere copiati, perché ogni risultato è generato una volta sola e usato una volta sola. Le *richieste* dal thread principale verso il worker invece **non** vengono trasferite (solo clonate): il pannello Preview, ad esempio, riusa lo stesso `Uint8Array` per `page_count` e poi per una `render_page_preview` per pagina — trasferire il buffer alla prima chiamata lo "svuoterebbe" (`detached`), rompendo tutte le chiamate successive con lo stesso file. Se in futuro serve ottimizzare il trasferimento delle richieste per PDF molto grandi, va fatto clonando il buffer lato chiamante prima di trasferirlo, non trasferendo l'originale.
+### Trabocchetto da evitare — `Transferable` e buffer riusati
+
+Per default `postMessage(dato)` fa una **structured clone**: copia il dato (ricorsivamente) e manda la copia all'altro thread. Va benissimo per un `Uint8Array` di poche decine di KB come i nostri PDF di test, ma per un file grande vorresti evitare di duplicarlo in memoria solo per passarlo da un thread all'altro. Per questo `postMessage` accetta un secondo argomento:
+
+```ts
+worker.postMessage(messaggio, { transfer: [buffer] });
+```
+
+Invece di copiare, il motore **sposta la proprietà** del buffer da un thread all'altro — zero-copy, istantaneo anche per file enormi. `ArrayBuffer`, `MessagePort` e `ImageBitmap` sono `Transferable`.
+
+Il prezzo: il trasferimento non è un prestito, è un trasloco. Una volta trasferito, il buffer **originale lato mittente diventa "detached"** — `byteLength` torna a 0, ogni tentativo di rileggerlo o ritrasferirlo fallisce, e non è recuperabile.
+
+**L'errore che abbiamo effettivamente preso** durante l'implementazione: la prima versione di `pdfrs-worker-client.ts` trasferiva sempre i buffer degli argomenti (`worker.postMessage(request, { transfer: collectTransferables(args) })`). Il pannello Preview riusa però lo stesso `Uint8Array` per più chiamate:
+
+```ts
+const bytes = await fileToUint8Array(file);
+const count = await page_count(bytes);                         // chiamata 1: usa bytes
+for (let page = 1; page <= count; page++) {
+  const png = await render_page_preview(bytes, page, 0.4);     // chiamate 2, 3, ...: riusano bytes
+}
+```
+
+Alla prima chiamata (`page_count`) il buffer veniva spostato nel worker e detachato lato main thread. Alla seconda (`render_page_preview`), `bytes` era ancora un `Uint8Array` "vivo" per TypeScript, ma il suo `.buffer` era già morto:
+
+```
+Failed to execute 'postMessage' on 'Worker': An ArrayBuffer is detached and could not be cloned.
+```
+
+**La regola pratica, applicata in questo progetto**: trasferisci solo ciò che non ti serve più dopo averlo mandato.
+
+- *Risultati* dal worker verso il thread principale: sicuro trasferirli (`pdfrs.worker.ts`, `self.postMessage(response, { transfer: collectTransferables(result) })`) — ogni risultato è generato una volta sola e usato una volta sola.
+- *Richieste* dal thread principale verso il worker: **non** vengono trasferite in questo progetto, solo clonate (`pdfrs-worker-client.ts`, `worker.postMessage(request)` senza `transfer`) — un chiamante potrebbe riusare lo stesso buffer per più operazioni, come fa Preview.
+
+Se in futuro serve ottimizzare per PDF di ingresso molto grandi, la via corretta **non** è tornare al transfer diretto degli argomenti, ma clonare il buffer lato chiamante prima di trasferirlo quando sai che ti servirà ancora (`bytes.slice()` crea una copia indipendente da passare in transfer, lasciando l'originale intatto) — così si guadagna la velocità dello zero-copy senza il rischio del detach a sorpresa.
 
 **Importante**: dopo ogni `wasm-pack build`, rilancia anche `pnpm install` dentro `www/`. A differenza di npm, **pnpm non fa un vero symlink live** per le dipendenze `file:` — ne clona un contenuto in `node_modules/.pnpm/` al momento dell'`install`, e quel contenuto non si aggiorna da solo quando `pkg/` cambia sul disco. Se te ne dimentichi, il frontend continua a chiamare funzioni vecchie/mancanti (es. `wasm.page_count is not a function`) o serializza opzioni in un formato che l'API attuale non si aspetta più, con errori che sembrano bug nel codice Rust ma sono solo un pacchetto stantio.
 
