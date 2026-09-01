@@ -1,0 +1,43 @@
+[package]
+name = "pdfrs"
+version = "0.1.0"
+authors = ["Teo Basili <teo.basili@movesolutions.it>"]
+edition = "2018"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["console_error_panic_hook"]
+
+[dependencies]
+wasm-bindgen = "0.2.84"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+thiserror = "2.0"
+
+# Pure-Rust PDF manipulation, no C/system dependencies, so it compiles cleanly
+# to wasm32-unknown-unknown. `default-features = false` drops `rayon` (native
+# thread pool, unavailable on wasm32-unknown-unknown without extra plumbing)
+# and `chrono-clock` (reads the system timezone, not meaningful in a wasm
+# sandbox). `wasm_js` selects getrandom's wasm_js backend, required since
+# lopdf 0.36 to build for wasm32-unknown-unknown (used for RNG in encryption).
+lopdf = { version = "0.44", default-features = false, features = ["wasm_js"] }
+# Must track the `rand` major version lopdf itself depends on, since we use
+# it directly to generate the AES-256 file encryption key (see operations::crypto).
+rand = "0.10"
+
+# The `console_error_panic_hook` crate provides better debugging of panics by
+# logging them with `console.error`. This is great for development, but requires
+# all the `std::fmt` and `std::panicking` infrastructure, so isn't great for
+# code size when deploying.
+console_error_panic_hook = { version = "0.1.7", optional = true }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3.34"
+
+[profile.release]
+# Tell `rustc` to optimize for small code size.
+opt-level = "s"
