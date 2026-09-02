@@ -7,7 +7,7 @@ Prima di chiamarle va inizializzato il modulo wasm una sola volta:
 ```ts
 import init, {
   merge_pdfs, split_pdf, rotate_pages, compose_pdf, encrypt_pdf, decrypt_pdf,
-  page_count, render_page_preview,
+  page_count, render_page_preview, image_to_pdf,
 } from "pdfrs";
 
 await init();
@@ -90,6 +90,30 @@ for (let page = 1; page <= count; page++) {
   const url = URL.createObjectURL(new Blob([png], { type: "image/png" }));
   // usa `url` come src di un <img> per mostrare la card della pagina
 }
+```
+
+## `image_to_pdf(file: Uint8Array, options): Promise<Uint8Array>`
+
+Converte un **JPEG** in un PDF di una pagina, così può essere unito/combinato con PDF veri usando `merge_pdfs`/`compose_pdf` senza altro codice — una volta convertita, per il resto dell'API è un PDF come un altro. Solo JPEG per ora (RGB o scala di grigi; i JPEG CMYK vengono rifiutati); i byte JPEG sono incorporati così come sono (`/Filter /DCTDecode`), senza ridecodificare i pixel.
+
+`options` (tutti i campi opzionali, `{}`/`undefined`/`null` vanno bene):
+
+```ts
+interface ImagePageOptions {
+  pageSize?: "native" | "a4" | "letter"; // "native" (default): la pagina è grande esattamente quanto l'immagine
+  orientation?: "portrait" | "landscape" | "auto"; // ignorato con "native"; "auto" (default) segue l'aspect ratio dell'immagine
+}
+```
+
+```ts
+// pagina grande quanto l'immagine stessa
+const imagePdf = await image_to_pdf(jpegBytes, {});
+
+// su una pagina A4, centrata e scalata per stare dentro i margini
+const onA4 = await image_to_pdf(jpegBytes, { pageSize: "a4" });
+
+// combinarla con un PDF vero è già tutto qui, nessuna API nuova
+const combined = await merge_pdfs([imagePdf, otherPdfBytes]);
 ```
 
 ## Gestione errori

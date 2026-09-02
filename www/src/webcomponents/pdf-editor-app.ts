@@ -1,4 +1,4 @@
-import { fileToUint8Array, setupFileInput } from "../pdf-io";
+import { fileToUint8Array, isJpeg, isPdf, setupFileInput } from "../pdf-io";
 import { PdfEditor } from "../pdf-model/PdfEditor";
 import type { DocumentId } from "../pdf-model/types";
 import type { PdfDocumentView } from "./pdf-document-view";
@@ -33,8 +33,8 @@ export class PdfEditorApp extends HTMLElement {
         .status { font-size: 0.85rem; color: #666; margin-bottom: 0.75rem; }
         .status--error { color: #dc2626; }
       </style>
-      <div class="dropzone" data-el="dropzone">Trascina uno o più PDF qui, o clicca per aprirli nell'editor</div>
-      <input type="file" accept="application/pdf" multiple hidden data-el="input" />
+      <div class="dropzone" data-el="dropzone">Trascina uno o più PDF o JPEG qui, o clicca per aprirli nell'editor</div>
+      <input type="file" accept="application/pdf,image/jpeg" multiple hidden data-el="input" />
       <ul class="doclist" data-el="doclist"></ul>
       <div class="merge-row">
         <button type="button" data-action="merge">Unisci i documenti selezionati</button>
@@ -45,7 +45,7 @@ export class PdfEditorApp extends HTMLElement {
 
     const dropzone = this.root.querySelector('[data-el="dropzone"]') as HTMLElement;
     const input = this.root.querySelector('[data-el="input"]') as HTMLInputElement;
-    setupFileInput(dropzone, input, (files) => void this.addFiles(files));
+    setupFileInput(dropzone, input, (files) => void this.addFiles(files), (file) => isPdf(file) || isJpeg(file));
 
     this.root.querySelector('[data-action="merge"]')?.addEventListener("click", () => void this.mergeSelected());
     this.root.addEventListener("document-committed", () => this.renderDocList());
@@ -61,7 +61,10 @@ export class PdfEditorApp extends HTMLElement {
     for (const file of files) {
       try {
         const bytes = await fileToUint8Array(file);
-        const id = await this.editor.addDocument(bytes);
+        // JPEGs go through addImage (image_to_pdf under the hood) instead of
+        // addDocument - from here on the resulting document is a PdfDocument
+        // like any other, mergeable with real PDFs with no extra handling.
+        const id = isJpeg(file) ? await this.editor.addImage(bytes) : await this.editor.addDocument(bytes);
         this.labels.set(id, file.name);
         if (this.activeId === null) this.activeId = id;
       } catch (err) {

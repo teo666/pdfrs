@@ -1,6 +1,6 @@
 import { merge_pdfs, split_pdf } from "../pdfrs-worker-client";
 import { PdfDocument } from "./PdfDocument";
-import type { DocumentId } from "./types";
+import type { DocumentId, ImagePageOptions } from "./types";
 
 /**
  * Manages a collection of `PdfDocument`s and the operations that span more
@@ -13,7 +13,15 @@ export class PdfEditor {
   private nextId = 1;
 
   async addDocument(bytes: Uint8Array): Promise<DocumentId> {
-    const doc = await PdfDocument.open(bytes);
+    return this.register(await PdfDocument.open(bytes));
+  }
+
+  /** Converts a JPEG to a one-page document and registers it - from here on it's just another managed document, mergeable with any other. */
+  async addImage(bytes: Uint8Array, options: ImagePageOptions = {}): Promise<DocumentId> {
+    return this.register(await PdfDocument.fromImage(bytes, options));
+  }
+
+  private register(doc: PdfDocument): DocumentId {
     const id = this.nextId++;
     this.documents.set(id, doc);
     return id;

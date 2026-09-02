@@ -42,6 +42,14 @@ console_error_panic_hook = { version = "0.1.7", optional = true }
 # it's dropped too, both to keep the wasm bundle smaller.
 hayro = { version = "0.7", default-features = false, features = ["embed-fonts"] }
 
+# Used only to read a JPEG's dimensions/color type (header parse, no full
+# pixel decode) and to encode JPEGs for the fixture generator - the JPEG
+# bytes themselves are embedded as-is into the PDF (see operations::image),
+# no re-encoding of real input images. `default-features = false` + `jpeg`
+# only pulls in the JPEG codec (zune-jpeg/jpeg-encoder, both pure Rust), not
+# the dozen other image formats `image` supports by default.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"
 

@@ -57,6 +57,7 @@ async function main() {
   const tenPagesBytes = await readFixture("ten_pages.pdf");
   const twoPagesBytes = await readFixture("two_pages.pdf");
   const onePageBytes = await readFixture("one_page.pdf");
+  const photoJpgBytes = await readFixture("photo.jpg");
 
   const results = {};
 
@@ -371,6 +372,52 @@ async function main() {
       editor.getDocument(partIds[1]).getPageCount() === 2
     );
   }, fourPagesBytes);
+
+  // --- PdfDocument.fromImage: native page size matches the JPEG's own pixel dimensions ---
+  results["PdfDocument.fromImage (native) matches the image's pixel size"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.fromImage(new Uint8Array(bytes));
+    if (doc.getPageCount() !== 1) return false;
+    const preview = await doc.getPreview(1, 1.0);
+    // At scale 1.0 the rendered PNG should be the same pixel size as the source JPEG (400x300, see gen_fixtures.rs).
+    const width = (preview.png[16] << 24) | (preview.png[17] << 16) | (preview.png[18] << 8) | preview.png[19];
+    const height = (preview.png[20] << 24) | (preview.png[21] << 16) | (preview.png[22] << 8) | preview.png[23];
+    return width === 400 && height === 300;
+  }, photoJpgBytes);
+
+  // --- PdfDocument.fromImage rejects non-JPEG input instead of producing a broken document ---
+  results["PdfDocument.fromImage rejects non-JPEG bytes"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    try {
+      await PdfDocument.fromImage(new Uint8Array(bytes));
+      return false;
+    } catch {
+      return true;
+    }
+  }, onePageBytes);
+
+  // --- The actual point of this feature: an image-derived document merges
+  // seamlessly with a real PDF document, through PdfEditor, same as any two
+  // PDFs would. ---
+  results["PdfEditor.addImage produces a document mergeable with a real PDF"] = await page.evaluate(
+    async ({ photoBytes, pdfBytes }) => {
+      const { PdfEditor } = window.__pdfModel;
+      const editor = new PdfEditor();
+      const imageId = await editor.addImage(new Uint8Array(photoBytes));
+      const pdfId = await editor.addDocument(new Uint8Array(pdfBytes));
+      if (editor.getDocument(imageId).getPageCount() !== 1) return false;
+
+      const mergedId = await editor.mergeDocuments([imageId, pdfId]);
+      const merged = editor.getDocument(mergedId);
+      if (merged.getPageCount() !== 2) return false;
+
+      // Rendering the merged document's first page (the image) proves the
+      // embedded JPEG survived merge_pdfs's Document::compress() call intact.
+      const preview = await merged.getPreview(1, 0.3);
+      return preview.png.length > 0;
+    },
+    { photoBytes: photoJpgBytes, pdfBytes: onePageBytes },
+  );
 
   results["no console/page errors"] = consoleErrors.length === 0;
 

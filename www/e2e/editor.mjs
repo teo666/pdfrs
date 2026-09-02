@@ -171,6 +171,53 @@ async function main() {
     return view.shadowRoot.querySelector("progress").hidden;
   });
 
+  // --- Image import: dropping a JPEG registers a one-page document, and it
+  // merges seamlessly with a real PDF (same UI path as merging two PDFs). ---
+  await page.locator("pdf-editor-app").locator('[data-el="input"]').setInputFiles([path.join(fixtures, "photo.jpg")]);
+  await page.waitForFunction(() => {
+    const app = document.querySelector("pdf-editor-app");
+    return app?.shadowRoot?.querySelectorAll('[data-el="doclist"] li').length === 5;
+  });
+  const imageDocPageCount = await page.evaluate(() => {
+    const app = document.querySelector("pdf-editor-app");
+    const items = Array.from(app.shadowRoot.querySelectorAll('[data-el="doclist"] li button'));
+    const photoButton = items.find((b) => b.textContent.includes("photo.jpg"));
+    return photoButton?.textContent ?? "";
+  });
+
+  await page.evaluate(() => {
+    const app = document.querySelector("pdf-editor-app");
+    const checkboxes = Array.from(app.shadowRoot.querySelectorAll('[data-el="doclist"] li'));
+    // Select the photo.jpg document and one PDF document (two_pages.pdf) to merge.
+    for (const li of checkboxes) {
+      const label = li.querySelector("button")?.textContent ?? "";
+      if (label.includes("photo.jpg") || label.includes("two_pages.pdf")) {
+        li.querySelector('input[type="checkbox"]').click();
+      }
+    }
+    app.shadowRoot.querySelector('[data-action="merge"]').click();
+  });
+  await page.waitForFunction(() => {
+    const status = document.querySelector("pdf-editor-app").shadowRoot.querySelector('[data-el="status"]');
+    return status?.textContent?.includes("uniti");
+  });
+  const afterImageMerge = await page.evaluate(() => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    return { heading: view.shadowRoot.querySelector("h3").textContent };
+  });
+  // Render the merged result's first page (the image) to prove the embedded
+  // JPEG survived mergeDocuments' compress() call, not just that the file is
+  // structurally valid.
+  await page.waitForFunction(() => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    return view.shadowRoot.querySelectorAll("pdf-page-card").length === 3;
+  });
+  const imagePreviewRendered = await page.evaluate(() => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    const cards = view.shadowRoot.querySelectorAll("pdf-page-card");
+    return cards[0].preview.png.length > 0;
+  });
+
   await page.screenshot({ path: path.join(dirname, "editor.png"), fullPage: true });
   await browser.close();
 
@@ -183,6 +230,9 @@ async function main() {
       afterMerge.docCount === 3 && afterMerge.heading.includes("5 pagine"),
     "progress bar becomes visible while rendering a bigger document": progressWasShown,
     "progress bar hides again once rendering completes": progressHiddenWhenDone,
+    "dropping a JPEG registers a one-page document": imageDocPageCount.includes("(1p)"),
+    "merging the image document with a PDF sums their page counts (1+2=3)": afterImageMerge.heading.includes("3 pagine"),
+    "the merged image page actually renders (JPEG survived compress())": imagePreviewRendered,
     "no console/page errors": consoleErrors.length === 0,
   };
 

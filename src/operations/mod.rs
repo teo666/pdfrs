@@ -1,5 +1,6 @@
 pub mod compose;
 pub mod crypto;
+pub mod image;
 pub mod merge;
 pub mod preview;
 pub mod rotate;

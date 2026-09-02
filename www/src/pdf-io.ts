@@ -17,22 +17,28 @@ export function bytesToObjectUrl(bytes: Uint8Array, mimeType: string): string {
   return URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: mimeType }));
 }
 
-function isPdf(file: File): boolean {
+export function isPdf(file: File): boolean {
   return file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+}
+
+export function isJpeg(file: File): boolean {
+  return file.type === "image/jpeg" || /\.jpe?g$/i.test(file.name);
 }
 
 /**
  * Wires both a `<input type="file">` and a drag & drop zone to the same
  * callback, so a panel doesn't need to handle the two input paths separately.
+ * `filter` defaults to PDF-only; pass a broader one (e.g. `f => isPdf(f) || isJpeg(f)`) for a panel that also accepts images.
  */
 export function setupFileInput(
   dropzone: HTMLElement,
   input: HTMLInputElement,
   onFiles: (files: File[]) => void,
+  filter: (file: File) => boolean = isPdf,
 ): void {
   const pickFiles = (list: FileList | null) => {
     if (!list) return;
-    const files = Array.from(list).filter(isPdf);
+    const files = Array.from(list).filter(filter);
     if (files.length > 0) onFiles(files);
   };
 

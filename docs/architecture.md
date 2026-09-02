@@ -30,6 +30,14 @@ Per la preview delle pagine (una card/immagine per pagina nel frontend) si usa *
 - **Limiti noti**: progetto dichiaratamente "sperimentale"; non gestisce direttamente PDF cifrati (per questo `render_page_preview` si aspetta byte già decriptati, coerente col resto della pipeline che decripta separatamente con `operations::crypto::load_decrypted`).
 - Verificato concretamente in Chromium reale (non solo `cargo check`): stesso output PNG del rendering nativo, nessun errore console.
 
+## Import di immagini raster: `image_to_pdf`
+
+`operations::image::image_to_pdf` converte un **JPEG** in un PDF di una pagina, in modo che possa essere combinato con PDF veri usando `merge_pdfs`/`compose_pdf` esistenti, senza nessuna logica di combinazione nuova — una volta convertita, è un PDF come un altro per il resto della pipeline.
+
+- **Nessuna ridecodifica dei pixel**: i byte JPEG vengono incorporati così come sono in uno `Stream` con `/Filter /DCTDecode` — si legge solo l'header (via il crate `image`, feature `jpeg` soltanto: `zune-jpeg`/`jpeg-encoder`, entrambi pure Rust) per ricavare dimensioni e spazio colore (`DeviceRGB`/`DeviceGray`; i JPEG CMYK vengono rifiutati esplicitamente, rari e con una insidia nota di inversione dati). Costo praticamente nullo in dimensione del bundle: `zune-jpeg` è già una dipendenza transitiva di `hayro`.
+- **Dimensioni pagina**: `PageSize::Native` (default) — la pagina è grande esattamente quanto l'immagine (1px = 1pt); `A4`/`Letter` — l'immagine viene centrata e scalata per stare dentro la pagina (`fitted_size`, un semplice "contain": nessun ritaglio, nessuna distorsione dell'aspect ratio). `Orientation::Auto` (default per A4/Letter) sceglie ritratto/paesaggio in base all'aspect ratio dell'immagine.
+- **Punto delicato — compressione doppia**: `merge_pdfs`/`compose_pdf`/`split_pdf` chiamano tutti `Document::compress()` alla fine. Uno stream già codificato `DCTDecode` **non va ricompresso con Flate sopra** — corromperebbe l'immagine. Lo stream dell'immagine viene creato con `allows_compression = false` (stesso accorgimento che lopdf raccomanda per gli stream dei font). Verificato concretamente: un test unisce un PDF-da-immagine con un PDF vero via `merge_pdfs` (che chiama `compress()`) e poi *renderizza* la pagina risultante con `render_page_preview` — se la compressione avesse corrotto il JPEG, `hayro` fallirebbe a decodificarlo, non solo a produrre un file strutturalmente valido.
+
 ## Struttura della crate
 
 ```
@@ -44,6 +52,7 @@ src/
     compose.rs         # riordino/interleaving di pagine tra documenti diversi
     crypto.rs          # encrypt_pdf / decrypt_pdf
     preview.rs         # render_page_preview (rendering pagina -> PNG, via hayro)
+    image.rs           # image_to_pdf (JPEG -> PDF di una pagina)
 ```
 
 Ogni modulo in `operations/` contiene funzioni Rust pure (`fn merge(docs: Vec<Document>) -> Result<Document, PdfrsError>`, ecc.), testabili con `cargo test` senza bisogno di una build wasm. `src/lib.rs` fa da adattatore verso JS: decodifica `Uint8Array`/`JsValue`, chiama la funzione pura corrispondente, e ri-serializza il risultato.

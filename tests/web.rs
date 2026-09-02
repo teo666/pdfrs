@@ -17,6 +17,7 @@ wasm_bindgen_test_configure!(run_in_browser);
 const ONE_PAGE: &[u8] = include_bytes!("fixtures/one_page.pdf");
 const TWO_PAGES: &[u8] = include_bytes!("fixtures/two_pages.pdf");
 const FOUR_PAGES: &[u8] = include_bytes!("fixtures/four_pages.pdf");
+const PHOTO_JPG: &[u8] = include_bytes!("fixtures/photo.jpg");
 
 fn bytes(data: &[u8]) -> Uint8Array {
     Uint8Array::from(data)
@@ -140,5 +141,46 @@ async fn render_page_preview_produces_a_png() {
 #[wasm_bindgen_test]
 async fn render_page_preview_rejects_out_of_bounds_page() {
     let result = pdfrs::render_page_preview(bytes(ONE_PAGE), 5, 1.0).await;
+    assert!(result.is_err());
+}
+
+#[wasm_bindgen_test]
+async fn image_to_pdf_produces_a_native_sized_one_page_pdf() {
+    let pdf = pdfrs::image_to_pdf(bytes(PHOTO_JPG), JsValue::UNDEFINED)
+        .await
+        .expect("image_to_pdf should succeed");
+
+    let doc = lopdf::Document::load_mem(&pdf.to_vec()).unwrap();
+    assert_eq!(doc.get_pages().len(), 1);
+    let (_, page_id) = doc.get_pages().into_iter().next().unwrap();
+    let media_box = doc.get_object(page_id).unwrap().as_dict().unwrap().get(b"MediaBox").unwrap().as_array().unwrap();
+    assert_eq!(media_box[2].as_float().unwrap() as u32, 400);
+    assert_eq!(media_box[3].as_float().unwrap() as u32, 300);
+}
+
+#[wasm_bindgen_test]
+async fn image_to_pdf_result_can_be_merged_and_previewed() {
+    // Exercises the full "use images and PDFs together" path this feature is
+    // for: convert an image to a one-page PDF, merge it with a real PDF, then
+    // render the merged result's first page - proving hayro can actually
+    // decode the embedded DCTDecode image (not just that the bytes are
+    // structurally a valid PDF), and that merge_pdfs's `compress()` call
+    // didn't corrupt the JPEG stream.
+    let image_pdf = pdfrs::image_to_pdf(bytes(PHOTO_JPG), JsValue::UNDEFINED)
+        .await
+        .expect("image_to_pdf should succeed");
+
+    let merged = pdfrs::merge_pdfs(vec![image_pdf, bytes(ONE_PAGE)]).await.expect("merge should succeed");
+    assert_eq!(expected_page_count(&merged), 2);
+
+    let png = pdfrs::render_page_preview(merged, 1, 1.0)
+        .await
+        .expect("rendering the merged image page should succeed");
+    assert_eq!(&png.to_vec()[..8], b"\x89PNG\r\n\x1a\n");
+}
+
+#[wasm_bindgen_test]
+async fn image_to_pdf_rejects_non_jpeg_input() {
+    let result = pdfrs::image_to_pdf(bytes(ONE_PAGE), JsValue::UNDEFINED).await;
     assert!(result.is_err());
 }

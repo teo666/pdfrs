@@ -57,6 +57,16 @@ fn multi_page_document(page_count: u32) -> Document {
     doc
 }
 
+/// A small RGB JPEG (a gradient, not a real photo - fine for testing image import).
+fn sample_jpeg(width: u32, height: u32) -> Vec<u8> {
+    let img = image::RgbImage::from_fn(width, height, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+    });
+    let mut bytes = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Jpeg).unwrap();
+    bytes
+}
+
 fn main() {
     let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     std::fs::create_dir_all(&out_dir).unwrap();
@@ -71,4 +81,8 @@ fn main() {
         doc.save(out_dir.join(name)).unwrap();
         println!("wrote {}", out_dir.join(name).display());
     }
+
+    let photo_path = out_dir.join("photo.jpg");
+    std::fs::write(&photo_path, sample_jpeg(400, 300)).unwrap();
+    println!("wrote {}", photo_path.display());
 }

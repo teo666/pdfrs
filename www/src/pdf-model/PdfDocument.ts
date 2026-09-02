@@ -1,6 +1,14 @@
-import { compose_pdf, decrypt_pdf, encrypt_pdf, page_count, render_page_preview, rotate_pages } from "../pdfrs-worker-client";
+import {
+  compose_pdf,
+  decrypt_pdf,
+  encrypt_pdf,
+  image_to_pdf,
+  page_count,
+  render_page_preview,
+  rotate_pages,
+} from "../pdfrs-worker-client";
 import { renderPagesInParallel } from "../preview-worker-pool";
-import type { PageId, PageInfo, PagePreview, PageRange } from "./types";
+import type { ImagePageOptions, PageId, PageInfo, PagePreview, PageRange } from "./types";
 
 export interface GetPreviewsOptions {
   /** 1-indexed, inclusive window over the current *display order* (positions, not original page ids). Defaults to the whole document - set it to render only a window of a large document. */
@@ -67,6 +75,18 @@ export class PdfDocument {
   static async open(bytes: Uint8Array): Promise<PdfDocument> {
     const count = await page_count(bytes);
     return new PdfDocument(bytes, count);
+  }
+
+  /**
+   * Builds a one-page document from a JPEG (`options` picks the page size/
+   * orientation - see `ImagePageOptions`). From here on it's a regular
+   * `PdfDocument`: same rotate/delete/preview/commit, and indistinguishable
+   * to `PdfEditor.mergeDocuments()` from a document opened from a real PDF -
+   * that's what lets image pages and PDF pages be combined at all.
+   */
+  static async fromImage(bytes: Uint8Array, options: ImagePageOptions = {}): Promise<PdfDocument> {
+    const pdfBytes = await image_to_pdf(bytes, options);
+    return PdfDocument.open(pdfBytes);
   }
 
   getPageCount(): number {

@@ -115,6 +115,21 @@ pub async fn render_page_preview(file: Uint8Array, page: u32, scale: f32) -> std
     Ok(Uint8Array::from(png.as_slice()))
 }
 
+/// Builds a one-page PDF with `file` (a JPEG) drawn on it. `options` is a JS
+/// object `{ pageSize?: "native"|"a4"|"letter", orientation?: "portrait"|"landscape"|"auto" }`
+/// (all fields optional; pass `undefined`/`null`/`{}` for the default - a
+/// page exactly the size of the image).
+#[wasm_bindgen]
+pub async fn image_to_pdf(file: Uint8Array, options: JsValue) -> std::result::Result<Uint8Array, JsValue> {
+    let options: operations::image::ImagePageOptions = if options.is_undefined() || options.is_null() {
+        Default::default()
+    } else {
+        parse_options(options)?
+    };
+    let pdf_bytes = operations::image::image_to_pdf(&file.to_vec(), options)?;
+    Ok(Uint8Array::from(pdf_bytes.as_slice()))
+}
+
 #[wasm_bindgen(start)]
 pub fn main() {
     utils::set_panic_hook();

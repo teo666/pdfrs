@@ -2,6 +2,7 @@
 // signatures as the "pdfrs" wasm package, but every call is a postMessage
 // round-trip to the worker instead of a direct call, wrapped back into a
 // Promise so call sites don't need to know a worker is involved at all.
+import type { ImagePageOptions } from "./pdf-model/types";
 import type { WorkerRequest, WorkerResponse } from "./worker-protocol";
 
 const worker = new Worker(new URL("./pdfrs.worker.ts", import.meta.url), { type: "module" });
@@ -63,4 +64,8 @@ export function page_count(file: Uint8Array): Promise<number> {
 
 export function render_page_preview(file: Uint8Array, page: number, scale: number): Promise<Uint8Array> {
   return call("render_page_preview", [file, page, scale]);
+}
+
+export function image_to_pdf(file: Uint8Array, options: ImagePageOptions = {}): Promise<Uint8Array> {
+  return call("image_to_pdf", [file, options]);
 }
