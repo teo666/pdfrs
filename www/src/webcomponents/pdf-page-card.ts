@@ -1,5 +1,5 @@
 import { bytesToObjectUrl } from "../pdf-io";
-import type { PagePreview } from "../pdf-model/types";
+import type { PageInfo, PagePreview } from "../pdf-model/types";
 
 export interface PageActionDetail {
   id: number;
@@ -10,6 +10,9 @@ export interface PageDragOverDetail {
   draggedId: number;
   targetId: number;
 }
+
+/** What a card can be given: either the full rendered preview, or just the page's metadata while its PNG hasn't loaded yet (see the virtual-scroll path in `<pdf-document-view>`). */
+export type CardData = PagePreview | PageInfo;
 
 // Which page is currently being dragged, if any - module-level because
 // `dataTransfer.getData()` is only readable on "dragstart"/"drop" per the
@@ -26,13 +29,18 @@ let activeDragId: number | null = null;
  * `page-action` event instead of touching PdfDocument directly - the parent
  * `<pdf-document-view>` owns the document instance and reacts to that event.
  *
+ * `data` can be set to just a page's metadata (`PageInfo`, no `png`) before
+ * its preview has actually rendered - the card then shows a neutral
+ * placeholder box instead of an image, but rotate/delete/drag still work
+ * immediately since those only need the page id, not its bitmap.
+ *
  * Also draggable: hovering the dragged card over another one dispatches
  * `page-drag-over` *live* (not just once on drop), so `<pdf-document-view>`
  * can reorder and animate the grid as you drag, not only after releasing.
  */
 export class PdfPageCard extends HTMLElement {
   private readonly root: ShadowRoot;
-  private preview_: PagePreview | null = null;
+  private data_: CardData | null = null;
   private objectUrl: string | null = null;
 
   constructor() {
@@ -56,6 +64,8 @@ export class PdfPageCard extends HTMLElement {
         .card--deleted { opacity: 0.4; }
         .card--dragging { opacity: 0.4; cursor: grabbing; }
         .thumb { width: 100%; height: 170px; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+        .thumb--pending { background: #8882; border-radius: 4px; animation: pulse 1.2s ease-in-out infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 0.9; } }
         .thumb img { max-width: 100%; max-height: 100%; transition: transform 0.15s; }
         .thumb img.rot-90, .thumb img.rot-270 { max-width: 170px; max-height: 100px; }
         .label { font-size: 0.75rem; color: #666; margin: 0.4rem 0; }
@@ -90,13 +100,13 @@ export class PdfPageCard extends HTMLElement {
     this.setAttribute("draggable", "true");
   }
 
-  set preview(value: PagePreview) {
-    this.preview_ = value;
+  set data(value: CardData) {
+    this.data_ = value;
     this.render();
   }
 
-  get preview(): PagePreview | null {
-    return this.preview_;
+  get data(): CardData | null {
+    return this.data_;
   }
 
   disconnectedCallback(): void {
@@ -104,35 +114,45 @@ export class PdfPageCard extends HTMLElement {
   }
 
   private render(): void {
-    const preview = this.preview_;
-    if (!preview) return;
-
-    if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
-    this.objectUrl = bytesToObjectUrl(preview.png, "image/png");
+    const data = this.data_;
+    if (!data) return;
 
     const card = this.root.querySelector(".card") as HTMLElement;
+    const thumb = this.root.querySelector(".thumb") as HTMLElement;
     const img = this.root.querySelector("img") as HTMLImageElement;
     const label = this.root.querySelector(".label") as HTMLElement;
     const deleteBtn = this.root.querySelector('[data-action="toggle-delete"]') as HTMLButtonElement;
 
-    card.classList.toggle("card--deleted", preview.markedForDeletion);
-    img.src = this.objectUrl;
-    img.alt = `Pagina ${preview.id}`;
-    img.style.transform = `rotate(${preview.pendingRotation}deg)`;
-    img.classList.toggle("rot-90", preview.pendingRotation === 90 || preview.pendingRotation === 270);
-    img.classList.toggle("rot-270", preview.pendingRotation === 90 || preview.pendingRotation === 270);
-    label.textContent = `Pagina ${preview.id}${preview.pendingRotation ? ` (${preview.pendingRotation}°)` : ""}`;
-    deleteBtn.textContent = preview.markedForDeletion ? "Ripristina" : "Elimina";
+    card.classList.toggle("card--deleted", data.markedForDeletion);
+
+    if ("png" in data) {
+      if (this.objectUrl) URL.revokeObjectURL(this.objectUrl);
+      this.objectUrl = bytesToObjectUrl(data.png, "image/png");
+
+      thumb.classList.remove("thumb--pending");
+      img.hidden = false;
+      img.src = this.objectUrl;
+      img.alt = `Pagina ${data.id}`;
+      img.style.transform = `rotate(${data.pendingRotation}deg)`;
+      img.classList.toggle("rot-90", data.pendingRotation === 90 || data.pendingRotation === 270);
+      img.classList.toggle("rot-270", data.pendingRotation === 90 || data.pendingRotation === 270);
+    } else {
+      thumb.classList.add("thumb--pending");
+      img.hidden = true;
+    }
+
+    label.textContent = `Pagina ${data.id}${data.pendingRotation ? ` (${data.pendingRotation}°)` : ""}`;
+    deleteBtn.textContent = data.markedForDeletion ? "Ripristina" : "Elimina";
   }
 
   private handleClick(event: MouseEvent): void {
     const button = (event.target as HTMLElement).closest("button");
     const action = button?.dataset.action as PageActionDetail["action"] | undefined;
-    if (!action || !this.preview_) return;
+    if (!action || !this.data_) return;
 
     this.dispatchEvent(
       new CustomEvent<PageActionDetail>("page-action", {
-        detail: { id: this.preview_.id, action },
+        detail: { id: this.data_.id, action },
         bubbles: true,
         composed: true,
       }),
@@ -144,10 +164,10 @@ export class PdfPageCard extends HTMLElement {
   }
 
   private handleDragStart(event: DragEvent): void {
-    if (!this.preview_ || !event.dataTransfer) return;
+    if (!this.data_ || !event.dataTransfer) return;
     event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", String(this.preview_.id));
-    activeDragId = this.preview_.id;
+    event.dataTransfer.setData("text/plain", String(this.data_.id));
+    activeDragId = this.data_.id;
     this.setCardClass("card--dragging", true);
   }
 
@@ -160,11 +180,11 @@ export class PdfPageCard extends HTMLElement {
     // Required for "drop" to fire at all - browsers reject drops by default.
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-    if (!this.preview_ || activeDragId === null || activeDragId === this.preview_.id) return;
+    if (!this.data_ || activeDragId === null || activeDragId === this.data_.id) return;
 
     this.dispatchEvent(
       new CustomEvent<PageDragOverDetail>("page-drag-over", {
-        detail: { draggedId: activeDragId, targetId: this.preview_.id },
+        detail: { draggedId: activeDragId, targetId: this.data_.id },
         bubbles: true,
         composed: true,
       }),

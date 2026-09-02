@@ -3,6 +3,7 @@
 Cargo.lock
 bin/
 pkg/
+pkg-full/
 wasm-pack.log
 
 node_modules

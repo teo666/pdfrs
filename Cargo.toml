@@ -8,7 +8,14 @@ edition = "2018"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["console_error_panic_hook"]
+default = ["console_error_panic_hook", "preview", "image-import"]
+# render_page_preview (pulls in hayro, ~4.3MB of the wasm binary) and
+# image_to_pdf (pulls in the `image` crate) are each behind their own
+# feature so a build that only needs merge/split/rotate/compose/encrypt/
+# decrypt can drop them - see docs/development.md for the "core"/"full"
+# wasm-pack build split this enables.
+preview = ["dep:hayro"]
+image-import = ["dep:image"]
 
 [dependencies]
 wasm-bindgen = "0.2.84"
@@ -40,7 +47,7 @@ console_error_panic_hook = { version = "0.1.7", optional = true }
 # pdfium.wasm binary). `embed-cmaps` (CJK CMaps, ~250KB) is dropped since we
 # don't need CJK support for previews; `simd` is a no-op on wasm32 targets so
 # it's dropped too, both to keep the wasm bundle smaller.
-hayro = { version = "0.7", default-features = false, features = ["embed-fonts"] }
+hayro = { version = "0.7", default-features = false, features = ["embed-fonts"], optional = true }
 
 # Used only to read a JPEG's dimensions/color type (header parse, no full
 # pixel decode) and to encode JPEGs for the fixture generator - the JPEG
@@ -48,7 +55,7 @@ hayro = { version = "0.7", default-features = false, features = ["embed-fonts"] 
 # no re-encoding of real input images. `default-features = false` + `jpeg`
 # only pulls in the JPEG codec (zune-jpeg/jpeg-encoder, both pure Rust), not
 # the dozen other image formats `image` supports by default.
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"], optional = true }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"

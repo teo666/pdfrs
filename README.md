@@ -13,8 +13,11 @@ Documentazione completa in [`docs/`](docs/):
 ## Quick start
 
 ```bash
-# build il modulo wasm (output in pkg/)
-wasm-pack build --target web
+# build "core" (merge/split/rotate/compose/encrypt/decrypt, ~650KB, in pkg/)
+wasm-pack build --target web --out-dir pkg --no-default-features --features console_error_panic_hook
+
+# build "full" (tutto, incluse preview/import immagini, ~4.3MB, in pkg-full/)
+wasm-pack build --target web --out-dir pkg-full
 
 # test Rust nativi (funzioni pure, senza wasm)
 cargo test
@@ -34,7 +37,8 @@ pnpm test:editor  # test dell'editor visivo Web Components (tab "Editor", src/we
 src/            # crate Rust: bindings wasm_bindgen (src/lib.rs) + logica pura (src/operations/)
 tests/          # test wasm-bindgen-test + fixture PDF condivise
 examples/       # gen_fixtures.rs rigenera i PDF di test in tests/fixtures/
-pkg/            # output di `wasm-pack build` (generato, non versionato)
+pkg/            # build "core" (generato, non versionato - vedi docs/architecture.md)
+pkg-full/       # build "full" (generato, non versionato - vedi docs/architecture.md)
 www/            # pagina di test TypeScript puro per le API esposte (vedi docs/development.md)
 docs/           # documentazione del progetto
 ```

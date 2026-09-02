@@ -1,12 +1,23 @@
 import { downloadBytes } from "../pdf-io";
 import type { PdfDocument } from "../pdf-model/PdfDocument";
-import type { PagePreview } from "../pdf-model/types";
-import type { PageActionDetail, PageDragOverDetail, PdfPageCard } from "./pdf-page-card";
+import type { CardData, PageActionDetail, PageDragOverDetail, PdfPageCard } from "./pdf-page-card";
 
 export interface PreviewProgressDetail {
   done: number;
   total: number;
 }
+
+/**
+ * Above this many pages, `refresh()` switches from eagerly rendering every
+ * page up front to a virtual-scroll strategy: a placeholder card per page,
+ * with previews fetched only as cards actually scroll into view. Chosen to
+ * match `PdfEditor`'s own eager-render assumption staying cheap below it -
+ * see docs/development.md for the full rationale.
+ */
+export const VIRTUAL_SCROLL_THRESHOLD = 24;
+
+/** Positions further apart than this get their own separate `getPreviews` range call instead of being pulled into the same one (which would render everything in between too). */
+const MAX_RANGE_GAP = 3;
 
 /**
  * Wraps one `PdfDocument`: renders its pages as `<pdf-page-card>` thumbnails,
@@ -25,6 +36,14 @@ export class PdfDocumentView extends HTMLElement {
   // the FLIP animation below is a no-op for a card that hasn't moved, but
   // still pointless `movePage` calls).
   private lastDragOverTargetId: number | null = null;
+  // Only set while the virtual-scroll path (see VIRTUAL_SCROLL_THRESHOLD) is
+  // active - torn down and rebuilt on every refresh() so a stale observer
+  // never fires on cards that no longer belong to the current document.
+  private virtualObserver: IntersectionObserver | null = null;
+  private cardsByPosition = new Map<number, PdfPageCard>();
+  private positionByCard = new Map<PdfPageCard, number>();
+  private pendingPositions = new Set<number>();
+  private flushScheduled = false;
 
   constructor() {
     super();
@@ -75,6 +94,19 @@ export class PdfDocumentView extends HTMLElement {
 
   private async refresh(): Promise<void> {
     if (!this.doc) return;
+
+    // Any observer from a previous refresh() is watching cards that are
+    // about to be thrown away (or, below threshold, watching nothing at all
+    // this time) - always tear it down up front rather than only in the
+    // virtual branch below.
+    this.virtualObserver?.disconnect();
+    this.virtualObserver = null;
+
+    if (this.doc.getPageCount() > VIRTUAL_SCROLL_THRESHOLD) {
+      this.refreshVirtual();
+      return;
+    }
+
     this.setStatus("Rendering anteprime…");
     this.emitProgress(0, this.doc.getPageCount());
     try {
@@ -88,13 +120,104 @@ export class PdfDocumentView extends HTMLElement {
       grid.innerHTML = "";
       for (const preview of previews) {
         const card = document.createElement("pdf-page-card") as PdfPageCard;
-        card.preview = preview;
+        card.data = preview;
         grid.appendChild(card);
       }
       this.setStatus("");
     } catch (err) {
       this.setStatus(`Errore: ${err instanceof Error ? err.message : String(err)}`, true);
     }
+  }
+
+  /**
+   * Above VIRTUAL_SCROLL_THRESHOLD: renders a placeholder card for every
+   * page immediately (cheap - `pages()` is sync, in-memory metadata only,
+   * no wasm call), then lazily fills in each card's real PNG only once it
+   * actually scrolls into view, via `getPreviews({ range })` - which already
+   * reuses the cache and fetches only what's missing.
+   *
+   * Deliberately does not emit `preview-progress`: this document was never
+   * going to be "fully rendered" as a single event, so the doclist pill for
+   * it stays neutral instead of showing a misleading 100%-and-done state.
+   */
+  private refreshVirtual(): void {
+    if (!this.doc) return;
+    const pages = this.doc.pages();
+    this.setStatus(`Documento grande (${pages.length} pagine): le anteprime si caricano scorrendo.`);
+
+    this.cardsByPosition = new Map();
+    this.positionByCard = new Map();
+    this.pendingPositions.clear();
+
+    const grid = this.root.querySelector(".grid") as HTMLElement;
+    grid.innerHTML = "";
+
+    const observer = new IntersectionObserver((entries) => this.handleIntersect(entries), {
+      root: null,
+      // Prefetches a bit before a card is actually visible, so the image is
+      // usually already there by the time the user scrolls it fully into view.
+      rootMargin: "600px 0px",
+    });
+    this.virtualObserver = observer;
+
+    pages.forEach((info, index) => {
+      const position = index + 1;
+      const card = document.createElement("pdf-page-card") as PdfPageCard;
+      card.data = info;
+      grid.appendChild(card);
+      this.cardsByPosition.set(position, card);
+      this.positionByCard.set(card, position);
+      observer.observe(card);
+    });
+  }
+
+  private handleIntersect(entries: IntersectionObserverEntry[]): void {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const position = this.positionByCard.get(entry.target as PdfPageCard);
+      if (position !== undefined) this.pendingPositions.add(position);
+    }
+    if (this.pendingPositions.size > 0 && !this.flushScheduled) {
+      this.flushScheduled = true;
+      queueMicrotask(() => this.flushPendingPositions());
+    }
+  }
+
+  private async flushPendingPositions(): Promise<void> {
+    this.flushScheduled = false;
+    if (!this.doc || this.pendingPositions.size === 0) return;
+
+    const positions = Array.from(this.pendingPositions).sort((a, b) => a - b);
+    this.pendingPositions.clear();
+
+    // Group nearby positions into runs so one call covers a scrolled-past
+    // stretch of pages, instead of one `getPreviews` call per card - but cap
+    // how far a gap can stretch a run, so jumping from page 1 to page 100
+    // doesn't turn into "render everything in between".
+    const runs: Array<[number, number]> = [];
+    for (const position of positions) {
+      const current = runs[runs.length - 1];
+      if (current && position - current[1] <= MAX_RANGE_GAP) current[1] = position;
+      else runs.push([position, position]);
+    }
+
+    const doc = this.doc;
+    await Promise.all(
+      runs.map(([start, end]) =>
+        doc.getPreviews(0.3, { range: { start, end } }).then((previews) => {
+          previews.forEach((preview, offset) => {
+            const card = this.cardsByPosition.get(start + offset);
+            if (!card) return;
+            card.data = preview;
+            this.virtualObserver?.unobserve(card);
+          });
+        }),
+      ),
+    );
+  }
+
+  disconnectedCallback(): void {
+    this.virtualObserver?.disconnect();
   }
 
   /**
@@ -128,10 +251,13 @@ export class PdfDocumentView extends HTMLElement {
 
     const updated = this.doc.pages().find((p) => p.id === id);
     const card = Array.from(this.root.querySelectorAll("pdf-page-card")).find(
-      (el) => (el as PdfPageCard).preview?.id === id,
+      (el) => (el as PdfPageCard).data?.id === id,
     ) as PdfPageCard | undefined;
     if (card && updated) {
-      card.preview = { ...(card.preview as PagePreview), ...updated };
+      // Works whether the card currently holds a full PagePreview or (in the
+      // virtual-scroll path) just a placeholder PageInfo - the spread keeps
+      // `png` if it was there, and is a no-op addition if it wasn't.
+      card.data = { ...(card.data as CardData), ...updated } as CardData;
     }
   }
 
@@ -169,7 +295,7 @@ export class PdfDocumentView extends HTMLElement {
 
     // Reorder the actual DOM nodes to match the model's new order.
     // `appendChild` on a node that's already in the tree just moves it.
-    const cardById = new Map(cards.map((card) => [card.preview?.id, card]));
+    const cardById = new Map(cards.map((card) => [card.data?.id, card]));
     for (const info of this.doc.pages()) {
       const card = cardById.get(info.id);
       if (card) grid.appendChild(card);

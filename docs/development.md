@@ -9,9 +9,14 @@ cargo test
 # verifica che compili per il target wasm
 cargo check --target wasm32-unknown-unknown
 
-# build del pacchetto npm in pkg/ (usato da www/, o da un frontend esterno)
-wasm-pack build --target web
+# build "core" in pkg/ (merge/split/rotate/compose/encrypt/decrypt, ~650KB - usato da www/, o da un frontend esterno)
+wasm-pack build --target web --out-dir pkg --no-default-features --features console_error_panic_hook
+
+# build "full" in pkg-full/ (tutto, incluse preview/import immagini, ~4.3MB)
+wasm-pack build --target web --out-dir pkg-full
 ```
+
+Vedi docs/architecture.md ("Build \"core\" e \"full\"") per il perché dello split: entrambe le feature `preview`/`image-import` sono nel `default`, quindi vanno esplicitamente disattivate per ottenere il binario piccolo - un `wasm-pack build --target web` senza flag produce comunque il binario "full" completo.
 
 `wasm-pack test --headless --firefox` (o `--chrome`) eseguirebbe i test in `tests/web.rs` in un vero browser, ma richiede `geckodriver`/`chromedriver` installati — non presenti in tutti gli ambienti di sviluppo. Se disponibili, è il modo per validare i binding `#[wasm_bindgen]` end-to-end lato Rust; altrimenti la pagina di test in `www/` (sotto) copre lo stesso confine JS↔wasm.
 
@@ -35,7 +40,7 @@ cargo run --example render_preview [percorso/al/file.pdf]   # default: tests/fix
 
 ## Pagina di test TypeScript (`www/`)
 
-Piccolo progetto Vite + TypeScript puro (nessun framework), con un pannello per ciascuna operazione esposta dal wasm. Consuma il pacchetto locale generato in `pkg/` tramite `"pdfrs": "file:../pkg"` in `www/package.json` — va quindi rigenerato (`wasm-pack build --target web`) ogni volta che cambia l'API Rust.
+Piccolo progetto Vite + TypeScript puro (nessun framework), con un pannello per ciascuna operazione esposta dal wasm. Consuma **due** pacchetti locali: `"pdfrs": "file:../pkg"` (core) e `"pdfrs-full": "file:../pkg-full"` (full) in `www/package.json` — vanno quindi rigenerati (entrambi i comandi `wasm-pack build` sopra) ogni volta che cambia l'API Rust, seguiti da `pnpm install` (vedi sotto per il perché).
 
 ### Il modulo wasm gira in un Web Worker, non sul thread principale
 
@@ -43,21 +48,28 @@ Le funzioni `async`/`Promise` di per sé **non bastano** a evitare che la UI si 
 
 Per questo `www/src/main.ts` non importa mai `"pdfrs"` direttamente. La catena è:
 
-- `src/pdfrs.worker.ts` — gira **dentro un Web Worker**, importa il pacchetto wasm vero (`"pdfrs"`), chiama `init()` una volta, e risponde ai messaggi `{ id, method, args }` eseguendo la funzione corrispondente.
+- `src/pdfrs.worker.ts` — gira **dentro un Web Worker**, importa il pacchetto wasm vero (`"pdfrs"`), inizializza il modulo (vedi sotto) e risponde ai messaggi `{ id, method, args }` eseguendo la funzione corrispondente.
 - `src/pdfrs-worker-client.ts` — lato thread principale, espone le stesse firme (`merge_pdfs`, `split_pdf`, ...) ma ogni chiamata è in realtà un giro di `postMessage` verso il worker, incapsulato in una `Promise` tramite una mappa `id -> {resolve, reject}`. I call site (`main.ts`) non sanno che c'è un worker di mezzo.
-- `src/worker-protocol.ts` — le forme dei messaggi (`WorkerRequest`/`WorkerResponse`) condivise tra le due parti, così non possono disallinearsi.
+- `src/worker-protocol.ts` — le forme dei messaggi (`WorkerRequest`/`WorkerResponse`/`WorkerInitMessage`) condivise tra le parti, così non possono disallinearsi.
+- `src/create-pdfrs-worker.ts` — punto unico di creazione per **ogni** istanza di `pdfrs.worker.ts` nell'app (sia il worker singolo condiviso di `pdfrs-worker-client.ts`, sia ciascuno del pool descritto sotto). Vedi "Modulo wasm compilato una volta" più sotto.
 
 **Prova visibile che funziona**: in cima alla pagina c'è un contatore ("UI thread libero — tick: N") che incrementa a ogni `requestAnimationFrame`. Se il thread principale fosse bloccato da una chiamata wasm, si fermerebbe; nello smoke test (`www/e2e/smoke.mjs`) questo è verificato esplicitamente confrontando il valore del contatore prima e dopo un'operazione.
 
-### Preview su documenti grandi: pool di worker con coda dinamica
+### Modulo wasm compilato una volta, condiviso tra tutti i worker
 
-Un solo worker rende le pagine una alla volta — non blocca la UI, ma per un documento con molte pagine il rendering totale resta comunque lento in wall-clock, perché una sola pagina alla volta gira su un solo core. `src/preview-worker-pool.ts` risolve questo caso specifico: sopra `PARALLEL_PREVIEW_THRESHOLD` pagine (6, in `main.ts`), il pannello Preview crea un piccolo pool di worker (`Math.min(navigator.hardwareConcurrency, pageCount, 8)`, ognuno con la propria copia del modulo wasm) e distribuisce le pagine da una **coda condivisa**: ogni worker libero prende la pagina successiva, invece di ricevere in anticipo un blocco fisso di pagine. Questo evita che un worker resti bloccato su un blocco di pagine pesanti mentre un altro, con pagine leggere, ha già finito ed è inattivo — il bilanciamento del carico è automatico.
+Ogni worker (singolo o del pool) userebbe, se lasciato al comportamento di default di wasm-bindgen, il proprio `fetch` + `WebAssembly.compile` del binario — ripetuto per ogni worker creato. `create-pdfrs-worker.ts` centralizza questo: la prima volta che un worker viene creato, compila il binario una sola volta (`WebAssembly.compileStreaming`, con fallback a `fetch` + `WebAssembly.compile` se lo streaming non è disponibile) e tiene il risultato come una `Promise<WebAssembly.Module>` a livello di modulo. Ogni worker successivo riceve lo stesso `WebAssembly.Module` già compilato via `postMessage` (i moduli wasm sono clonabili in structured clone), e deve solo instanziarlo (`init(module)`), non ricompilarlo da zero.
+
+Lato worker (`pdfrs.worker.ts`), l'inizializzazione non parte più eagerly a livello di modulo: il worker aspetta il primo `WorkerInitMessage` (`{type: "wasm-module", module}` nel percorso normale, `{type: "wasm-init-fallback"}` se la compilazione condivisa fallisce per qualche motivo, nel qual caso il worker si auto-inizializza con `init()` come prima) prima di processare qualunque `WorkerRequest`.
+
+### Preview su documenti grandi: pool di worker persistente con coda dinamica
+
+Un solo worker rende le pagine una alla volta — non blocca la UI, ma per un documento con molte pagine il rendering totale resta comunque lento in wall-clock, perché una sola pagina alla volta gira su un solo core. `src/preview-worker-pool.ts` risolve questo caso specifico: sopra `PARALLEL_PREVIEW_THRESHOLD` pagine (6, in `main.ts`), il rendering si distribuisce su un piccolo pool di worker (dimensione tipica `Math.min(navigator.hardwareConcurrency, pageCount, 8)`, tutti creati tramite `createPdfrsWorker()` e quindi tutti a condividere lo stesso modulo wasm già compilato) e le pagine vengono assegnate da una **coda condivisa**: ogni worker libero prende la pagina successiva, invece di ricevere in anticipo un blocco fisso di pagine. Questo evita che un worker resti bloccato su un blocco di pagine pesanti mentre un altro, con pagine leggere, ha già finito ed è inattivo — il bilanciamento del carico è automatico.
 
 Conseguenze pratiche di questo design:
 
 - **`onPage` completa fuori ordine**: le pagine finiscono nell'ordine in cui i worker le processano, non nell'ordine 1, 2, 3... Per questo il pannello Preview crea prima una card segnaposto per ogni pagina (`cardImages: Map<number, HTMLImageElement>` in `main.ts`) e riempie l'immagine giusta quando arriva, invece di fare `appendChild` man mano — se aggiungi un altro consumatore di `renderPagesInParallel`, tienilo a mente.
-- **Costo per worker aggiuntivo**: ogni worker del pool istanzia una copia indipendente del modulo wasm (~4.3 MB, per via di `hayro`). Per pochi worker e documenti grandi ne vale la pena; per documenti piccoli l'overhead di avvio supererebbe il guadagno — da qui la soglia `PARALLEL_PREVIEW_THRESHOLD`, sotto la quale si usa il singolo worker condiviso già esistente (`pdfrs-worker-client.ts`).
-- **Ciclo di vita**: i worker del pool sono creati per la singola chiamata a `renderPagesInParallel` e terminati (`worker.terminate()`) alla fine, con o senza errore — non sono un pool persistente riusato tra una preview e l'altra.
+- **Ciclo di vita — persistente, non ricreato per chiamata**: il pool vive a livello di modulo (array `workers`/`idleWorkers` in `preview-worker-pool.ts`) e cresce solo verso l'alto (`ensurePoolSize`), non viene mai smontato tra una chiamata a `renderPagesInParallel` e la successiva. Una seconda preview su un documento grande non ripaga il costo di avvio worker/wasm se il pool è già caldo dalla prima. La coda (`queue`) è anch'essa condivisa tra chiamate diverse, non ricreata ogni volta.
+- **Dispatcher**: `pump()` assegna job in coda a ogni worker che si libera (chiamato sia subito dopo aver accodato nuovi job, sia da dentro il completamento di ogni job, per continuare a svuotare la coda). Un dettaglio facile da sbagliare: accodare i job e poi aspettare la loro `Promise.all` **prima** di chiamare `pump()` produce un deadlock — nulla viene mai assegnato ai worker se `pump()` non viene invocato esplicitamente subito dopo l'accodamento.
 - **Verifica nello smoke test**: `tests/fixtures/ten_pages.pdf` (10 pagine, sopra soglia) esercita il pool; `preview-worker-pool.ts` espone `window.__pdfrsLastPreviewPoolSize` proprio per permettere allo smoke test di verificare concretamente che siano stati usati più worker (`previewPoolSize > 1`), invece di dedurlo indirettamente dai tempi.
 
 ### Trabocchetto da evitare — `Transferable` e buffer riusati
@@ -116,7 +128,7 @@ Il pannello **Preview** è diverso dagli altri: appena rilasci/selezioni un PDF,
 - un pulsante "Esegui" che chiama la funzione wasm corrispondente e scarica il PDF risultante;
 - un'area di stato che mostra l'esito o l'errore (utile per verificare che gli errori Rust arrivino come messaggi leggibili, non come crash).
 
-Usa i PDF già presenti in `tests/fixtures/` (`one_page.pdf`, `two_pages.pdf`, `four_pages.pdf`, `ten_pages.pdf`) per provare rapidamente ogni pannello — `ten_pages.pdf` supera `PARALLEL_PREVIEW_THRESHOLD` ed è utile per vedere il pool di worker in azione nel pannello Preview.
+Usa i PDF già presenti in `tests/fixtures/` (`one_page.pdf`, `two_pages.pdf`, `four_pages.pdf`, `ten_pages.pdf`, `many_pages.pdf`) per provare rapidamente ogni pannello — `ten_pages.pdf` supera `PARALLEL_PREVIEW_THRESHOLD` ed è utile per vedere il pool di worker in azione nel pannello Preview; `many_pages.pdf` (30 pagine) supera `VIRTUAL_SCROLL_THRESHOLD` ed è utile per vedere lo scroll virtuale in azione nell'editor.
 
 ### Smoke test end-to-end (`www/e2e/smoke.mjs`)
 
@@ -146,7 +158,20 @@ Sopra le funzioni stateless viste finora c'è un livello di modello puro (nessun
 
 Nell'editor la barra di avanzamento **non** è un `<progress>` in fondo alla pagina, ma un riempimento verde sulla pill del documento nella doclist, subito sotto l'area di drag & drop (`<pdf-editor-app>`): `<pdf-document-view>` non mostra nulla da sé, dispatcha solo un evento `preview-progress` `{ done, total }` a ogni tick di `onProgress` (in `refresh()`); `<pdf-editor-app>` lo intercetta e aggiorna la larghezza (`%`) di un `div.fill` posizionato dietro checkbox/etichetta nel `<li>` corrispondente al documento attivo. A rendering completato (`done === total`), la pill resta riempita al 100% e prende un bordo verde (`.render-done`) — non sparisce, è il feedback di completezza richiesto. Quel bordo/riempimento resta finché non parte un nuovo rendering sullo stesso documento (es. dopo un altro `commit()`), che lo azzera e lo ricostruisce da capo.
 
-**Punto delicato**: `document-committed` (dispatchato da `<pdf-document-view>` dopo il proprio `refresh()` interno al commit) fa ricostruire l'intera doclist (`renderDocList()`, nuovi `<li>` da zero) — il che perderebbe subito lo stato "completato" appena raggiunto. Il gestore di quell'evento in `<pdf-editor-app>` quindi marca esplicitamente come "done" la pill del documento attivo subito dopo la ricostruzione, invece di aspettarsi che sopravviva alla ricostruzione da sola.
+**Punto delicato**: `document-committed` (dispatchato da `<pdf-document-view>` dopo il proprio `refresh()` interno al commit) fa ricostruire l'intera doclist (`renderDocList()`, nuovi `<li>` da zero) — il che perderebbe subito lo stato "completato" appena raggiunto. Il gestore di quell'evento in `<pdf-editor-app>` quindi marca esplicitamente come "done" la pill del documento attivo subito dopo la ricostruzione, invece di aspettarsi che sopravviva alla ricostruzione da sola — **tranne** sopra `VIRTUAL_SCROLL_THRESHOLD` (vedi sotto), dove quella pill non va mai marcata "done".
+
+### Scroll virtuale nell'editor sopra soglia (`VIRTUAL_SCROLL_THRESHOLD`)
+
+`refresh()` in `<pdf-document-view>` sceglie tra due strategie in base a `doc.getPageCount()`:
+
+- **Sotto `VIRTUAL_SCROLL_THRESHOLD`** (24 pagine) — invariato: `getPreviews()` eager su tutte le pagine, con `onProgress` che alimenta la pill come descritto sopra.
+- **Sopra soglia** (`refreshVirtual()`) — crea subito una `<pdf-page-card>` segnaposto per ogni pagina (`card.data = info`, solo metadati `PageInfo`, nessun `png` — vedi sotto), poi osserva ogni card con un `IntersectionObserver` (`rootMargin: "600px 0px"`, per precaricare un po' prima che la card sia davvero visibile). Quando una o più card entrano in vista, le loro posizioni finiscono in un batch (`pendingPositions`, svuotato al prossimo microtask con `queueMicrotask` — così più card che entrano in vista nello stesso frame diventano una sola raffica di chiamate, non una per card) raggruppato in run contigue (gap massimo `MAX_RANGE_GAP` = 3 posizioni: uno scroll che salta da pagina 1 a pagina 100 diventa due chiamate separate, non una che renderizza anche le 98 pagine di mezzo). Ogni run diventa una chiamata `getPreviews(scale, { range })`, che riusa la cache e la logica "solo le mancanti" già esistenti — per questo scorrere avanti e indietro non rirenderizza nulla di già visto. Una volta che una card riceve il suo PNG, viene tolta dall'observer (`unobserve`).
+- **Niente evento `preview-progress` nel percorso virtuale**: questo documento non è mai stato pensato per "finire di renderizzare tutto insieme", quindi non emette mai quell'evento — la pill del documento in `<pdf-editor-app>` resta quindi neutra (nessun riempimento, nessun bordo verde), invece di mostrare un falso 100%. `<pdf-editor-app>` rinforza esplicitamente questo comportamento: il gestore di `document-committed` controlla `pageCount > VIRTUAL_SCROLL_THRESHOLD` prima di marcare una pill "done", proprio per non farlo per errore dopo un commit su un documento grande.
+- **`disconnectedCallback()`** disconnette l'`IntersectionObserver` quando il componente viene rimosso, e `refresh()` disconnette sempre quello (eventuale) del giro precedente prima di procedere — altrimenti un observer vecchio continuerebbe a osservare card ormai sostituite.
+
+**Card segnaposto senza PNG**: `<pdf-page-card>` accetta ora `card.data` di tipo `PagePreview | PageInfo` (rinominato da `card.preview`, che accettava solo `PagePreview`) — se l'oggetto ha un campo `png` mostra l'immagine come sempre, altrimenti mostra un rettangolo grigio pulsante (`.thumb--pending`) al suo posto. Rotazione/eliminazione funzionano comunque su una card ancora senza immagine, perché quelle azioni dipendono solo dall'`id` della pagina, mai dal suo bitmap.
+
+**Verifica** (`www/e2e/editor.mjs`): usa `many_pages.pdf` (30 pagine, sopra soglia) con un viewport ridotto ad hoc (`page.setViewportSize({width: 380, height: 320})`, poi ripristinato) per rendere l'ultima pagina genuinamente fuori vista — verifica che tutte le 30 card segnaposto esistano subito, che l'ultima pagina non abbia ancora un PNG prima dello scroll, che `scrollIntoView()` su quella card ne causi il rendering, e che la pill del documento resti neutra (nessun riempimento, nessun bordo) per tutta la durata.
 
 Lo stesso pattern è integrato anche nel pannello **Preview** del banco di prova a basso livello (`main.ts`), che non passa da `PdfDocument` ma chiama `page_count`/`render_page_preview`/`renderPagesInParallel` direttamente: un `<progress id="preview-progress">` si riempie a ogni pagina completata (nel ramo sequenziale come in quello col pool) e lo stato testuale mostra "Rendering anteprime… (n/m)" finché non è finito.
 
@@ -178,9 +203,9 @@ Registrati una sola volta con un side-effect import (`import "./webcomponents"` 
 
 **Verifica** (`www/e2e/editor.mjs`, `pnpm test:editor`): stesso pattern delle altre suite, ma attraversa gli shadow root reali (`el.shadowRoot.querySelector(...)`) invece del DOM normale. Copre il flusso completo: apertura di due documenti, drag & drop reale tramite `locator.dragTo()` di Playwright (non un evento sintetico — un vero `DataTransfer`), rotazione + eliminazione (verificate come stato locale, non come chiamate), commit (il conteggio pagine scende), merge dei due documenti — con la rotazione committata sulla prima pagina ancora visibile nel documento unito finale, prova che sopravvive all'intera pipeline (rotate pendente → commit → merge) — l'import di un JPEG unito a un PDF vero (una pagina in più nella griglia, renderizzata correttamente) — e infine la barra di avanzamento sulla pill: apre `ten_pages.pdf` e verifica che il riempimento della pill cresca durante il rendering (`0% < width < 100%`) e che finisca marcata "done" (riempimento al 100% + `.render-done`) una volta completato. Il test del riordino a livello di modello (rimappatura della rotazione sulla pagina spostata dopo `commit()`) vive invece in `pdf-model.mjs`, più mirato e senza bisogno di un vero drag.
 
-### Nota su Vite e `pkg/`
+### Nota su Vite e `pkg/`/`pkg-full/`
 
-`www/vite.config.ts` imposta `server.fs.allow: [".."]`: senza questa opzione Vite risponde `403` quando la pagina prova a caricare `../pkg/pdfrs_bg.wasm`, perché quel file sta fuori dalla root del progetto `www/`.
+`www/vite.config.ts` imposta `server.fs.allow: [".."]`: senza questa opzione Vite risponde `403` quando la pagina prova a caricare `../pkg/pdfrs_bg.wasm` o `../pkg-full/pdfrs_bg.wasm`, perché quei file stanno fuori dalla root del progetto `www/`.
 
 ## Package manager
 

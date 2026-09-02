@@ -10,6 +10,15 @@ export interface WorkerRequest {
 export type WorkerResponse = { id: number; ok: true; result: unknown } | { id: number; ok: false; error: string };
 
 /**
+ * Sent by `createPdfrsWorker()` right after constructing a worker, so it can
+ * `init()` the wasm module from an already-compiled `WebAssembly.Module`
+ * instead of fetching/compiling its own copy (see create-pdfrs-worker.ts).
+ * `wasm-init-fallback` is the escape hatch if compiling that module ourselves
+ * failed for any reason - the worker then self-initializes the normal way.
+ */
+export type WorkerInitMessage = { type: "wasm-module"; module: WebAssembly.Module } | { type: "wasm-init-fallback" };
+
+/**
  * Collects the underlying ArrayBuffers of any Uint8Array found in `value`
  * (recursing into arrays), so postMessage can transfer them instead of
  * structured-cloning (copying) the bytes across the thread boundary.

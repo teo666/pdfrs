@@ -76,6 +76,7 @@ fn main() {
         ("two_pages.pdf", 2),
         ("four_pages.pdf", 4),
         ("ten_pages.pdf", 10),
+        ("many_pages.pdf", 30),
     ] {
         let mut doc = multi_page_document(pages);
         doc.save(out_dir.join(name)).unwrap();

@@ -38,6 +38,26 @@ Per la preview delle pagine (una card/immagine per pagina nel frontend) si usa *
 - **Dimensioni pagina**: `PageSize::Native` (default) — la pagina è grande esattamente quanto l'immagine (1px = 1pt); `A4`/`Letter` — l'immagine viene centrata e scalata per stare dentro la pagina (`fitted_size`, un semplice "contain": nessun ritaglio, nessuna distorsione dell'aspect ratio). `Orientation::Auto` (default per A4/Letter) sceglie ritratto/paesaggio in base all'aspect ratio dell'immagine.
 - **Punto delicato — compressione doppia**: `merge_pdfs`/`compose_pdf`/`split_pdf` chiamano tutti `Document::compress()` alla fine. Uno stream già codificato `DCTDecode` **non va ricompresso con Flate sopra** — corromperebbe l'immagine. Lo stream dell'immagine viene creato con `allows_compression = false` (stesso accorgimento che lopdf raccomanda per gli stream dei font). Verificato concretamente: un test unisce un PDF-da-immagine con un PDF vero via `merge_pdfs` (che chiama `compress()`) e poi *renderizza* la pagina risultante con `render_page_preview` — se la compressione avesse corrotto il JPEG, `hayro` fallirebbe a decodificarlo, non solo a produrre un file strutturalmente valido.
 
+## Build "core" e "full": feature `preview`/`image-import`
+
+`hayro` e `image` sono dipendenze **opzionali** (`optional = true` in `Cargo.toml`), dietro due feature dedicate:
+
+```toml
+[features]
+default = ["console_error_panic_hook", "preview", "image-import"]
+preview = ["dep:hayro"]
+image-import = ["dep:image"]
+```
+
+Entrambe sono nel `default`, quindi un `cargo build`/`wasm-pack build` senza flag produce lo stesso binario "pieno" di sempre — questo split esiste per permettere a chi consuma la crate di **scegliere** di ometterle, non per cambiare il comportamento di default. In `src/operations/mod.rs` i moduli `preview`/`image` sono dietro lo stesso `#[cfg(feature = ...)]`; in `src/lib.rs`, le funzioni `#[wasm_bindgen]` `render_page_preview`/`image_to_pdf` altrettanto.
+
+Questo abilita due build wasm distinte, entrambe verificate concretamente (dimensioni misurate, non stimate):
+
+- **`pkg/` (core)**: `wasm-pack build --target web --out-dir pkg --no-default-features --features console_error_panic_hook` — solo `merge_pdfs`/`split_pdf`/`rotate_pages`/`compose_pdf`/`encrypt_pdf`/`decrypt_pdf`/`page_count`. **~650 KB** (torna alla dimensione pre-`hayro`).
+- **`pkg-full/` (full)**: `wasm-pack build --target web --out-dir pkg-full` (default features) — tutto, incluso `render_page_preview`/`image_to_pdf`. **~4.3 MB**.
+
+Il frontend (`www/`) consuma entrambe: `pdfrs` (→ `pkg/`, core) è importato staticamente per le sei operazioni sempre disponibili; `pdfrs-full` (→ `pkg-full/`) è importato **dinamicamente**, solo la prima volta che `render_page_preview`/`image_to_pdf` sono davvero richiesti — vedi la sezione sul worker in `docs/development.md` per il dettaglio del lazy loading e la verifica via tracciamento delle richieste di rete.
+
 ## Struttura della crate
 
 ```

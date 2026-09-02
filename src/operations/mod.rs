@@ -1,7 +1,9 @@
 pub mod compose;
 pub mod crypto;
+#[cfg(feature = "image-import")]
 pub mod image;
 pub mod merge;
+#[cfg(feature = "preview")]
 pub mod preview;
 pub mod rotate;
 pub mod split;

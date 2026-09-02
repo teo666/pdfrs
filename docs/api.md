@@ -81,6 +81,8 @@ const count = await page_count(bytes);
 
 ## `render_page_preview(file: Uint8Array, page: number, scale: number): Promise<Uint8Array>`
 
+> Dietro la feature Cargo `preview` (attiva di default, ma assente in una build "core" - vedi docs/architecture.md). Nel frontend `www/`, chiamarla è ciò che fa scaricare `pdfrs-full` (`pkg-full/`, ~4.3MB) al posto del solo pacchetto `pdfrs` core - vedi docs/development.md.
+
 Renderizza `page` (1-indicizzata) in un'immagine PNG, per una preview/thumbnail nel frontend. `scale` moltiplica la dimensione nativa della pagina (es. `0.4` per una miniatura piccola, `1.5` per una preview più nitida). Si aspetta byte **già decriptati** — per un PDF cifrato, passa prima l'output di `decrypt_pdf`.
 
 ```ts
@@ -93,6 +95,8 @@ for (let page = 1; page <= count; page++) {
 ```
 
 ## `image_to_pdf(file: Uint8Array, options): Promise<Uint8Array>`
+
+> Dietro la feature Cargo `image-import` (attiva di default, ma assente in una build "core" - vedi docs/architecture.md). Stesso discorso di `render_page_preview` sopra per il lazy-loading di `pdfrs-full` nel frontend.
 
 Converte un **JPEG** in un PDF di una pagina, così può essere unito/combinato con PDF veri usando `merge_pdfs`/`compose_pdf` senza altro codice — una volta convertita, per il resto dell'API è un PDF come un altro. Solo JPEG per ora (RGB o scala di grigi; i JPEG CMYK vengono rifiutati); i byte JPEG sono incorporati così come sono (`/Filter /DCTDecode`), senza ridecodificare i pixel.
 

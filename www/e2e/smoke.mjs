@@ -171,6 +171,78 @@ async function main() {
   const decryptStatus = await waitForSettledStatus("#decrypt-status");
 
   await page.screenshot({ path: path.join(dirname, "smoke.png"), fullPage: true });
+
+  // --- Core/full wasm split: a fresh page that only ever touches the six
+  // "core" panels (never Preview) must never fetch the "full" package
+  // (hayro/image, ~4MB) - proving the lazy-load in pdfrs.worker.ts really is
+  // lazy, not just cached-after-first-use by the time we'd check. A second
+  // fresh page that does open Preview must fetch it. Both use their own
+  // page (not the one above, which already touched Preview earlier). ---
+  const isFullPackageRequest = (url) => url.includes("pkg-full") || url.includes("pdfrs-full");
+
+  const corePage = await browser.newPage();
+  const coreRequests = [];
+  corePage.on("request", (req) => coreRequests.push(req.url()));
+  await corePage.goto(baseUrl, { waitUntil: "networkidle" });
+  await corePage.waitForSelector("text=Merge", { timeout: 10_000 });
+
+  async function runCorePanel(target, inputSelector, files, runSelector) {
+    await corePage.click(`#tabs [data-target="${target}"]`);
+    await corePage.setInputFiles(inputSelector, files);
+    await Promise.all([corePage.waitForEvent("download"), corePage.click(runSelector)]);
+  }
+
+  await runCorePanel(
+    "panel-merge",
+    "#merge-input",
+    [path.join(fixtures, "two_pages.pdf"), path.join(fixtures, "one_page.pdf")],
+    "#merge-run",
+  );
+
+  await corePage.click('#tabs [data-target="panel-split"]');
+  await corePage.setInputFiles("#split-input", [path.join(fixtures, "two_pages.pdf")]);
+  await corePage.fill("#split-ranges", "1-1,2-2");
+  await Promise.all([corePage.waitForEvent("download"), corePage.click("#split-run")]);
+
+  await corePage.click('#tabs [data-target="panel-rotate"]');
+  await corePage.setInputFiles("#rotate-input", [path.join(fixtures, "one_page.pdf")]);
+  await corePage.fill("#rotate-rotations", "1:90");
+  await Promise.all([corePage.waitForEvent("download"), corePage.click("#rotate-run")]);
+
+  await corePage.click('#tabs [data-target="panel-compose"]');
+  await corePage.setInputFiles("#compose-input", [path.join(fixtures, "two_pages.pdf"), path.join(fixtures, "one_page.pdf")]);
+  await corePage.fill("#compose-layout", "1:1,0:2,0:1");
+  await Promise.all([corePage.waitForEvent("download"), corePage.click("#compose-run")]);
+
+  await corePage.click('#tabs [data-target="panel-encrypt"]');
+  await corePage.setInputFiles("#encrypt-input", [path.join(fixtures, "one_page.pdf")]);
+  await corePage.fill("#encrypt-owner", "owner-secret");
+  await corePage.fill("#encrypt-user", "user-secret");
+  const [coreEncryptDownload] = await Promise.all([corePage.waitForEvent("download"), corePage.click("#encrypt-run")]);
+  const coreEncryptedPath = path.join(os.tmpdir(), "pdfrs-smoke-core-encrypted.pdf");
+  await coreEncryptDownload.saveAs(coreEncryptedPath);
+
+  await corePage.click('#tabs [data-target="panel-decrypt"]');
+  await corePage.setInputFiles("#decrypt-input", [coreEncryptedPath]);
+  await corePage.fill("#decrypt-password", "user-secret");
+  await Promise.all([corePage.waitForEvent("download"), corePage.click("#decrypt-run")]);
+
+  const fullPackageFetchedByCoreOnlyPage = coreRequests.some(isFullPackageRequest);
+  await corePage.close();
+
+  const previewPage = await browser.newPage();
+  const previewRequests = [];
+  previewPage.on("request", (req) => previewRequests.push(req.url()));
+  await previewPage.goto(baseUrl, { waitUntil: "networkidle" });
+  await previewPage.click('#tabs [data-target="panel-preview"]');
+  await previewPage.setInputFiles("#preview-input", [path.join(fixtures, "one_page.pdf")]);
+  await previewPage.waitForFunction(() => {
+    const text = document.querySelector("#preview-status")?.textContent?.trim() ?? "";
+    return text.startsWith("Fatto") || text.startsWith("Errore");
+  });
+  const fullPackageFetchedByPreviewPage = previewRequests.some(isFullPackageRequest);
+  await previewPage.close();
+
   await browser.close();
 
   const results = {
@@ -197,6 +269,8 @@ async function main() {
     "decrypt rejects wrong password": wrongPasswordStatus.startsWith("Errore"),
     "decrypt downloads decrypted.pdf": decryptDownload.suggestedFilename() === "decrypted.pdf",
     "decrypt status succeeds with correct password": decryptStatus.startsWith("Fatto"),
+    "core/full split: core-only panels never fetch the full wasm package": !fullPackageFetchedByCoreOnlyPage,
+    "core/full split: opening Preview does fetch the full wasm package": fullPackageFetchedByPreviewPage,
     "no console/page errors": consoleErrors.length === 0,
   };
 

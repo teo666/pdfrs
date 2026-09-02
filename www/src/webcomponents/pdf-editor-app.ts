@@ -1,7 +1,7 @@
 import { fileToUint8Array, isJpeg, isPdf, setupFileInput } from "../pdf-io";
 import { PdfEditor } from "../pdf-model/PdfEditor";
 import type { DocumentId } from "../pdf-model/types";
-import type { PdfDocumentView, PreviewProgressDetail } from "./pdf-document-view";
+import { VIRTUAL_SCROLL_THRESHOLD, type PdfDocumentView, type PreviewProgressDetail } from "./pdf-document-view";
 
 /**
  * Top-level example wiring `PdfEditor` (a registry of `PdfDocument`s) to a
@@ -78,6 +78,11 @@ export class PdfEditorApp extends HTMLElement {
       // just finished. Mark it done again immediately instead of losing that.
       this.renderDocList();
       if (this.activeId === null) return;
+      // A document above the virtual-scroll threshold never actually
+      // finishes rendering as one event (see pdf-document-view.ts) - marking
+      // its pill "done" here would be a false 100%, so skip it for those.
+      const pageCount = this.editor.listDocuments().find((doc) => doc.id === this.activeId)?.pageCount ?? 0;
+      if (pageCount > VIRTUAL_SCROLL_THRESHOLD) return;
       const item = this.root.querySelector(`li[data-doc-id="${this.activeId}"]`) as HTMLElement | null;
       if (!item) return;
       (item.querySelector(".fill") as HTMLElement).style.width = "100%";

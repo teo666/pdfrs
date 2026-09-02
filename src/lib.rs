@@ -109,6 +109,11 @@ pub async fn page_count(file: Uint8Array) -> std::result::Result<u32, JsValue> {
 /// Renders `page` (1-indexed) of a PDF file to a PNG image, for use as a
 /// browser preview thumbnail. `scale` multiplies the page's native size (e.g.
 /// `1.5` for a sharper-than-1:1 preview). Expects already-decrypted bytes.
+///
+/// Behind the `preview` feature (pulls in `hayro`, the pure-Rust rasterizer,
+/// ~4.3MB of the wasm binary) - see docs/development.md for the "core"/"full"
+/// wasm-pack build split this enables.
+#[cfg(feature = "preview")]
 #[wasm_bindgen]
 pub async fn render_page_preview(file: Uint8Array, page: u32, scale: f32) -> std::result::Result<Uint8Array, JsValue> {
     let png = operations::preview::render_page_preview(&file.to_vec(), page, scale)?;
@@ -119,6 +124,10 @@ pub async fn render_page_preview(file: Uint8Array, page: u32, scale: f32) -> std
 /// object `{ pageSize?: "native"|"a4"|"letter", orientation?: "portrait"|"landscape"|"auto" }`
 /// (all fields optional; pass `undefined`/`null`/`{}` for the default - a
 /// page exactly the size of the image).
+///
+/// Behind the `image-import` feature (pulls in the `image` crate) - see
+/// docs/development.md for the "core"/"full" wasm-pack build split this enables.
+#[cfg(feature = "image-import")]
 #[wasm_bindgen]
 pub async fn image_to_pdf(file: Uint8Array, options: JsValue) -> std::result::Result<Uint8Array, JsValue> {
     let options: operations::image::ImagePageOptions = if options.is_undefined() || options.is_null() {

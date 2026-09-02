@@ -82,22 +82,22 @@ async function main() {
   await pageCards.nth(0).dragTo(pageCards.nth(2));
   const orderAfterDrag = await page.evaluate(() => {
     const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
-    return Array.from(view.shadowRoot.querySelectorAll("pdf-page-card")).map((c) => c.preview.id);
+    return Array.from(view.shadowRoot.querySelectorAll("pdf-page-card")).map((c) => c.data.id);
   });
 
   // --- Rotate page 1, delete page 2 - both local state, no wasm round-trip ---
   await page.evaluate(() => {
     const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
     const cards = Array.from(view.shadowRoot.querySelectorAll("pdf-page-card"));
-    cards.find((c) => c.preview.id === 1).shadowRoot.querySelector('[data-action="rotate-right"]').click();
-    cards.find((c) => c.preview.id === 2).shadowRoot.querySelector('[data-action="toggle-delete"]').click();
+    cards.find((c) => c.data.id === 1).shadowRoot.querySelector('[data-action="rotate-right"]').click();
+    cards.find((c) => c.data.id === 2).shadowRoot.querySelector('[data-action="toggle-delete"]').click();
   });
   const stateAfterEdits = await page.evaluate(() => {
     const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
     const cards = Array.from(view.shadowRoot.querySelectorAll("pdf-page-card"));
     return {
-      rotation: cards.find((c) => c.preview.id === 1).preview.pendingRotation,
-      deleted: cards.find((c) => c.preview.id === 2).preview.markedForDeletion,
+      rotation: cards.find((c) => c.data.id === 1).data.pendingRotation,
+      deleted: cards.find((c) => c.data.id === 2).data.markedForDeletion,
     };
   });
 
@@ -223,8 +223,70 @@ async function main() {
   const imagePreviewRendered = await page.evaluate(() => {
     const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
     const cards = view.shadowRoot.querySelectorAll("pdf-page-card");
-    return cards[0].preview.png.length > 0;
+    return cards[0].data.png.length > 0;
   });
+
+  // --- Virtual scroll: a document above VIRTUAL_SCROLL_THRESHOLD (24 pages)
+  // should get a placeholder card for every page right away, but only fill
+  // in real previews for cards that actually scroll into view - and its pill
+  // should never fill/mark done, since it was never meant to finish "all at
+  // once" the way a normal document's preview-progress event implies. ---
+  await page.setViewportSize({ width: 380, height: 320 });
+  await page.locator("pdf-editor-app").locator('[data-el="input"]').setInputFiles([path.join(fixtures, "many_pages.pdf")]);
+  await page.waitForFunction(() => {
+    const app = document.querySelector("pdf-editor-app");
+    return app?.shadowRoot?.querySelectorAll('[data-el="doclist"] li').length === 7;
+  });
+  await page.evaluate(() => {
+    const app = document.querySelector("pdf-editor-app");
+    const items = Array.from(app.shadowRoot.querySelectorAll('[data-el="doclist"] li button'));
+    items.find((b) => b.textContent.includes("many_pages.pdf")).click();
+  });
+  await page.waitForFunction(() => {
+    const view = document.querySelector("pdf-editor-app")?.shadowRoot?.querySelector("pdf-document-view");
+    return view?.shadowRoot?.querySelectorAll("pdf-page-card").length === 30;
+  });
+  const placeholderCountRightAway = await page.evaluate(() => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    const cards = Array.from(view.shadowRoot.querySelectorAll("pdf-page-card"));
+    return cards.filter((c) => !("png" in c.data)).length;
+  });
+
+  // Give the observer a moment to settle the pages near the (tiny) viewport,
+  // then confirm the last page - well outside it, and outside its rootMargin
+  // prefetch too, at this viewport size - has genuinely not been rendered yet.
+  await page.waitForTimeout(500);
+  const farPageNotRenderedBeforeScroll = await page.evaluate(() => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    const cards = Array.from(view.shadowRoot.querySelectorAll("pdf-page-card"));
+    return !("png" in cards[cards.length - 1].data);
+  });
+
+  await page.evaluate(() => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    const cards = Array.from(view.shadowRoot.querySelectorAll("pdf-page-card"));
+    cards[cards.length - 1].scrollIntoView();
+  });
+  const farPageRenderedAfterScroll = await page
+    .waitForFunction(() => {
+      const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+      const cards = Array.from(view.shadowRoot.querySelectorAll("pdf-page-card"));
+      return "png" in cards[cards.length - 1].data;
+    })
+    .then(() => true)
+    .catch(() => false);
+
+  const virtualScrollPillStaysNeutral = await page.evaluate(() => {
+    const app = document.querySelector("pdf-editor-app");
+    const items = Array.from(app.shadowRoot.querySelectorAll('[data-el="doclist"] li'));
+    const pill = items.find((li) => li.querySelector("button")?.textContent?.includes("many_pages.pdf"));
+    // No inline width was ever set for this pill (preview-progress never
+    // fired for it) - the CSS default (width: 0%) is what's showing, not a
+    // completed-and-reset "0%" written by the progress handler.
+    const width = pill.querySelector(".fill").style.width;
+    return (width === "" || parseFloat(width) === 0) && !pill.classList.contains("render-done");
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
 
   await page.screenshot({ path: path.join(dirname, "editor.png"), fullPage: true });
   await browser.close();
@@ -241,6 +303,10 @@ async function main() {
     "dropping a JPEG registers a one-page document": imageDocPageCount.includes("(1p)"),
     "merging the image document with a PDF sums their page counts (1+2=3)": afterImageMerge.heading.includes("3 pagine"),
     "the merged image page actually renders (JPEG survived compress())": imagePreviewRendered,
+    "virtual scroll: every page gets a placeholder card immediately": placeholderCountRightAway === 30,
+    "virtual scroll: a far-off page isn't rendered before it scrolls into view": farPageNotRenderedBeforeScroll,
+    "virtual scroll: scrolling a page into view renders it": farPageRenderedAfterScroll,
+    "virtual scroll: the pill never fills/marks done for this document": virtualScrollPillStaysNeutral,
     "no console/page errors": consoleErrors.length === 0,
   };
 

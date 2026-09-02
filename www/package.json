@@ -11,7 +11,8 @@
     "test:editor": "node e2e/editor.mjs"
   },
   "dependencies": {
-    "pdfrs": "file:../pkg"
+    "pdfrs": "file:../pkg",
+    "pdfrs-full": "file:../pkg-full"
   },
   "devDependencies": {
     "playwright": "^1.62.1",

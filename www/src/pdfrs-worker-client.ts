@@ -2,10 +2,11 @@
 // signatures as the "pdfrs" wasm package, but every call is a postMessage
 // round-trip to the worker instead of a direct call, wrapped back into a
 // Promise so call sites don't need to know a worker is involved at all.
+import { createPdfrsWorker } from "./create-pdfrs-worker";
 import type { ImagePageOptions } from "./pdf-model/types";
 import type { WorkerRequest, WorkerResponse } from "./worker-protocol";
 
-const worker = new Worker(new URL("./pdfrs.worker.ts", import.meta.url), { type: "module" });
+const worker = createPdfrsWorker();
 
 let nextId = 1;
 const pending = new Map<number, { resolve: (value: unknown) => void; reject: (err: Error) => void }>();
