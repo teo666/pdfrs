@@ -15,6 +15,9 @@ import {
 import { bytesToObjectUrl, downloadBytes, fileToUint8Array, setupFileInput } from "./pdf-io";
 import { parseLayout, parseRanges, parseRotations } from "./parsers";
 import { renderPagesInParallel } from "./preview-worker-pool";
+// Side-effect import: registers <pdf-editor-app> (and the components it uses
+// internally) for the "Editor" tab. See src/webcomponents/index.ts.
+import "./webcomponents";
 
 // Above this many pages, Preview spreads rendering across a pool of workers
 // (see preview-worker-pool.ts) instead of one page at a time on the single
@@ -26,6 +29,24 @@ function byId<T extends HTMLElement>(id: string): T {
   const el = document.getElementById(id);
   if (!el) throw new Error(`Elemento #${id} non trovato`);
   return el as T;
+}
+
+// Tab navigation: only one panel visible at a time, switched entirely via
+// JS (no URL/route change) - all panels stay on the same page, just
+// hidden/shown, so nothing here needs its own route.
+{
+  const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>("#tabs .tab"));
+  const panels = tabs.map((tab) => byId<HTMLElement>(tab.dataset.target ?? ""));
+
+  function activate(index: number) {
+    tabs.forEach((tab, i) => tab.classList.toggle("tab--active", i === index));
+    panels.forEach((panel, i) => {
+      panel.hidden = i !== index;
+    });
+  }
+
+  tabs.forEach((tab, index) => tab.addEventListener("click", () => activate(index)));
+  activate(0);
 }
 
 // Ticks every animation frame purely to prove the main thread stays
@@ -106,6 +127,7 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
 // --- Preview: drop a PDF, render one thumbnail card per page ---
 {
   const status = byId<HTMLElement>("preview-status");
+  const progress = byId<HTMLProgressElement>("preview-progress");
   const grid = byId<HTMLElement>("preview-grid");
   const drop = byId<HTMLElement>("preview-drop");
   const input = byId<HTMLInputElement>("preview-input");
@@ -139,17 +161,30 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
         cardImages.set(page, img);
       }
 
+      let done = 0;
+      progress.value = 0;
+      progress.max = count;
+      progress.hidden = false;
+
       const fillCard = (page: number, png: Uint8Array) => {
         const img = cardImages.get(page);
         if (img) img.src = bytesToObjectUrl(png, "image/png");
+        done += 1;
+        progress.value = done;
+        setStatus(status, `Rendering anteprime… (${done}/${count})`);
       };
 
-      if (count > PARALLEL_PREVIEW_THRESHOLD) {
-        await renderPagesInParallel(bytes, count, 0.4, fillCard);
-      } else {
-        for (let page = 1; page <= count; page++) {
-          fillCard(page, await render_page_preview(bytes, page, 0.4));
+      try {
+        if (count > PARALLEL_PREVIEW_THRESHOLD) {
+          const allPages = Array.from({ length: count }, (_, index) => index + 1);
+          await renderPagesInParallel(bytes, allPages, 0.4, fillCard);
+        } else {
+          for (let page = 1; page <= count; page++) {
+            fillCard(page, await render_page_preview(bytes, page, 0.4));
+          }
         }
+      } finally {
+        progress.hidden = true;
       }
 
       setStatus(status, `Fatto: ${count} pagine renderizzate`, "ok");

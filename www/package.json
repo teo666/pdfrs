@@ -6,7 +6,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test:e2e": "node e2e/smoke.mjs"
+    "test:e2e": "node e2e/smoke.mjs",
+    "test:model": "node e2e/pdf-model.mjs",
+    "test:editor": "node e2e/editor.mjs"
   },
   "dependencies": {
     "pdfrs": "file:../pkg"

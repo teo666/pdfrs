@@ -10,18 +10,53 @@
         font-family: system-ui, sans-serif;
       }
       body {
-        max-width: 960px;
+        max-width: 1100px;
         margin: 2rem auto;
         padding: 0 1rem;
       }
       h1 {
         font-size: 1.4rem;
       }
+      .app {
+        display: flex;
+        gap: 1.5rem;
+        align-items: flex-start;
+        margin-top: 1rem;
+      }
+      .sidebar {
+        flex: 0 0 150px;
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+        position: sticky;
+        top: 1rem;
+      }
+      .tab {
+        text-align: left;
+        background: none;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        padding: 0.5rem 0.75rem;
+        font-size: 0.9rem;
+        cursor: pointer;
+        color: inherit;
+      }
+      .tab:hover {
+        background: #8882;
+      }
+      .tab--active {
+        background: #3b82f61a;
+        border-color: #3b82f655;
+        font-weight: 600;
+      }
+      .content {
+        flex: 1;
+        min-width: 0;
+      }
       .panel {
         border: 1px solid #8884;
         border-radius: 8px;
         padding: 1rem;
-        margin-bottom: 1.5rem;
       }
       .panel h2 {
         margin-top: 0;
@@ -91,6 +126,10 @@
         gap: 0.75rem;
         margin-top: 0.75rem;
       }
+      #preview-progress {
+        width: 100%;
+        margin-top: 0.5rem;
+      }
       .preview-card {
         width: 140px;
         border: 1px solid #8884;
@@ -131,97 +170,123 @@
       UI thread libero — tick: <strong id="heartbeat-count">0</strong>
     </p>
 
-    <section class="panel" id="panel-preview">
-      <h2>Preview</h2>
-      <div class="dropzone" id="preview-drop">Trascina un PDF qui, o clicca per scegliere: viene renderizzata subito una card per pagina</div>
-      <input type="file" id="preview-input" accept="application/pdf" hidden />
-      <div class="status" id="preview-status"></div>
-      <div class="preview-grid" id="preview-grid"></div>
-    </section>
+    <div class="app">
+      <nav class="sidebar" id="tabs">
+        <button type="button" class="tab" data-target="panel-preview">Preview</button>
+        <button type="button" class="tab" data-target="panel-merge">Merge</button>
+        <button type="button" class="tab" data-target="panel-split">Split</button>
+        <button type="button" class="tab" data-target="panel-rotate">Rotate</button>
+        <button type="button" class="tab" data-target="panel-compose">Compose</button>
+        <button type="button" class="tab" data-target="panel-encrypt">Encrypt</button>
+        <button type="button" class="tab" data-target="panel-decrypt">Decrypt</button>
+        <button type="button" class="tab" data-target="panel-editor">Editor</button>
+      </nav>
 
-    <section class="panel" id="panel-merge">
-      <h2>Merge</h2>
-      <div class="dropzone" id="merge-drop">Trascina uno o più PDF qui, o clicca per scegliere</div>
-      <input type="file" id="merge-input" accept="application/pdf" multiple hidden />
-      <ul class="filelist" id="merge-filelist"></ul>
-      <div class="row">
-        <button id="merge-clear" type="button">Svuota lista</button>
-        <button id="merge-run" type="button">Esegui merge</button>
-      </div>
-      <div class="status" id="merge-status"></div>
-    </section>
+      <div class="content">
+        <section class="panel" id="panel-preview">
+          <h2>Preview</h2>
+          <div class="dropzone" id="preview-drop">Trascina un PDF qui, o clicca per scegliere: viene renderizzata subito una card per pagina</div>
+          <input type="file" id="preview-input" accept="application/pdf" hidden />
+          <progress id="preview-progress" hidden value="0" max="1"></progress>
+          <div class="status" id="preview-status"></div>
+          <div class="preview-grid" id="preview-grid"></div>
+        </section>
 
-    <section class="panel" id="panel-split">
-      <h2>Split</h2>
-      <div class="dropzone" id="split-drop">Trascina un PDF qui, o clicca per scegliere</div>
-      <input type="file" id="split-input" accept="application/pdf" hidden />
-      <div class="hint" id="split-filename">Nessun file selezionato</div>
-      <div class="row">
-        <label for="split-ranges">Range pagine</label>
-        <input type="text" id="split-ranges" placeholder="es. 1-2,3-4" />
-      </div>
-      <button id="split-run" type="button">Esegui split</button>
-      <div class="status" id="split-status"></div>
-    </section>
+        <section class="panel" id="panel-merge">
+          <h2>Merge</h2>
+          <div class="dropzone" id="merge-drop">Trascina uno o più PDF qui, o clicca per scegliere</div>
+          <input type="file" id="merge-input" accept="application/pdf" multiple hidden />
+          <ul class="filelist" id="merge-filelist"></ul>
+          <div class="row">
+            <button id="merge-clear" type="button">Svuota lista</button>
+            <button id="merge-run" type="button">Esegui merge</button>
+          </div>
+          <div class="status" id="merge-status"></div>
+        </section>
 
-    <section class="panel" id="panel-rotate">
-      <h2>Rotate</h2>
-      <div class="dropzone" id="rotate-drop">Trascina un PDF qui, o clicca per scegliere</div>
-      <input type="file" id="rotate-input" accept="application/pdf" hidden />
-      <div class="hint" id="rotate-filename">Nessun file selezionato</div>
-      <div class="row">
-        <label for="rotate-rotations">Rotazioni</label>
-        <input type="text" id="rotate-rotations" placeholder="es. 1:90,2:180" />
-      </div>
-      <button id="rotate-run" type="button">Esegui rotate</button>
-      <div class="status" id="rotate-status"></div>
-    </section>
+        <section class="panel" id="panel-split">
+          <h2>Split</h2>
+          <div class="dropzone" id="split-drop">Trascina un PDF qui, o clicca per scegliere</div>
+          <input type="file" id="split-input" accept="application/pdf" hidden />
+          <div class="hint" id="split-filename">Nessun file selezionato</div>
+          <div class="row">
+            <label for="split-ranges">Range pagine</label>
+            <input type="text" id="split-ranges" placeholder="es. 1-2,3-4" />
+          </div>
+          <button id="split-run" type="button">Esegui split</button>
+          <div class="status" id="split-status"></div>
+        </section>
 
-    <section class="panel" id="panel-compose">
-      <h2>Compose</h2>
-      <div class="dropzone" id="compose-drop">Trascina i PDF sorgente qui, o clicca per scegliere</div>
-      <input type="file" id="compose-input" accept="application/pdf" multiple hidden />
-      <ul class="filelist" id="compose-filelist"></ul>
-      <div class="row">
-        <label for="compose-layout">Layout</label>
-        <input type="text" id="compose-layout" placeholder="sorgente:pagina, es. 0:1,1:1,0:2" />
-      </div>
-      <div class="row">
-        <button id="compose-clear" type="button">Svuota lista</button>
-        <button id="compose-run" type="button">Esegui compose</button>
-      </div>
-      <div class="status" id="compose-status"></div>
-    </section>
+        <section class="panel" id="panel-rotate">
+          <h2>Rotate</h2>
+          <div class="dropzone" id="rotate-drop">Trascina un PDF qui, o clicca per scegliere</div>
+          <input type="file" id="rotate-input" accept="application/pdf" hidden />
+          <div class="hint" id="rotate-filename">Nessun file selezionato</div>
+          <div class="row">
+            <label for="rotate-rotations">Rotazioni</label>
+            <input type="text" id="rotate-rotations" placeholder="es. 1:90,2:180" />
+          </div>
+          <button id="rotate-run" type="button">Esegui rotate</button>
+          <div class="status" id="rotate-status"></div>
+        </section>
 
-    <section class="panel" id="panel-encrypt">
-      <h2>Encrypt</h2>
-      <div class="dropzone" id="encrypt-drop">Trascina un PDF qui, o clicca per scegliere</div>
-      <input type="file" id="encrypt-input" accept="application/pdf" hidden />
-      <div class="hint" id="encrypt-filename">Nessun file selezionato</div>
-      <div class="row">
-        <label for="encrypt-owner">Owner password</label>
-        <input type="password" id="encrypt-owner" />
-      </div>
-      <div class="row">
-        <label for="encrypt-user">User password</label>
-        <input type="password" id="encrypt-user" />
-      </div>
-      <button id="encrypt-run" type="button">Esegui encrypt</button>
-      <div class="status" id="encrypt-status"></div>
-    </section>
+        <section class="panel" id="panel-compose">
+          <h2>Compose</h2>
+          <div class="dropzone" id="compose-drop">Trascina i PDF sorgente qui, o clicca per scegliere</div>
+          <input type="file" id="compose-input" accept="application/pdf" multiple hidden />
+          <ul class="filelist" id="compose-filelist"></ul>
+          <div class="row">
+            <label for="compose-layout">Layout</label>
+            <input type="text" id="compose-layout" placeholder="sorgente:pagina, es. 0:1,1:1,0:2" />
+          </div>
+          <div class="row">
+            <button id="compose-clear" type="button">Svuota lista</button>
+            <button id="compose-run" type="button">Esegui compose</button>
+          </div>
+          <div class="status" id="compose-status"></div>
+        </section>
 
-    <section class="panel" id="panel-decrypt">
-      <h2>Decrypt</h2>
-      <div class="dropzone" id="decrypt-drop">Trascina un PDF qui, o clicca per scegliere</div>
-      <input type="file" id="decrypt-input" accept="application/pdf" hidden />
-      <div class="hint" id="decrypt-filename">Nessun file selezionato</div>
-      <div class="row">
-        <label for="decrypt-password">Password</label>
-        <input type="password" id="decrypt-password" />
+        <section class="panel" id="panel-encrypt">
+          <h2>Encrypt</h2>
+          <div class="dropzone" id="encrypt-drop">Trascina un PDF qui, o clicca per scegliere</div>
+          <input type="file" id="encrypt-input" accept="application/pdf" hidden />
+          <div class="hint" id="encrypt-filename">Nessun file selezionato</div>
+          <div class="row">
+            <label for="encrypt-owner">Owner password</label>
+            <input type="password" id="encrypt-owner" />
+          </div>
+          <div class="row">
+            <label for="encrypt-user">User password</label>
+            <input type="password" id="encrypt-user" />
+          </div>
+          <button id="encrypt-run" type="button">Esegui encrypt</button>
+          <div class="status" id="encrypt-status"></div>
+        </section>
+
+        <section class="panel" id="panel-decrypt">
+          <h2>Decrypt</h2>
+          <div class="dropzone" id="decrypt-drop">Trascina un PDF qui, o clicca per scegliere</div>
+          <input type="file" id="decrypt-input" accept="application/pdf" hidden />
+          <div class="hint" id="decrypt-filename">Nessun file selezionato</div>
+          <div class="row">
+            <label for="decrypt-password">Password</label>
+            <input type="password" id="decrypt-password" />
+          </div>
+          <button id="decrypt-run" type="button">Esegui decrypt</button>
+          <div class="status" id="decrypt-status"></div>
+        </section>
+
+        <section class="panel" id="panel-editor">
+          <h2>Editor</h2>
+          <p class="hint">
+            Esempio con Web Components che wrappa <code>PdfDocument</code>/<code>PdfEditor</code>
+            (<code>src/pdf-model/</code>) invece di chiamare le API a basso livello direttamente — un'anteprima di
+            come un frontend reale (es. il futuro front Vue) potrebbe wrappare queste stesse classi.
+          </p>
+          <pdf-editor-app></pdf-editor-app>
+        </section>
       </div>
-      <button id="decrypt-run" type="button">Esegui decrypt</button>
-      <div class="status" id="decrypt-status"></div>
-    </section>
+    </div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

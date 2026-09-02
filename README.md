@@ -24,6 +24,8 @@ cd www
 pnpm install
 pnpm dev          # http://localhost:5173
 pnpm test:e2e     # smoke test end-to-end automatico (Playwright)
+pnpm test:model   # test del modello logico PdfDocument/PdfEditor (src/pdf-model/)
+pnpm test:editor  # test dell'editor visivo Web Components (tab "Editor", src/webcomponents/)
 ```
 
 ## Struttura del repository

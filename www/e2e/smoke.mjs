@@ -52,11 +52,15 @@ async function main() {
   await page.goto(baseUrl, { waitUntil: "networkidle" });
   await page.waitForSelector("text=Merge", { timeout: 10_000 });
 
+  // A terminal status always starts with "Fatto" or "Errore" - not just
+  // "anything other than 'In corso…'", since panels with a progress bar
+  // (Preview) pass through intermediate "Rendering anteprime… (n/m)" states
+  // first, which would otherwise look "settled" too early.
   async function waitForSettledStatus(selector) {
-    await page.waitForFunction(
-      (sel) => document.querySelector(sel)?.textContent?.trim() !== "In corso…",
-      selector,
-    );
+    await page.waitForFunction((sel) => {
+      const text = document.querySelector(sel)?.textContent?.trim() ?? "";
+      return text.startsWith("Fatto") || text.startsWith("Errore");
+    }, selector);
     return (await page.textContent(selector)).trim();
   }
 
@@ -71,7 +75,12 @@ async function main() {
   await page.waitForTimeout(100);
   const heartbeatIsTicking = (await readHeartbeat()) > heartbeatBeforeCalls;
 
+  function switchTab(target) {
+    return page.click(`#tabs [data-target="${target}"]`);
+  }
+
   // --- Preview: drop two_pages.pdf, expect one thumbnail card per page ---
+  await switchTab("panel-preview");
   const heartbeatBeforePreview = await readHeartbeat();
   await page.setInputFiles("#preview-input", [path.join(fixtures, "two_pages.pdf")]);
   const previewStatus = await waitForSettledStatus("#preview-status");
@@ -80,9 +89,21 @@ async function main() {
 
   // --- Preview with a worker pool: ten_pages.pdf has more pages than
   // PARALLEL_PREVIEW_THRESHOLD (6), so this run should fan out across
-  // several workers instead of the single shared one used above. ---
+  // several workers instead of the single shared one used above. Also
+  // exercises the progress bar, since a fresh (uncached) 10-page render
+  // takes long enough to actually observe it mid-flight. ---
   await page.setInputFiles("#preview-input", [path.join(fixtures, "ten_pages.pdf")]);
+  const progressWasShownDuringPreview = await page
+    .waitForFunction(() => {
+      const progress = document.querySelector("#preview-progress");
+      return progress && !progress.hidden;
+    })
+    .then(() => true)
+    .catch(() => false);
   const parallelPreviewStatus = await waitForSettledStatus("#preview-status");
+  const progressHiddenAfterPreview = await page.evaluate(
+    () => document.querySelector("#preview-progress")?.hidden,
+  );
   const parallelPreviewCardCount = await page.locator("#preview-grid .preview-card").count();
   const parallelPreviewImageCount = await page
     .locator("#preview-grid .preview-card img")
@@ -90,6 +111,7 @@ async function main() {
   const previewPoolSize = await page.evaluate(() => window.__pdfrsLastPreviewPoolSize);
 
   // --- Merge: two_pages.pdf + one_page.pdf -> expect a download ---
+  await switchTab("panel-merge");
   await page.setInputFiles("#merge-input", [
     path.join(fixtures, "two_pages.pdf"),
     path.join(fixtures, "one_page.pdf"),
@@ -98,6 +120,7 @@ async function main() {
   const mergeStatus = await waitForSettledStatus("#merge-status");
 
   // --- Split four_pages.pdf into 1-2 and 3-4 -> expect two downloads ---
+  await switchTab("panel-split");
   await page.setInputFiles("#split-input", [path.join(fixtures, "four_pages.pdf")]);
   await page.fill("#split-ranges", "1-2,3-4");
   const splitDownloads = [];
@@ -108,12 +131,14 @@ async function main() {
   const splitStatus = await waitForSettledStatus("#split-status");
 
   // --- Rotate one_page.pdf ---
+  await switchTab("panel-rotate");
   await page.setInputFiles("#rotate-input", [path.join(fixtures, "one_page.pdf")]);
   await page.fill("#rotate-rotations", "1:90");
   const [rotateDownload] = await Promise.all([page.waitForEvent("download"), page.click("#rotate-run")]);
   const rotateStatus = await waitForSettledStatus("#rotate-status");
 
   // --- Compose: interleave pages from two_pages.pdf and one_page.pdf ---
+  await switchTab("panel-compose");
   await page.setInputFiles("#compose-input", [
     path.join(fixtures, "two_pages.pdf"),
     path.join(fixtures, "one_page.pdf"),
@@ -123,6 +148,7 @@ async function main() {
   const composeStatus = await waitForSettledStatus("#compose-status");
 
   // --- Encrypt one_page.pdf, then feed the result back into Decrypt ---
+  await switchTab("panel-encrypt");
   await page.setInputFiles("#encrypt-input", [path.join(fixtures, "one_page.pdf")]);
   await page.fill("#encrypt-owner", "owner-secret");
   await page.fill("#encrypt-user", "user-secret");
@@ -133,6 +159,7 @@ async function main() {
   await encryptDownload.saveAs(encryptedPath);
 
   // Wrong password -> expect an error surfaced in the status area, no crash.
+  await switchTab("panel-decrypt");
   await page.setInputFiles("#decrypt-input", [encryptedPath]);
   await page.fill("#decrypt-password", "wrong-password");
   await page.click("#decrypt-run");
@@ -155,6 +182,8 @@ async function main() {
     "parallel preview renders one card per page": parallelPreviewCardCount === 10,
     "parallel preview fills every card with an image": parallelPreviewImageCount === 10,
     "parallel preview actually used more than one worker": previewPoolSize > 1,
+    "preview progress bar becomes visible while rendering": progressWasShownDuringPreview,
+    "preview progress bar hides again once rendering completes": progressHiddenAfterPreview,
     "merge downloads merged.pdf": mergeDownload.suggestedFilename() === "merged.pdf",
     "merge status succeeds": mergeStatus.startsWith("Fatto"),
     "split downloads 2 files": splitDownloads.length === 2,

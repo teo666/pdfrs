@@ -13,22 +13,23 @@ declare global {
 }
 
 /**
- * Renders pages `1..=pageCount` of `bytes` to PNG, spread across a pool of
- * workers. Pages are handed out one at a time from a shared queue - not
- * pre-sliced into fixed per-worker chunks - so a worker that finishes a
- * cheap page immediately grabs the next one instead of idling while another
- * worker is stuck on a heavier page.
+ * Renders `pages` (arbitrary page numbers, not necessarily contiguous or
+ * sorted - e.g. only the ones missing from a cache) of `bytes` to PNG,
+ * spread across a pool of workers. Pages are handed out one at a time from a
+ * shared queue - not pre-sliced into fixed per-worker chunks - so a worker
+ * that finishes a cheap page immediately grabs the next one instead of
+ * idling while another worker is stuck on a heavier page.
  *
  * `onPage` fires as soon as each page finishes, in whatever order workers
- * complete them (not necessarily page order) - callers should slot results
- * into their UI keyed by `page`, not by arrival order.
+ * complete them (not necessarily the order of `pages`) - callers should slot
+ * results into their UI keyed by `page`, not by arrival order.
  */
 export async function renderPagesInParallel(
   bytes: Uint8Array,
-  pageCount: number,
+  pages: number[],
   scale: number,
   onPage: (page: number, png: Uint8Array) => void,
-  poolSize = Math.min(navigator.hardwareConcurrency || 4, pageCount, 8),
+  poolSize = Math.min(navigator.hardwareConcurrency || 4, pages.length, 8),
 ): Promise<void> {
   window.__pdfrsLastPreviewPoolSize = poolSize;
 
@@ -37,14 +38,14 @@ export async function renderPagesInParallel(
     () => new Worker(new URL("./pdfrs.worker.ts", import.meta.url), { type: "module" }),
   );
 
-  let nextPage = 1;
-  let remaining = pageCount;
+  let nextIndex = 0;
+  let remaining = pages.length;
 
   try {
     await new Promise<void>((resolve, reject) => {
       const dispatch = (worker: Worker) => {
-        if (nextPage > pageCount) return;
-        const page = nextPage++;
+        if (nextIndex >= pages.length) return;
+        const page = pages[nextIndex++];
 
         const handleMessage = (event: MessageEvent<WorkerResponse>) => {
           worker.removeEventListener("message", handleMessage);
