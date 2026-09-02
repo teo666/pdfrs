@@ -358,6 +358,36 @@ async function main() {
     { bytesA: twoPagesBytes, bytesB: onePageBytes },
   );
 
+  // --- mergeDocuments carries over already-rendered previews: a page that
+  // was previewed in a source document must NOT be re-rendered in the
+  // merged result - proven by reference equality (===), not just equal
+  // content, same trick as the standalone cache tests above. ---
+  results["mergeDocuments transplants cached previews (no re-render for pages already seen)"] = await page.evaluate(
+    async ({ bytesA, bytesB }) => {
+      const { PdfEditor } = window.__pdfModel;
+      const editor = new PdfEditor();
+      const idA = await editor.addDocument(new Uint8Array(bytesA)); // two_pages.pdf
+      const idB = await editor.addDocument(new Uint8Array(bytesB)); // one_page.pdf
+
+      // Preview both pages of A and the single page of B *before* merging.
+      const aPreviews = await editor.getDocument(idA).getPreviews(0.3);
+      const bPreview = await editor.getDocument(idB).getPreview(1, 0.3);
+
+      const mergedId = await editor.mergeDocuments([idA, idB]);
+      const merged = editor.getDocument(mergedId);
+
+      // A's pages 1,2 become the merged doc's pages 1,2; B's page 1 becomes page 3.
+      const mergedPreviews = await merged.getPreviews(0.3);
+
+      return (
+        mergedPreviews[0].png === aPreviews[0].png &&
+        mergedPreviews[1].png === aPreviews[1].png &&
+        mergedPreviews[2].png === bPreview.png
+      );
+    },
+    { bytesA: twoPagesBytes, bytesB: onePageBytes },
+  );
+
   results["PdfEditor.splitDocument registers one new document per range"] = await page.evaluate(async (bytes) => {
     const { PdfEditor } = window.__pdfModel;
     const editor = new PdfEditor();

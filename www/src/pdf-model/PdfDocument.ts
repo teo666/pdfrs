@@ -221,6 +221,28 @@ export class PdfDocument {
     return previews;
   }
 
+  /**
+   * @internal Used only by `PdfEditor.mergeDocuments()` to transplant already
+   * -rendered previews from a source document into the merged result, so a
+   * page that's pixel-identical to one already shown doesn't get re-rendered
+   * just because it now lives at a different page number in a new document.
+   * Not part of the public API - deliberately not a generic/global cache
+   * (see docs/development.md for why), just this one targeted transfer.
+   */
+  cachedEntriesForPage(id: PageId): [scale: number, png: Uint8Array][] {
+    const prefix = `${id}:`;
+    const entries: [number, Uint8Array][] = [];
+    for (const [key, png] of this.previewCache) {
+      if (key.startsWith(prefix)) entries.push([Number(key.slice(prefix.length)), png]);
+    }
+    return entries;
+  }
+
+  /** @internal See `cachedEntriesForPage`. */
+  primeCache(id: PageId, scale: number, png: Uint8Array): void {
+    this.previewCache.set(cacheKey(id, scale), png);
+  }
+
   /** Applies pending rotations/deletions, replacing this document's baseline and clearing pending state. */
   async commit(): Promise<void> {
     this.bytes = await this.computeCommittedBytes();

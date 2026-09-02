@@ -3,6 +3,11 @@ import type { PdfDocument } from "../pdf-model/PdfDocument";
 import type { PagePreview } from "../pdf-model/types";
 import type { PageActionDetail, PageDragOverDetail, PdfPageCard } from "./pdf-page-card";
 
+export interface PreviewProgressDetail {
+  done: number;
+  total: number;
+}
+
 /**
  * Wraps one `PdfDocument`: renders its pages as `<pdf-page-card>` thumbnails,
  * applies rotate/delete actions from those cards, and exposes commit/export.
@@ -33,7 +38,6 @@ export class PdfDocumentView extends HTMLElement {
         .status { margin-top: 0.5rem; font-size: 0.85rem; color: #666; }
         .status--error { color: #dc2626; }
         .empty { color: #888; font-size: 0.9rem; }
-        progress { width: 100%; margin-top: 0.5rem; }
       </style>
       <div class="toolbar">
         <h3></h3>
@@ -43,7 +47,6 @@ export class PdfDocumentView extends HTMLElement {
       </div>
       <div class="grid"></div>
       <p class="empty" hidden>Nessun documento selezionato.</p>
-      <progress hidden value="0" max="1"></progress>
       <div class="status"></div>
     `;
     this.root.addEventListener("page-action", (event) => this.handlePageAction(event as CustomEvent<PageActionDetail>));
@@ -72,17 +75,13 @@ export class PdfDocumentView extends HTMLElement {
 
   private async refresh(): Promise<void> {
     if (!this.doc) return;
-    const progress = this.root.querySelector("progress") as HTMLProgressElement;
-    progress.hidden = false;
-    progress.value = 0;
-    progress.max = this.doc.getPageCount();
     this.setStatus("Rendering anteprime…");
+    this.emitProgress(0, this.doc.getPageCount());
     try {
       const previews = await this.doc.getPreviews(0.3, {
         onProgress: (done, total) => {
-          progress.value = done;
-          progress.max = total;
           this.setStatus(`Rendering anteprime… (${done}/${total})`);
+          this.emitProgress(done, total);
         },
       });
       const grid = this.root.querySelector(".grid") as HTMLElement;
@@ -95,9 +94,18 @@ export class PdfDocumentView extends HTMLElement {
       this.setStatus("");
     } catch (err) {
       this.setStatus(`Errore: ${err instanceof Error ? err.message : String(err)}`, true);
-    } finally {
-      progress.hidden = true;
     }
+  }
+
+  /**
+   * Reports rendering progress upward instead of showing it itself - the
+   * example UI (`<pdf-editor-app>`) displays it as a fill on the active
+   * document's pill in the doc list, right under the dropzone, not here.
+   */
+  private emitProgress(done: number, total: number): void {
+    this.dispatchEvent(
+      new CustomEvent<PreviewProgressDetail>("preview-progress", { detail: { done, total }, bubbles: true, composed: true }),
+    );
   }
 
   /** Rotate/delete only ever touch this document's in-memory pending state - no wasm call, so just re-render the one affected card. */

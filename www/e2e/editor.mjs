@@ -143,9 +143,10 @@ async function main() {
     };
   });
 
-  // --- Progress bar: open a bigger document and check the <progress> element
-  // in <pdf-document-view> actually becomes visible while rendering, then
-  // hides again once all pages are done. ---
+  // --- Progress on the document's pill: opening a bigger document should
+  // grow a green fill on its <li> in the doclist (not a <progress> bar at
+  // the bottom of the page anymore), then mark it "done" (border) once
+  // every page has rendered. ---
   await page.locator("pdf-editor-app").locator('[data-el="input"]').setInputFiles([path.join(fixtures, "ten_pages.pdf")]);
   await page.waitForFunction(() => {
     const app = document.querySelector("pdf-editor-app");
@@ -157,18 +158,25 @@ async function main() {
     const items = Array.from(app.shadowRoot.querySelectorAll('[data-el="doclist"] li button'));
     items.find((b) => b.textContent.includes("ten_pages.pdf")).click();
   });
-  const progressWasShown = await page.waitForFunction(() => {
-    const view = document.querySelector("pdf-editor-app")?.shadowRoot?.querySelector("pdf-document-view");
-    const progress = view?.shadowRoot?.querySelector("progress");
-    return progress && !progress.hidden;
-  }).then(() => true).catch(() => false);
+  const pillFillGrewDuringRender = await page
+    .waitForFunction(() => {
+      const app = document.querySelector("pdf-editor-app");
+      const items = Array.from(app.shadowRoot.querySelectorAll('[data-el="doclist"] li'));
+      const pill = items.find((li) => li.querySelector("button")?.textContent?.includes("ten_pages.pdf"));
+      const width = pill ? parseFloat(pill.querySelector(".fill").style.width) : 0;
+      return width > 0 && width < 100;
+    })
+    .then(() => true)
+    .catch(() => false);
   await page.waitForFunction(() => {
     const view = document.querySelector("pdf-editor-app")?.shadowRoot?.querySelector("pdf-document-view");
     return view?.shadowRoot?.querySelectorAll("pdf-page-card").length === 10;
   });
-  const progressHiddenWhenDone = await page.evaluate(() => {
-    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
-    return view.shadowRoot.querySelector("progress").hidden;
+  const pillDoneWhenFinished = await page.evaluate(() => {
+    const app = document.querySelector("pdf-editor-app");
+    const items = Array.from(app.shadowRoot.querySelectorAll('[data-el="doclist"] li'));
+    const pill = items.find((li) => li.querySelector("button")?.textContent?.includes("ten_pages.pdf"));
+    return pill.classList.contains("render-done") && pill.querySelector(".fill").style.width === "100%";
   });
 
   // --- Image import: dropping a JPEG registers a one-page document, and it
@@ -228,8 +236,8 @@ async function main() {
     "commit removes the deleted page (4 -> 3)": afterCommit.cardCount === 3 && afterCommit.heading.includes("3 pagine"),
     "merge registers a third document with the summed page count (3+2=5)":
       afterMerge.docCount === 3 && afterMerge.heading.includes("5 pagine"),
-    "progress bar becomes visible while rendering a bigger document": progressWasShown,
-    "progress bar hides again once rendering completes": progressHiddenWhenDone,
+    "the document's pill fills up (green) while it's rendering": pillFillGrewDuringRender,
+    "the pill is marked done (full fill + border) once rendering completes": pillDoneWhenFinished,
     "dropping a JPEG registers a one-page document": imageDocPageCount.includes("(1p)"),
     "merging the image document with a PDF sums their page counts (1+2=3)": afterImageMerge.heading.includes("3 pagine"),
     "the merged image page actually renders (JPEG survived compress())": imagePreviewRendered,

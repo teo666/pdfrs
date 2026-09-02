@@ -1,7 +1,7 @@
 import { fileToUint8Array, isJpeg, isPdf, setupFileInput } from "../pdf-io";
 import { PdfEditor } from "../pdf-model/PdfEditor";
 import type { DocumentId } from "../pdf-model/types";
-import type { PdfDocumentView } from "./pdf-document-view";
+import type { PdfDocumentView, PreviewProgressDetail } from "./pdf-document-view";
 
 /**
  * Top-level example wiring `PdfEditor` (a registry of `PdfDocument`s) to a
@@ -26,8 +26,31 @@ export class PdfEditorApp extends HTMLElement {
         .dropzone { border: 2px dashed #8888; border-radius: 6px; padding: 1rem; text-align: center; cursor: pointer; color: #666; margin-bottom: 0.75rem; }
         .dropzone--active { border-color: #3b82f6; color: #3b82f6; background: #3b82f611; }
         .doclist { list-style: none; padding: 0; margin: 0 0 0.75rem; display: flex; flex-wrap: wrap; gap: 0.5rem; }
-        .doclist li { display: flex; align-items: center; gap: 0.3rem; border: 1px solid #8884; border-radius: 999px; padding: 0.25rem 0.6rem; font-size: 0.85rem; }
+        .doclist li {
+          position: relative;
+          overflow: hidden;
+          display: flex;
+          align-items: center;
+          gap: 0.3rem;
+          border: 1px solid #8884;
+          border-radius: 999px;
+          padding: 0.25rem 0.6rem;
+          font-size: 0.85rem;
+          transition: border-color 0.2s ease;
+        }
         .doclist li.active { border-color: #3b82f6; background: #3b82f611; }
+        .doclist li.render-done { border-color: #16a34a; }
+        .doclist li .fill {
+          position: absolute;
+          inset: 0;
+          width: 0%;
+          background: #16a34a33;
+          transition: width 0.15s ease;
+          z-index: 0;
+          pointer-events: none;
+        }
+        .doclist li input,
+        .doclist li button { position: relative; z-index: 1; }
         .doclist button { background: none; border: none; cursor: pointer; padding: 0; font: inherit; }
         .merge-row { margin-bottom: 1rem; }
         .status { font-size: 0.85rem; color: #666; margin-bottom: 0.75rem; }
@@ -48,7 +71,21 @@ export class PdfEditorApp extends HTMLElement {
     setupFileInput(dropzone, input, (files) => void this.addFiles(files), (file) => isPdf(file) || isJpeg(file));
 
     this.root.querySelector('[data-action="merge"]')?.addEventListener("click", () => void this.mergeSelected());
-    this.root.addEventListener("document-committed", () => this.renderDocList());
+    this.root.addEventListener("document-committed", () => {
+      // commit() already ran its own refresh() (and the progress events with
+      // it) before dispatching this - renderDocList() rebuilds fresh <li>s
+      // though, which would reset the pill to 0%/not-done right after it
+      // just finished. Mark it done again immediately instead of losing that.
+      this.renderDocList();
+      if (this.activeId === null) return;
+      const item = this.root.querySelector(`li[data-doc-id="${this.activeId}"]`) as HTMLElement | null;
+      if (!item) return;
+      (item.querySelector(".fill") as HTMLElement).style.width = "100%";
+      item.classList.add("render-done");
+    });
+    this.root.addEventListener("preview-progress", (event) =>
+      this.handlePreviewProgress(event as CustomEvent<PreviewProgressDetail>),
+    );
   }
 
   private setStatus(message: string, isError = false): void {
@@ -81,7 +118,12 @@ export class PdfEditorApp extends HTMLElement {
 
     for (const { id, pageCount } of this.editor.listDocuments()) {
       const item = document.createElement("li");
+      item.dataset.docId = String(id);
       if (id === this.activeId) item.classList.add("active");
+
+      const fill = document.createElement("div");
+      fill.className = "fill";
+      item.appendChild(fill);
 
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
@@ -99,6 +141,24 @@ export class PdfEditorApp extends HTMLElement {
       item.append(checkbox, button);
       list.appendChild(item);
     }
+  }
+
+  /**
+   * `<pdf-document-view>` only ever renders `this.activeId`'s document, so a
+   * "preview-progress" event always refers to that one - shown here as a
+   * green fill growing across its pill (right under the dropzone), instead
+   * of a `<progress>` bar at the bottom of the page. A full fill + green
+   * border is the "done" state, reset the next time rendering starts.
+   */
+  private handlePreviewProgress(event: CustomEvent<PreviewProgressDetail>): void {
+    if (this.activeId === null) return;
+    const item = this.root.querySelector(`li[data-doc-id="${this.activeId}"]`) as HTMLElement | null;
+    if (!item) return;
+
+    const { done, total } = event.detail;
+    const fill = item.querySelector(".fill") as HTMLElement;
+    fill.style.width = `${total > 0 ? (done / total) * 100 : 0}%`;
+    item.classList.toggle("render-done", done === total && total > 0);
   }
 
   private async selectDocument(id: DocumentId): Promise<void> {
