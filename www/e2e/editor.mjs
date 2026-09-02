@@ -74,6 +74,17 @@ async function main() {
         .shadowRoot.querySelectorAll("pdf-page-card").length,
   );
 
+  // --- Drag & drop reordering: drag card[0] (page 1) onto card[2] (page 3) -
+  // page 1 should move to that position, shifting 2 and 3 back. Local state
+  // only (movePage), no wasm round-trip. ---
+  const activeDocView = page.locator("pdf-editor-app").locator("pdf-document-view");
+  const pageCards = activeDocView.locator("pdf-page-card");
+  await pageCards.nth(0).dragTo(pageCards.nth(2));
+  const orderAfterDrag = await page.evaluate(() => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    return Array.from(view.shadowRoot.querySelectorAll("pdf-page-card")).map((c) => c.preview.id);
+  });
+
   // --- Rotate page 1, delete page 2 - both local state, no wasm round-trip ---
   await page.evaluate(() => {
     const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
@@ -165,6 +176,7 @@ async function main() {
 
   const results = {
     "opening 2 files renders one card per page for the active document": cardCountAfterOpen === 4,
+    "drag & drop reorders the cards (drag page 1 onto page 3's spot)": orderAfterDrag.join(",") === "2,3,1,4",
     "rotate/delete update pending state locally": stateAfterEdits.rotation === 90 && stateAfterEdits.deleted === true,
     "commit removes the deleted page (4 -> 3)": afterCommit.cardCount === 3 && afterCommit.heading.includes("3 pagine"),
     "merge registers a third document with the summed page count (3+2=5)":

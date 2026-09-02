@@ -262,6 +262,79 @@ async function main() {
     fourPagesBytes,
   );
 
+  // --- movePage: reorders pages() without touching pageCount/rotations/deletions, no wasm call ---
+  results["movePage reorders pages() in memory only"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.movePage(3, 0); // move original page 3 to the front
+    const order = doc.pages().map((p) => p.id);
+    return order.join(",") === "3,1,2,4" && doc.getPageCount() === 4 && !doc.hasPendingChanges();
+  }, fourPagesBytes);
+
+  results["movePage clamps an out-of-range target index instead of throwing"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.movePage(1, 999);
+    return doc.pages().map((p) => p.id).join(",") === "2,3,4,1";
+  }, fourPagesBytes);
+
+  results["movePage rejects a nonexistent page id"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    try {
+      doc.movePage(99, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  }, fourPagesBytes);
+
+  // --- commit() applies the reorder for real, and a rotation pending on the
+  // moved page follows it to its new position (same remapping logic as
+  // deletion above, exercised here via reordering instead). ---
+  results["commit() applies a pending reorder, with rotation following the moved page"] = await page.evaluate(
+    async (bytes) => {
+      const pngSize = (png) => ({
+        width: (png[16] << 24) | (png[17] << 16) | (png[18] << 8) | png[19],
+        height: (png[20] << 24) | (png[21] << 16) | (png[22] << 8) | png[23],
+      });
+
+      const { PdfDocument } = window.__pdfModel;
+
+      const reference = await PdfDocument.open(new Uint8Array(bytes));
+      const unrotatedSize = pngSize((await reference.getPreview(3, 0.3)).png);
+
+      const doc = await PdfDocument.open(new Uint8Array(bytes));
+      doc.movePage(3, 0); // order becomes [3, 1, 2, 4]
+      doc.rotatePage(3, 90); // page 3 should land rotated at its new position: 1
+
+      await doc.commit();
+
+      if (doc.getPageCount() !== 4) return false;
+      if (doc.hasPendingChanges()) return false;
+
+      const movedAndRotated = pngSize((await doc.getPreview(1, 0.3)).png); // position 1 = old page 3, rotated
+      const followingPage = pngSize((await doc.getPreview(2, 0.3)).png); // position 2 = old page 1, untouched
+
+      const rotationFollowedTheMove =
+        movedAndRotated.width === unrotatedSize.height && movedAndRotated.height === unrotatedSize.width;
+      const otherPageUntouched =
+        followingPage.width === unrotatedSize.width && followingPage.height === unrotatedSize.height;
+
+      return rotationFollowedTheMove && otherPageUntouched;
+    },
+    fourPagesBytes,
+  );
+
+  // --- commit() resets the order back to identity for the new baseline ---
+  results["commit() resets page order to identity after applying a reorder"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.movePage(3, 0);
+    await doc.commit();
+    return doc.pages().map((p) => p.id).join(",") === "1,2,3,4";
+  }, fourPagesBytes);
+
   // --- exportBytes() does not mutate pending state ---
   results["exportBytes() does not clear pending changes"] = await page.evaluate(async (bytes) => {
     const { PdfDocument } = window.__pdfModel;

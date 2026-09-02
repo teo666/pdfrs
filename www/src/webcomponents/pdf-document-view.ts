@@ -1,7 +1,7 @@
 import { downloadBytes } from "../pdf-io";
 import type { PdfDocument } from "../pdf-model/PdfDocument";
 import type { PagePreview } from "../pdf-model/types";
-import type { PageActionDetail, PdfPageCard } from "./pdf-page-card";
+import type { PageActionDetail, PageDragOverDetail, PdfPageCard } from "./pdf-page-card";
 
 /**
  * Wraps one `PdfDocument`: renders its pages as `<pdf-page-card>` thumbnails,
@@ -14,6 +14,12 @@ export class PdfDocumentView extends HTMLElement {
   private readonly root: ShadowRoot;
   private doc: PdfDocument | null = null;
   private label = "";
+  // Dedupes "page-drag-over": it fires repeatedly (many times a second)
+  // while the pointer sits over the same card, and re-running the reorder
+  // for a target we already handled would be wasted work (harmless, since
+  // the FLIP animation below is a no-op for a card that hasn't moved, but
+  // still pointless `movePage` calls).
+  private lastDragOverTargetId: number | null = null;
 
   constructor() {
     super();
@@ -23,7 +29,7 @@ export class PdfDocumentView extends HTMLElement {
         .toolbar { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.75rem; flex-wrap: wrap; }
         .toolbar h3 { margin: 0; font-size: 1rem; flex: 1; min-width: 8rem; }
         button { padding: 0.35rem 0.75rem; cursor: pointer; }
-        .grid { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+        .grid { display: flex; flex-wrap: wrap; gap: 1.5rem; padding: 0.25rem; }
         .status { margin-top: 0.5rem; font-size: 0.85rem; color: #666; }
         .status--error { color: #dc2626; }
         .empty { color: #888; font-size: 0.9rem; }
@@ -41,6 +47,10 @@ export class PdfDocumentView extends HTMLElement {
       <div class="status"></div>
     `;
     this.root.addEventListener("page-action", (event) => this.handlePageAction(event as CustomEvent<PageActionDetail>));
+    this.root.addEventListener("page-drag-over", (event) => this.handlePageDragOver(event as CustomEvent<PageDragOverDetail>));
+    this.root.addEventListener("dragend", () => {
+      this.lastDragOverTargetId = null;
+    });
     this.root.querySelector('[data-action="commit"]')?.addEventListener("click", () => this.commit());
     this.root.querySelector('[data-action="export"]')?.addEventListener("click", () => this.exportPreview());
     this.root.querySelector('[data-action="download"]')?.addEventListener("click", () => this.downloadCurrent());
@@ -114,6 +124,66 @@ export class PdfDocumentView extends HTMLElement {
     ) as PdfPageCard | undefined;
     if (card && updated) {
       card.preview = { ...(card.preview as PagePreview), ...updated };
+    }
+  }
+
+  /**
+   * Fires continuously while a card is dragged over another one (not just
+   * once on drop) - applies the move to the model right away (in-memory
+   * bookkeeping, no wasm call) and animates the grid to match, using the
+   * FLIP technique (First/Last/Invert/Play): record every card's current
+   * position, reorder the actual DOM nodes, then animate each one from
+   * where it *was* to where it now is. That's what makes the cards visibly
+   * slide out of the way while you drag, instead of only snapping into
+   * place on drop.
+   */
+  private handlePageDragOver(event: CustomEvent<PageDragOverDetail>): void {
+    if (!this.doc) return;
+    const { draggedId, targetId } = event.detail;
+    if (targetId === this.lastDragOverTargetId) return;
+    this.lastDragOverTargetId = targetId;
+
+    const targetIndex = this.doc.pages().findIndex((p) => p.id === targetId);
+    if (targetIndex === -1) return;
+
+    const grid = this.root.querySelector(".grid") as HTMLElement;
+    const cards = Array.from(grid.querySelectorAll("pdf-page-card")) as PdfPageCard[];
+
+    // FIRST: record where every card is right now.
+    const firstRects = new Map(cards.map((card) => [card, card.getBoundingClientRect()]));
+
+    try {
+      this.doc.movePage(draggedId, targetIndex);
+    } catch (err) {
+      this.setStatus(`Errore: ${err instanceof Error ? err.message : String(err)}`, true);
+      return;
+    }
+
+    // Reorder the actual DOM nodes to match the model's new order.
+    // `appendChild` on a node that's already in the tree just moves it.
+    const cardById = new Map(cards.map((card) => [card.preview?.id, card]));
+    for (const info of this.doc.pages()) {
+      const card = cardById.get(info.id);
+      if (card) grid.appendChild(card);
+    }
+
+    // LAST + INVERT + PLAY: for each card, jump it back (via a transform)
+    // to where it was, then let it transition to its real (zero) transform
+    // on the next frame - it visibly slides from old position to new.
+    for (const card of cards) {
+      const first = firstRects.get(card);
+      if (!first) continue;
+      const last = card.getBoundingClientRect();
+      const deltaX = first.left - last.left;
+      const deltaY = first.top - last.top;
+      if (deltaX === 0 && deltaY === 0) continue;
+
+      card.style.transition = "none";
+      card.style.transform = `translate(${deltaX}px, ${deltaY}px)`;
+      requestAnimationFrame(() => {
+        card.style.transition = "transform 0.2s ease";
+        card.style.transform = "";
+      });
     }
   }
 

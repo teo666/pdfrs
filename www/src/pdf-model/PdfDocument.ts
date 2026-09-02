@@ -3,7 +3,7 @@ import { renderPagesInParallel } from "../preview-worker-pool";
 import type { PageId, PageInfo, PagePreview, PageRange } from "./types";
 
 export interface GetPreviewsOptions {
-  /** 1-indexed, inclusive. Defaults to the whole document - set it to render only a window of a large document. */
+  /** 1-indexed, inclusive window over the current *display order* (positions, not original page ids). Defaults to the whole document - set it to render only a window of a large document. */
   range?: PageRange;
   /** Fires after each page finishes (cache hits count as instantly "done" too), so callers can show real progress. */
   onProgress?: (done: number, total: number) => void;
@@ -21,15 +21,19 @@ function cacheKey(id: PageId, scale: number): string {
   return `${id}:${scale}`;
 }
 
+function identityOrder(pageCount: number): PageId[] {
+  return Array.from({ length: pageCount }, (_, index) => index + 1);
+}
+
 /**
  * Models one loaded PDF and the page-level edits the user hasn't confirmed
- * yet (rotate, delete). Pure logic - no DOM, no framework - meant to be
- * wrapped by whatever frontend renders it.
+ * yet (rotate, delete, reorder). Pure logic - no DOM, no framework - meant to
+ * be wrapped by whatever frontend renders it.
  *
- * Every mutating page method (rotatePage, deletePage, ...) only updates this
- * object's in-memory bookkeeping; nothing is sent to the wasm module until
- * `commit()` (or `exportBytes()`, which is the same computation without
- * mutating this instance).
+ * Every mutating page method (rotatePage, deletePage, movePage, ...) only
+ * updates this object's in-memory bookkeeping; nothing is sent to the wasm
+ * module until `commit()` (or `exportBytes()`, which is the same computation
+ * without mutating this instance).
  */
 export class PdfDocument {
   private bytes: Uint8Array;
@@ -42,10 +46,17 @@ export class PdfDocument {
   // deletePage/restorePage/resetRotation never need to touch this cache;
   // only a change to `bytes` itself (commit/encrypt/decrypt) invalidates it.
   private readonly previewCache = new Map<string, Uint8Array>();
+  // The current display/output order, as a permutation of the original page
+  // ids (e.g. [3, 1, 2] means "page 3 first, then 1, then 2"). Reordering
+  // never touches `bytes`/the cache - it's bookkeeping only, applied for
+  // real by `computeCommittedBytes()` via `compose_pdf`'s arbitrary layout.
+  // Reset to identity ([1, 2, ..., pageCount]) whenever the baseline changes.
+  private order: PageId[];
 
   private constructor(bytes: Uint8Array, pageCount: number) {
     this.bytes = bytes;
     this.pageCount = pageCount;
+    this.order = identityOrder(pageCount);
   }
 
   /**
@@ -71,8 +82,25 @@ export class PdfDocument {
     return this.rotations.size > 0 || this.deletions.size > 0;
   }
 
+  /** Pages in their current display order (see `movePage`), not necessarily 1, 2, 3... */
   pages(): PageInfo[] {
     return this.allPageIds().map((id) => this.pageInfo(id));
+  }
+
+  /**
+   * Moves page `id` to position `toIndex` (0-indexed) in the display order,
+   * shifting the pages in between. Nothing is sent to wasm until
+   * `commit()`/`exportBytes()` - like rotate/delete, this only updates
+   * in-memory bookkeeping (`compose_pdf` already accepts an arbitrary page
+   * order, so the reorder is just "free" input to the same commit path).
+   */
+  movePage(id: PageId, toIndex: number): void {
+    this.assertValidPage(id);
+    const fromIndex = this.order.indexOf(id);
+    const clampedIndex = Math.max(0, Math.min(toIndex, this.order.length - 1));
+    if (clampedIndex === fromIndex) return;
+    this.order.splice(fromIndex, 1);
+    this.order.splice(clampedIndex, 0, id);
   }
 
   /**
@@ -176,10 +204,11 @@ export class PdfDocument {
   /** Applies pending rotations/deletions, replacing this document's baseline and clearing pending state. */
   async commit(): Promise<void> {
     this.bytes = await this.computeCommittedBytes();
-    this.pageCount = this.allPageIds().length - this.deletions.size;
+    this.pageCount = this.order.length - this.deletions.size;
     this.rotations.clear();
     this.deletions.clear();
     this.previewCache.clear();
+    this.order = identityOrder(this.pageCount);
   }
 
   /** Same computation as `commit()`, without mutating this document - a preview of the final result. */
@@ -198,6 +227,7 @@ export class PdfDocument {
     this.bytes = await decrypt_pdf(this.bytes, password);
     this.pageCount = await page_count(this.bytes);
     this.previewCache.clear();
+    this.order = identityOrder(this.pageCount);
   }
 
   private async computeCommittedBytes(): Promise<Uint8Array> {
@@ -208,7 +238,11 @@ export class PdfDocument {
 
     let bytes = this.bytes;
 
-    if (survivingIds.length !== this.pageCount) {
+    // Skip compose_pdf entirely if nothing actually changed the page
+    // sequence - no deletions *and* no reordering (surviving ids still run
+    // 1, 2, 3... in order).
+    const isUnchangedOrder = survivingIds.every((id, index) => id === index + 1);
+    if (!isUnchangedOrder) {
       const layout = survivingIds.map((id) => ({ source: 0, page: id }));
       bytes = await compose_pdf([this.bytes], layout);
     }
@@ -237,16 +271,17 @@ export class PdfDocument {
   }
 
   private allPageIds(): PageId[] {
-    return Array.from({ length: this.pageCount }, (_, index) => index + 1);
+    return [...this.order];
   }
 
+  /** `range` is a 1-indexed, inclusive window over the current *display order* (positions, not original page ids). */
   private pageIdsInRange(range: PageRange): PageId[] {
     this.assertValidPage(range.start);
     this.assertValidPage(range.end);
     if (range.start > range.end) {
       throw new Error(`range non valido: start (${range.start}) è maggiore di end (${range.end})`);
     }
-    return Array.from({ length: range.end - range.start + 1 }, (_, index) => range.start + index);
+    return this.order.slice(range.start - 1, range.end);
   }
 
   private assertValidPage(id: PageId): void {
