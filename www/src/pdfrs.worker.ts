@@ -7,8 +7,10 @@ import init, {
   encrypt_pdf,
   merge_pdfs,
   page_count,
+  read_metadata,
   rotate_pages,
   split_pdf,
+  write_metadata,
 } from "pdfrs";
 import { collectTransferables, type WorkerInitMessage, type WorkerRequest, type WorkerResponse } from "./worker-protocol";
 
@@ -24,8 +26,10 @@ const coreMethods = {
   encrypt_pdf,
   merge_pdfs,
   page_count,
+  read_metadata,
   rotate_pages,
   split_pdf,
+  write_metadata,
 } as const satisfies Record<string, (...args: never[]) => Promise<unknown>>;
 
 const FULL_METHODS = new Set(["render_page_preview", "image_to_pdf"]);

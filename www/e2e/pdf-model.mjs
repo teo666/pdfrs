@@ -605,6 +605,84 @@ async function main() {
     return labelled && doc.getPageCount() === 4 && !doc.hasPendingChanges();
   }, fourPagesBytes);
 
+  // --- Metadata: pending like every other edit, undoable, applied on commit ---
+  results["getMetadata reads the baseline and overlays pending edits"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+
+    // four_pages.pdf carries no /Info at all.
+    const atOpen = await doc.getMetadata();
+    if (Object.keys(atOpen).length !== 0) return false;
+
+    await doc.setMetadata({ title: "Relazione", author: "Sofía Ünal" });
+    const overlaid = await doc.getMetadata();
+    return overlaid.title === "Relazione" && overlaid.author === "Sofía Ünal" && doc.hasPendingChanges();
+  }, fourPagesBytes);
+
+  results["a metadata edit is one undoable history step"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    await doc.getMetadata();
+
+    await doc.setMetadata({ title: "Relazione" });
+    const labelled = doc.history().at(-1)?.label === "Modifica metadati (titolo)";
+
+    if (!doc.undo()) return false;
+    const undone = Object.keys(await doc.getMetadata()).length === 0 && !doc.hasPendingChanges();
+
+    doc.redo();
+    return labelled && undone && (await doc.getMetadata()).title === "Relazione";
+  }, fourPagesBytes);
+
+  results["commit writes the metadata into the document"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    await doc.getMetadata();
+    await doc.setMetadata({ title: "Relazione", author: "Sofía Ünal" });
+    await doc.commit();
+
+    // Re-read from the *new* baseline: the cache was invalidated by commit,
+    // so this proves the bytes really carry the metadata now.
+    const committed = await doc.getMetadata();
+    return committed.title === "Relazione" && committed.author === "Sofía Ünal" && !doc.hasPendingChanges();
+  }, fourPagesBytes);
+
+  results["an empty value deletes the field, a no-op edit records no history"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    await doc.getMetadata();
+    await doc.setMetadata({ title: "Relazione" });
+    await doc.commit();
+
+    const stepsBefore = doc.history().length;
+    // Re-typing the same value, and clearing a field that was never set,
+    // are both no-ops: neither should leave a history step.
+    await doc.setMetadata({ title: "Relazione" });
+    await doc.setMetadata({ subject: null });
+    const noNewSteps = doc.history().length === stepsBefore;
+
+    await doc.setMetadata({ title: null });
+    await doc.commit();
+    const cleared = (await doc.getMetadata()).title === undefined;
+
+    return noNewSteps && cleared;
+  }, fourPagesBytes);
+
+  // --- Regression: compose_pdf builds a fresh document that carries no
+  // /Info, so a commit with a deletion used to silently drop the metadata. ---
+  results["metadata survives a commit that also deletes a page"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    await doc.getMetadata();
+    await doc.setMetadata({ title: "Relazione" });
+    await doc.commit();
+
+    doc.deletePage(2);
+    await doc.commit();
+
+    return doc.getPageCount() === 3 && (await doc.getMetadata()).title === "Relazione";
+  }, fourPagesBytes);
+
   results["no console/page errors"] = consoleErrors.length === 0;
 
   await browser.close();

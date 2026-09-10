@@ -165,6 +165,42 @@ async function main() {
   await clickHistoryRow(-1);
   const afterJumpToEnd = await editState();
 
+  // --- Metadata panel: opening it loads the (empty) values, typing a title
+  // and firing "change" queues a pending edit that shows up in the history,
+  // and the field is marked as pending. Undone right after, so the state the
+  // rest of this test builds on is unchanged. ---
+  await page.evaluate(() => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    view.shadowRoot.querySelector("details.metadata").open = true;
+  });
+  await page.waitForFunction(() => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    // The panel is filled asynchronously (one wasm read), so wait for it.
+    return view.shadowRoot.querySelectorAll('[data-el="metadata"] input').length === 8;
+  });
+
+  const metadataEdit = await page.evaluate(async () => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    const title = view.shadowRoot.querySelector('input[data-field="title"]');
+    title.value = "Relazione annuale";
+    title.dispatchEvent(new Event("change"));
+    // Let the panel resync (it re-reads the model asynchronously).
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const rows = Array.from(view.shadowRoot.querySelectorAll('[data-el="history"] li'));
+    return {
+      lastStep: rows.at(-1)?.textContent ?? "",
+      markedPending: title.classList.contains("pending"),
+      value: title.value,
+    };
+  });
+
+  await clickHistory("undo");
+  const metadataAfterUndo = await page.evaluate(() => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    return view.shadowRoot.querySelector('input[data-field="title"]').value;
+  });
+
   // --- Commit: page 2 should be gone, page count drops from 4 to 3 ---
   await page.evaluate(() =>
     document
@@ -369,6 +405,10 @@ async function main() {
       afterJumpToStart.currentRow === 0 &&
       afterJumpToStart.futureRows === 3,
     "clicking the last history row jumps forward again": afterJumpToEnd.rotation === 90 && afterJumpToEnd.deleted === true,
+    "the metadata panel loads one input per /Info field": metadataEdit.value === "Relazione annuale",
+    "editing a metadata field queues a pending, labelled history step":
+      metadataEdit.lastStep.includes("Modifica metadati (titolo)") && metadataEdit.markedPending,
+    "undoing a metadata edit clears the field in the panel": metadataAfterUndo === "",
     "commit removes the deleted page (4 -> 3)": afterCommit.cardCount === 3 && afterCommit.heading.includes("3 pagine"),
     "merge registers a third document with the summed page count (3+2=5)":
       afterMerge.docCount === 3 && afterMerge.heading.includes("5 pagine"),

@@ -3,6 +3,7 @@ pub mod crypto;
 #[cfg(feature = "image-import")]
 pub mod image;
 pub mod merge;
+pub mod metadata;
 #[cfg(feature = "preview")]
 pub mod preview;
 pub mod rotate;
