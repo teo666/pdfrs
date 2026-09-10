@@ -269,7 +269,9 @@ async function main() {
     const doc = await PdfDocument.open(new Uint8Array(bytes));
     doc.movePage(3, 0); // move original page 3 to the front
     const order = doc.pages().map((p) => p.id);
-    return order.join(",") === "3,1,2,4" && doc.getPageCount() === 4 && !doc.hasPendingChanges();
+    // In memory only - nothing is sent to wasm - but it *is* a pending
+    // change: exportBytes()/commit() have to apply the new order.
+    return order.join(",") === "3,1,2,4" && doc.getPageCount() === 4 && doc.hasPendingChanges();
   }, fourPagesBytes);
 
   results["movePage clamps an out-of-range target index instead of throwing"] = await page.evaluate(async (bytes) => {
@@ -448,6 +450,238 @@ async function main() {
     },
     { photoBytes: photoJpgBytes, pdfBytes: onePageBytes },
   );
+
+  // --- undo/redo of a pending rotation, and a fresh action truncating redo ---
+  results["undo/redo restores a pending rotation"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    if (doc.canUndo() || doc.canRedo()) return false;
+
+    doc.rotatePage(1, 90);
+    if (!doc.canUndo()) return false;
+    if (!doc.undo()) return false;
+    const undone = doc.pages().find((p) => p.id === 1)?.pendingRotation === 0 && !doc.canUndo() && doc.canRedo();
+
+    if (!doc.redo()) return false;
+    const redone = doc.pages().find((p) => p.id === 1)?.pendingRotation === 90 && !doc.canRedo();
+
+    // undo() on an empty stack is a no-op returning false, not a throw.
+    doc.undo();
+    const emptyStackIsNoop = doc.undo() === false;
+
+    return undone && redone && emptyStackIsNoop;
+  }, fourPagesBytes);
+
+  results["undo restores the page order"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.movePage(3, 0);
+    const moved = doc.pages().map((p) => p.id).join(",") === "3,1,2,4";
+    doc.undo();
+    return moved && doc.pages().map((p) => p.id).join(",") === "1,2,3,4";
+  }, fourPagesBytes);
+
+  // --- The point of snapshotting the whole state (bytes included): a commit
+  // is undoable too, and undoing it brings back the pending state it consumed. ---
+  results["undo reverts a commit, pending state and all"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.deletePage(2);
+    await doc.commit();
+    if (doc.getPageCount() !== 3 || doc.hasPendingChanges()) return false;
+
+    if (!doc.undo()) return false;
+    const backToFour = doc.getPageCount() === 4;
+    const deletionIsPendingAgain = doc.pages().find((p) => p.id === 2)?.markedForDeletion === true;
+
+    if (!doc.redo()) return false;
+    return backToFour && deletionIsPendingAgain && doc.getPageCount() === 3;
+  }, fourPagesBytes);
+
+  results["a new action after an undo clears redo"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.rotatePage(1, 90);
+    doc.undo();
+    if (!doc.canRedo()) return false;
+    doc.deletePage(3);
+    return !doc.canRedo() && doc.canUndo();
+  }, fourPagesBytes);
+
+  // --- No-op calls must not leave a history step behind: an undo should
+  // always visibly do something. ---
+  results["no-op mutations record no history step"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.restorePage(1); // not deleted
+    doc.resetRotation(1); // not rotated
+    doc.rotatePage(1, 360); // no change to the pending rotation
+    doc.movePage(1, 0); // already there
+    await doc.commit(); // nothing pending
+    return !doc.canUndo();
+  }, fourPagesBytes);
+
+  // --- Regression: a reorder alone is a pending change, so exportBytes()
+  // must not shortcut back to the untouched baseline. ---
+  results["a reorder alone counts as a pending change"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    if (doc.hasPendingChanges()) return false;
+    doc.movePage(4, 0);
+    if (!doc.hasPendingChanges()) return false;
+    const exported = await doc.exportBytes();
+    return exported.length > 0 && exported !== doc.getBytes();
+  }, fourPagesBytes);
+
+  // --- history(): a labelled, chronological timeline, current state included ---
+  results["history() lists every step in order with the current one marked"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    const atOpen = doc.history();
+    if (atOpen.length !== 1 || atOpen[0].label !== "Documento aperto" || !atOpen[0].current) return false;
+
+    doc.rotatePage(1, 90);
+    doc.deletePage(2);
+    doc.movePage(3, 0);
+    const entries = doc.history();
+    const labelsAreDescriptive =
+      entries[1].label === "Ruota pagina 1 di +90\u00b0" &&
+      entries[2].label === "Elimina pagina 2" &&
+      entries[3].label === "Sposta pagina 3 in posizione 1";
+
+    // The current state is the last one, and indexes run 0..n-1 in order.
+    const currentIsLast = entries[3].current && entries.findIndex((e) => e.current) === 3;
+    const indexesAreOrdered = entries.every((e, i) => e.index === i);
+
+    // After an undo the entry stays in the timeline - ahead of the current one.
+    doc.undo();
+    const afterUndo = doc.history();
+    const futureStepKept = afterUndo.length === 4 && afterUndo[2].current && !afterUndo[3].current;
+
+    return labelsAreDescriptive && currentIsLast && indexesAreOrdered && futureStepKept;
+  }, fourPagesBytes);
+
+  results["goToHistoryIndex jumps backwards and forwards over several steps"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.rotatePage(1, 90);
+    doc.deletePage(2);
+    doc.movePage(3, 0);
+
+    // Straight back to the freshly opened document, three steps at once.
+    if (!doc.goToHistoryIndex(0)) return false;
+    const backAtStart =
+      doc.pages().map((p) => p.id).join(",") === "1,2,3,4" &&
+      !doc.hasPendingChanges() &&
+      doc.history()[0].current;
+
+    // ...and forward again to a state in the middle.
+    if (!doc.goToHistoryIndex(2)) return false;
+    const midway =
+      doc.pages().find((p) => p.id === 1)?.pendingRotation === 90 &&
+      doc.pages().find((p) => p.id === 2)?.markedForDeletion === true &&
+      doc.pages().map((p) => p.id).join(",") === "1,2,3,4";
+
+    // Jumping to where we already are reports "nothing moved" instead of throwing.
+    const noopJump = doc.goToHistoryIndex(2) === false;
+
+    let rejectedOutOfRange = false;
+    try {
+      doc.goToHistoryIndex(99);
+    } catch {
+      rejectedOutOfRange = true;
+    }
+
+    return backAtStart && midway && noopJump && rejectedOutOfRange;
+  }, fourPagesBytes);
+
+  results["a commit is a labelled history step you can jump back across"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.deletePage(2);
+    await doc.commit();
+    const labelled = doc.history().at(-1)?.label === "Conferma modifiche (3 pagine)";
+    doc.goToHistoryIndex(0);
+    return labelled && doc.getPageCount() === 4 && !doc.hasPendingChanges();
+  }, fourPagesBytes);
+
+  // --- Metadata: pending like every other edit, undoable, applied on commit ---
+  results["getMetadata reads the baseline and overlays pending edits"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+
+    // four_pages.pdf carries no /Info at all.
+    const atOpen = await doc.getMetadata();
+    if (Object.keys(atOpen).length !== 0) return false;
+
+    await doc.setMetadata({ title: "Relazione", author: "Sofía Ünal" });
+    const overlaid = await doc.getMetadata();
+    return overlaid.title === "Relazione" && overlaid.author === "Sofía Ünal" && doc.hasPendingChanges();
+  }, fourPagesBytes);
+
+  results["a metadata edit is one undoable history step"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    await doc.getMetadata();
+
+    await doc.setMetadata({ title: "Relazione" });
+    const labelled = doc.history().at(-1)?.label === "Modifica metadati (titolo)";
+
+    if (!doc.undo()) return false;
+    const undone = Object.keys(await doc.getMetadata()).length === 0 && !doc.hasPendingChanges();
+
+    doc.redo();
+    return labelled && undone && (await doc.getMetadata()).title === "Relazione";
+  }, fourPagesBytes);
+
+  results["commit writes the metadata into the document"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    await doc.getMetadata();
+    await doc.setMetadata({ title: "Relazione", author: "Sofía Ünal" });
+    await doc.commit();
+
+    // Re-read from the *new* baseline: the cache was invalidated by commit,
+    // so this proves the bytes really carry the metadata now.
+    const committed = await doc.getMetadata();
+    return committed.title === "Relazione" && committed.author === "Sofía Ünal" && !doc.hasPendingChanges();
+  }, fourPagesBytes);
+
+  results["an empty value deletes the field, a no-op edit records no history"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    await doc.getMetadata();
+    await doc.setMetadata({ title: "Relazione" });
+    await doc.commit();
+
+    const stepsBefore = doc.history().length;
+    // Re-typing the same value, and clearing a field that was never set,
+    // are both no-ops: neither should leave a history step.
+    await doc.setMetadata({ title: "Relazione" });
+    await doc.setMetadata({ subject: null });
+    const noNewSteps = doc.history().length === stepsBefore;
+
+    await doc.setMetadata({ title: null });
+    await doc.commit();
+    const cleared = (await doc.getMetadata()).title === undefined;
+
+    return noNewSteps && cleared;
+  }, fourPagesBytes);
+
+  // --- Regression: compose_pdf builds a fresh document that carries no
+  // /Info, so a commit with a deletion used to silently drop the metadata. ---
+  results["metadata survives a commit that also deletes a page"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    await doc.getMetadata();
+    await doc.setMetadata({ title: "Relazione" });
+    await doc.commit();
+
+    doc.deletePage(2);
+    await doc.commit();
+
+    return doc.getPageCount() === 3 && (await doc.getMetadata()).title === "Relazione";
+  }, fourPagesBytes);
 
   results["no console/page errors"] = consoleErrors.length === 0;
 

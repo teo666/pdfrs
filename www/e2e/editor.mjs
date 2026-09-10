@@ -101,6 +101,106 @@ async function main() {
     };
   });
 
+  // --- Undo/redo through the toolbar buttons: two undos peel off the delete
+  // and then the rotation, two redos put them back - so the state the rest
+  // of this test builds on is unchanged. ---
+  const clickHistory = (action) =>
+    page.evaluate(
+      (which) =>
+        document
+          .querySelector("pdf-editor-app")
+          .shadowRoot.querySelector("pdf-document-view")
+          .shadowRoot.querySelector(`[data-action="${which}"]`)
+          .click(),
+      action,
+    );
+  const editState = () =>
+    page.evaluate(() => {
+      const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+      const cards = Array.from(view.shadowRoot.querySelectorAll("pdf-page-card"));
+      return {
+        rotation: cards.find((c) => c.data.id === 1).data.pendingRotation,
+        deleted: cards.find((c) => c.data.id === 2).data.markedForDeletion,
+        redoDisabled: view.shadowRoot.querySelector('[data-action="redo"]').disabled,
+      };
+    });
+
+  await clickHistory("undo");
+  await clickHistory("undo");
+  const afterUndo = await editState();
+  await clickHistory("redo");
+  await clickHistory("redo");
+  const afterRedo = await editState();
+
+  // --- History panel: clicking a row jumps straight to that state, however
+  // many steps away it is. Row 0 is the freshly opened document, so this
+  // undoes the drag, the rotation and the deletion in one click - then the
+  // last row puts all three back, leaving the state the rest of this test
+  // builds on unchanged. ---
+  const historyLabels = await page.evaluate(() => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    return Array.from(view.shadowRoot.querySelectorAll('[data-el="history"] li')).map((li) => li.textContent);
+  });
+  const clickHistoryRow = (index) =>
+    page.evaluate((i) => {
+      const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+      const rows = view.shadowRoot.querySelectorAll('[data-el="history"] li button');
+      rows[i === -1 ? rows.length - 1 : i].click();
+    }, index);
+
+  await clickHistoryRow(0);
+  const afterJumpToStart = await page.evaluate(() => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    const cards = Array.from(view.shadowRoot.querySelectorAll("pdf-page-card"));
+    const rows = Array.from(view.shadowRoot.querySelectorAll('[data-el="history"] li'));
+    return {
+      order: cards.map((c) => c.data.id).join(","),
+      rotation: cards.find((c) => c.data.id === 1).data.pendingRotation,
+      deleted: cards.find((c) => c.data.id === 2).data.markedForDeletion,
+      currentRow: rows.findIndex((li) => li.classList.contains("current")),
+      futureRows: rows.filter((li) => li.classList.contains("future")).length,
+    };
+  });
+
+  await clickHistoryRow(-1);
+  const afterJumpToEnd = await editState();
+
+  // --- Metadata panel: opening it loads the (empty) values, typing a title
+  // and firing "change" queues a pending edit that shows up in the history,
+  // and the field is marked as pending. Undone right after, so the state the
+  // rest of this test builds on is unchanged. ---
+  await page.evaluate(() => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    view.shadowRoot.querySelector("details.metadata").open = true;
+  });
+  await page.waitForFunction(() => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    // The panel is filled asynchronously (one wasm read), so wait for it.
+    return view.shadowRoot.querySelectorAll('[data-el="metadata"] input').length === 8;
+  });
+
+  const metadataEdit = await page.evaluate(async () => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    const title = view.shadowRoot.querySelector('input[data-field="title"]');
+    title.value = "Relazione annuale";
+    title.dispatchEvent(new Event("change"));
+    // Let the panel resync (it re-reads the model asynchronously).
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const rows = Array.from(view.shadowRoot.querySelectorAll('[data-el="history"] li'));
+    return {
+      lastStep: rows.at(-1)?.textContent ?? "",
+      markedPending: title.classList.contains("pending"),
+      value: title.value,
+    };
+  });
+
+  await clickHistory("undo");
+  const metadataAfterUndo = await page.evaluate(() => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    return view.shadowRoot.querySelector('input[data-field="title"]').value;
+  });
+
   // --- Commit: page 2 should be gone, page count drops from 4 to 3 ---
   await page.evaluate(() =>
     document
@@ -295,6 +395,20 @@ async function main() {
     "opening 2 files renders one card per page for the active document": cardCountAfterOpen === 4,
     "drag & drop reorders the cards (drag page 1 onto page 3's spot)": orderAfterDrag.join(",") === "2,3,1,4",
     "rotate/delete update pending state locally": stateAfterEdits.rotation === 90 && stateAfterEdits.deleted === true,
+    "the Annulla button peels the pending edits back off": afterUndo.rotation === 0 && afterUndo.deleted === false,
+    "the Ripeti button puts them back": afterRedo.rotation === 90 && afterRedo.deleted === true && afterRedo.redoDisabled,
+    "the history panel lists one labelled row per action": historyLabels.length === 4 && historyLabels[0].includes("Documento aperto") && historyLabels[3].includes("Elimina pagina 2"),
+    "clicking a history row jumps back across several steps at once":
+      afterJumpToStart.order === "1,2,3,4" &&
+      afterJumpToStart.rotation === 0 &&
+      afterJumpToStart.deleted === false &&
+      afterJumpToStart.currentRow === 0 &&
+      afterJumpToStart.futureRows === 3,
+    "clicking the last history row jumps forward again": afterJumpToEnd.rotation === 90 && afterJumpToEnd.deleted === true,
+    "the metadata panel loads one input per /Info field": metadataEdit.value === "Relazione annuale",
+    "editing a metadata field queues a pending, labelled history step":
+      metadataEdit.lastStep.includes("Modifica metadati (titolo)") && metadataEdit.markedPending,
+    "undoing a metadata edit clears the field in the panel": metadataAfterUndo === "",
     "commit removes the deleted page (4 -> 3)": afterCommit.cardCount === 3 && afterCommit.heading.includes("3 pagine"),
     "merge registers a third document with the summed page count (3+2=5)":
       afterMerge.docCount === 3 && afterMerge.heading.includes("5 pagine"),
