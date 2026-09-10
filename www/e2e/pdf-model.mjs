@@ -533,6 +533,78 @@ async function main() {
     return exported.length > 0 && exported !== doc.getBytes();
   }, fourPagesBytes);
 
+  // --- history(): a labelled, chronological timeline, current state included ---
+  results["history() lists every step in order with the current one marked"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    const atOpen = doc.history();
+    if (atOpen.length !== 1 || atOpen[0].label !== "Documento aperto" || !atOpen[0].current) return false;
+
+    doc.rotatePage(1, 90);
+    doc.deletePage(2);
+    doc.movePage(3, 0);
+    const entries = doc.history();
+    const labelsAreDescriptive =
+      entries[1].label === "Ruota pagina 1 di +90\u00b0" &&
+      entries[2].label === "Elimina pagina 2" &&
+      entries[3].label === "Sposta pagina 3 in posizione 1";
+
+    // The current state is the last one, and indexes run 0..n-1 in order.
+    const currentIsLast = entries[3].current && entries.findIndex((e) => e.current) === 3;
+    const indexesAreOrdered = entries.every((e, i) => e.index === i);
+
+    // After an undo the entry stays in the timeline - ahead of the current one.
+    doc.undo();
+    const afterUndo = doc.history();
+    const futureStepKept = afterUndo.length === 4 && afterUndo[2].current && !afterUndo[3].current;
+
+    return labelsAreDescriptive && currentIsLast && indexesAreOrdered && futureStepKept;
+  }, fourPagesBytes);
+
+  results["goToHistoryIndex jumps backwards and forwards over several steps"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.rotatePage(1, 90);
+    doc.deletePage(2);
+    doc.movePage(3, 0);
+
+    // Straight back to the freshly opened document, three steps at once.
+    if (!doc.goToHistoryIndex(0)) return false;
+    const backAtStart =
+      doc.pages().map((p) => p.id).join(",") === "1,2,3,4" &&
+      !doc.hasPendingChanges() &&
+      doc.history()[0].current;
+
+    // ...and forward again to a state in the middle.
+    if (!doc.goToHistoryIndex(2)) return false;
+    const midway =
+      doc.pages().find((p) => p.id === 1)?.pendingRotation === 90 &&
+      doc.pages().find((p) => p.id === 2)?.markedForDeletion === true &&
+      doc.pages().map((p) => p.id).join(",") === "1,2,3,4";
+
+    // Jumping to where we already are reports "nothing moved" instead of throwing.
+    const noopJump = doc.goToHistoryIndex(2) === false;
+
+    let rejectedOutOfRange = false;
+    try {
+      doc.goToHistoryIndex(99);
+    } catch {
+      rejectedOutOfRange = true;
+    }
+
+    return backAtStart && midway && noopJump && rejectedOutOfRange;
+  }, fourPagesBytes);
+
+  results["a commit is a labelled history step you can jump back across"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.deletePage(2);
+    await doc.commit();
+    const labelled = doc.history().at(-1)?.label === "Conferma modifiche (3 pagine)";
+    doc.goToHistoryIndex(0);
+    return labelled && doc.getPageCount() === 4 && !doc.hasPendingChanges();
+  }, fourPagesBytes);
+
   results["no console/page errors"] = consoleErrors.length === 0;
 
   await browser.close();

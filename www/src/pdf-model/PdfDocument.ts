@@ -8,7 +8,7 @@ import {
   rotate_pages,
 } from "../pdfrs-worker-client";
 import { renderPagesInParallel } from "../preview-worker-pool";
-import type { ImagePageOptions, PageId, PageInfo, PagePreview, PageRange } from "./types";
+import type { HistoryEntry, ImagePageOptions, PageId, PageInfo, PagePreview, PageRange } from "./types";
 
 export interface GetPreviewsOptions {
   /** 1-indexed, inclusive window over the current *display order* (positions, not original page ids). Defaults to the whole document - set it to render only a window of a large document. */
@@ -44,6 +44,8 @@ interface PendingRotation {
  * page.
  */
 interface DocumentSnapshot {
+  /** What the user did to get *into* this state - the timeline is a list of these, not of the actions leading out of them. */
+  label: string;
   bytes: Uint8Array;
   pageCount: number;
   rotations: Map<PageId, number>;
@@ -92,6 +94,9 @@ export class PdfDocument {
   // (standard semantics: acting after an undo drops the future).
   private undoStack: DocumentSnapshot[] = [];
   private redoStack: DocumentSnapshot[] = [];
+  // Describes how the *current* state was reached; moves onto a snapshot as
+  // soon as that state becomes a past (or future) one.
+  private currentLabel = "Documento aperto";
 
   private constructor(bytes: Uint8Array, pageCount: number) {
     this.bytes = bytes;
@@ -158,7 +163,7 @@ export class PdfDocument {
   undo(): boolean {
     const snapshot = this.undoStack.pop();
     if (!snapshot) return false;
-    this.redoStack.push(this.snapshot());
+    this.redoStack.push(this.snapshot(this.currentLabel));
     this.restore(snapshot);
     return true;
   }
@@ -167,9 +172,46 @@ export class PdfDocument {
   redo(): boolean {
     const snapshot = this.redoStack.pop();
     if (!snapshot) return false;
-    this.undoStack.push(this.snapshot());
+    this.undoStack.push(this.snapshot(this.currentLabel));
     this.restore(snapshot);
     return true;
+  }
+
+  /**
+   * The whole timeline in chronological order: past states first, then the
+   * current one (`current: true`), then the states a `redo()` would move
+   * forward into. Index 0 is always the document as it was opened.
+   *
+   * Meant for a history panel - each entry's `index` is exactly what
+   * `goToHistoryIndex()` takes.
+   */
+  history(): HistoryEntry[] {
+    // `redoStack` is a stack: its last element is the state nearest to the
+    // present, so it reads backwards compared to the timeline.
+    const labels = [
+      ...this.undoStack.map((snapshot) => snapshot.label),
+      this.currentLabel,
+      ...[...this.redoStack].reverse().map((snapshot) => snapshot.label),
+    ];
+    const currentIndex = this.undoStack.length;
+    return labels.map((label, index) => ({ index, label, current: index === currentIndex }));
+  }
+
+  /**
+   * Jumps to any state in `history()`, backwards or forwards, by replaying
+   * `undo()`/`redo()` until it gets there - so it goes through exactly the
+   * same code path as stepping there by hand, no separate restore logic to
+   * keep in sync. Returns false if the document was already at `index`.
+   */
+  goToHistoryIndex(index: number): boolean {
+    const total = this.undoStack.length + 1 + this.redoStack.length;
+    if (!Number.isInteger(index) || index < 0 || index >= total) {
+      throw new Error(`passo di cronologia ${index} inesistente (la cronologia ne ha ${total})`);
+    }
+    let moved = false;
+    while (this.undoStack.length > index && this.undo()) moved = true;
+    while (this.undoStack.length < index && this.redo()) moved = true;
+    return moved;
   }
 
   /** Drops the undo/redo history, keeping the current state - e.g. to release the baselines it pins. */
@@ -178,8 +220,9 @@ export class PdfDocument {
     this.redoStack = [];
   }
 
-  private snapshot(): DocumentSnapshot {
+  private snapshot(label: string): DocumentSnapshot {
     return {
+      label,
       bytes: this.bytes,
       pageCount: this.pageCount,
       rotations: new Map(this.rotations),
@@ -191,6 +234,7 @@ export class PdfDocument {
 
   /** `rotations`/`deletions`/`previewCache` are `readonly` fields, so they're refilled in place rather than reassigned. */
   private restore(snapshot: DocumentSnapshot): void {
+    this.currentLabel = snapshot.label;
     this.bytes = snapshot.bytes;
     this.pageCount = snapshot.pageCount;
     this.order = [...snapshot.order];
@@ -211,12 +255,13 @@ export class PdfDocument {
    * only ever contains steps that actually changed something - an undo
    * always visibly does something.
    */
-  private pushUndo(): void {
-    this.recordSnapshot(this.snapshot());
+  private pushUndo(action: string): void {
+    this.recordSnapshot(this.snapshot(this.currentLabel), action);
   }
 
   /** `pushUndo()` for the async operations, which capture their "before" state up front and only commit it to the history once the wasm call has succeeded. */
-  private recordSnapshot(snapshot: DocumentSnapshot): void {
+  private recordSnapshot(snapshot: DocumentSnapshot, action: string): void {
+    this.currentLabel = action;
     this.undoStack.push(snapshot);
     if (this.undoStack.length > MAX_HISTORY) this.undoStack.shift();
     this.redoStack = [];
@@ -239,7 +284,7 @@ export class PdfDocument {
     const fromIndex = this.order.indexOf(id);
     const clampedIndex = Math.max(0, Math.min(toIndex, this.order.length - 1));
     if (clampedIndex === fromIndex) return;
-    this.pushUndo();
+    this.pushUndo(`Sposta pagina ${id} in posizione ${clampedIndex + 1}`);
     this.order.splice(fromIndex, 1);
     this.order.splice(clampedIndex, 0, id);
   }
@@ -256,7 +301,7 @@ export class PdfDocument {
     // A multiple of 360 leaves the pending rotation exactly as it was - not
     // a history step.
     if (degrees % 360 === 0) return;
-    this.pushUndo();
+    this.pushUndo(`Ruota pagina ${id} di ${degrees > 0 ? "+" : ""}${degrees}\u00b0`);
     const current = this.rotations.get(id) ?? 0;
     const next = ((current + degrees) % 360 + 360) % 360;
     if (next === 0) this.rotations.delete(id);
@@ -266,21 +311,21 @@ export class PdfDocument {
   resetRotation(id: PageId): void {
     this.assertValidPage(id);
     if (!this.rotations.has(id)) return;
-    this.pushUndo();
+    this.pushUndo(`Azzera rotazione pagina ${id}`);
     this.rotations.delete(id);
   }
 
   deletePage(id: PageId): void {
     this.assertValidPage(id);
     if (this.deletions.has(id)) return;
-    this.pushUndo();
+    this.pushUndo(`Elimina pagina ${id}`);
     this.deletions.add(id);
   }
 
   restorePage(id: PageId): void {
     this.assertValidPage(id);
     if (!this.deletions.has(id)) return;
-    this.pushUndo();
+    this.pushUndo(`Ripristina pagina ${id}`);
     this.deletions.delete(id);
   }
 
@@ -377,7 +422,7 @@ export class PdfDocument {
   /** Applies pending rotations/deletions, replacing this document's baseline and clearing pending state. */
   async commit(): Promise<void> {
     if (!this.hasPendingChanges()) return;
-    const before = this.snapshot();
+    const before = this.snapshot(this.currentLabel);
     this.bytes = await this.computeCommittedBytes();
     this.pageCount = this.order.length - this.deletions.size;
     this.rotations.clear();
@@ -387,7 +432,7 @@ export class PdfDocument {
     // Recorded only once the wasm work has succeeded, so a failed commit
     // leaves no phantom history step. `pushUndo()` would snapshot the
     // *new* state, hence the pre-computed `before`.
-    this.recordSnapshot(before);
+    this.recordSnapshot(before, `Conferma modifiche (${this.pageCount} pagine)`);
   }
 
   /** Same computation as `commit()`, without mutating this document - a preview of the final result. */
@@ -397,20 +442,20 @@ export class PdfDocument {
 
   /** Immediate, whole-document operation - no pending state, nothing to preview. */
   async encrypt(ownerPassword: string, userPassword: string): Promise<void> {
-    const before = this.snapshot();
+    const before = this.snapshot(this.currentLabel);
     this.bytes = await encrypt_pdf(this.bytes, ownerPassword, userPassword);
     this.previewCache.clear();
-    this.recordSnapshot(before);
+    this.recordSnapshot(before, "Cifra documento");
   }
 
   /** Immediate, whole-document operation - no pending state, nothing to preview. */
   async decrypt(password: string): Promise<void> {
-    const before = this.snapshot();
+    const before = this.snapshot(this.currentLabel);
     this.bytes = await decrypt_pdf(this.bytes, password);
     this.pageCount = await page_count(this.bytes);
     this.previewCache.clear();
     this.order = identityOrder(this.pageCount);
-    this.recordSnapshot(before);
+    this.recordSnapshot(before, "Decifra documento");
   }
 
   private async computeCommittedBytes(): Promise<Uint8Array> {

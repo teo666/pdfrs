@@ -78,6 +78,29 @@ export class PdfDocumentView extends HTMLElement {
         .status { margin-top: 0.5rem; font-size: 0.85rem; color: #666; }
         .status--error { color: #dc2626; }
         .empty { color: #888; font-size: 0.9rem; }
+        .history { margin-bottom: 0.75rem; font-size: 0.8rem; }
+        .history summary { cursor: pointer; color: #666; }
+        .history ol { list-style: none; margin: 0.5rem 0 0; padding: 0; border: 1px solid #8884; border-radius: 4px; max-height: 12rem; overflow-y: auto; }
+        .history li { border-bottom: 1px solid #8882; }
+        .history li:last-child { border-bottom: none; }
+        .history button {
+          display: flex;
+          gap: 0.5rem;
+          width: 100%;
+          padding: 0.25rem 0.5rem;
+          border: none;
+          background: none;
+          font: inherit;
+          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          text-align: left;
+          color: inherit;
+        }
+        .history button:hover { background: #8881; }
+        .history .step { color: #999; min-width: 1.5rem; }
+        /* The state the document is actually in right now. */
+        .history li.current button { background: #3b82f611; color: #3b82f6; font-weight: 600; }
+        /* Steps ahead of the current one - reachable with redo, undone for now. */
+        .history li.future button { opacity: 0.5; }
       </style>
       <div class="toolbar">
         <h3></h3>
@@ -87,6 +110,10 @@ export class PdfDocumentView extends HTMLElement {
         <button type="button" data-action="export">Scarica anteprima risultato</button>
         <button type="button" data-action="download">Scarica documento</button>
       </div>
+      <details class="history">
+        <summary>Cronologia modifiche (debug)</summary>
+        <ol data-el="history"></ol>
+      </details>
       <div class="grid"></div>
       <p class="empty" hidden>Nessun documento selezionato.</p>
       <div class="status"></div>
@@ -109,7 +136,7 @@ export class PdfDocumentView extends HTMLElement {
     (this.root.querySelector("h3") as HTMLElement).textContent = `${label} (${doc.getPageCount()} pagine)`;
     (this.root.querySelector(".empty") as HTMLElement).hidden = true;
     await this.refresh();
-    this.syncHistoryButtons();
+    this.syncHistory();
   }
 
   private setStatus(message: string, isError = false): void {
@@ -247,12 +274,40 @@ export class PdfDocumentView extends HTMLElement {
     this.virtualObserver?.disconnect();
   }
 
-  /** The buttons mirror the model's history, so they're re-synced after anything that can push, pop or clear a history step. */
-  private syncHistoryButtons(): void {
+  /** Buttons and history panel both mirror the model, so they're re-synced after anything that can push, pop or move through a history step. */
+  private syncHistory(): void {
     const undo = this.root.querySelector('[data-action="undo"]') as HTMLButtonElement;
     const redo = this.root.querySelector('[data-action="redo"]') as HTMLButtonElement;
     undo.disabled = !this.doc?.canUndo();
     redo.disabled = !this.doc?.canRedo();
+
+    const list = this.root.querySelector('[data-el="history"]') as HTMLElement;
+    list.innerHTML = "";
+    if (!this.doc) return;
+
+    const entries = this.doc.history();
+    const currentIndex = entries.findIndex((entry) => entry.current);
+    for (const entry of entries) {
+      const item = document.createElement("li");
+      if (entry.current) item.classList.add("current");
+      else if (entry.index > currentIndex) item.classList.add("future");
+
+      const button = document.createElement("button");
+      button.type = "button";
+      // Clicking the current state is a no-op the model would report as
+      // "nothing moved" anyway, but disabling it says so up front.
+      button.disabled = entry.current;
+      const step = document.createElement("span");
+      step.className = "step";
+      step.textContent = String(entry.index);
+      const label = document.createElement("span");
+      label.textContent = entry.label;
+      button.append(step, label);
+      button.addEventListener("click", () => void this.applyHistoryStep(entry.index));
+
+      item.appendChild(button);
+      list.appendChild(item);
+    }
   }
 
   /**
@@ -263,15 +318,36 @@ export class PdfDocumentView extends HTMLElement {
    * The re-render is instant anyway - the restored snapshot brings its
    * preview cache back with it.
    */
-  private async applyHistory(direction: "undo" | "redo"): Promise<void> {
+  private applyHistory(direction: "undo" | "redo"): Promise<void> {
+    return this.moveThroughHistory(
+      () => (direction === "undo" ? (this.doc as PdfDocument).undo() : (this.doc as PdfDocument).redo()),
+      direction === "undo" ? "Annullato." : "Ripetuto.",
+    );
+  }
+
+  /** Jumps straight to a state picked in the history panel - any number of steps away, in either direction. */
+  private applyHistoryStep(index: number): Promise<void> {
+    const label = this.doc?.history()[index]?.label ?? "";
+    return this.moveThroughHistory(
+      () => (this.doc as PdfDocument).goToHistoryIndex(index),
+      `Tornato a: ${label}`,
+    );
+  }
+
+  private async moveThroughHistory(step: () => boolean, message: string): Promise<void> {
     if (!this.doc) return;
     const before = this.doc.getPageCount();
-    if (!(direction === "undo" ? this.doc.undo() : this.doc.redo())) return;
+    try {
+      if (!step()) return;
+    } catch (err) {
+      this.setStatus(`Errore: ${err instanceof Error ? err.message : String(err)}`, true);
+      return;
+    }
 
     (this.root.querySelector("h3") as HTMLElement).textContent = `${this.label} (${this.doc.getPageCount()} pagine)`;
     await this.refresh();
-    this.syncHistoryButtons();
-    this.setStatus(direction === "undo" ? "Annullato." : "Ripetuto.");
+    this.syncHistory();
+    this.setStatus(message);
     // Only a step that crossed a commit changes the page count - that's the
     // one the doc list outside needs to redraw.
     if (this.doc.getPageCount() !== before) {
@@ -318,7 +394,7 @@ export class PdfDocumentView extends HTMLElement {
       // `png` if it was there, and is a no-op addition if it wasn't.
       card.data = { ...(card.data as CardData), ...updated } as CardData;
     }
-    this.syncHistoryButtons();
+    this.syncHistory();
   }
 
   /**
@@ -353,7 +429,7 @@ export class PdfDocumentView extends HTMLElement {
       return;
     }
 
-    this.syncHistoryButtons();
+    this.syncHistory();
 
     // Reorder the actual DOM nodes to match the model's new order.
     // `appendChild` on a node that's already in the tree just moves it.
@@ -390,7 +466,7 @@ export class PdfDocumentView extends HTMLElement {
       await this.doc.commit();
       (this.root.querySelector("h3") as HTMLElement).textContent = `${this.label} (${this.doc.getPageCount()} pagine)`;
       await this.refresh();
-      this.syncHistoryButtons();
+      this.syncHistory();
       this.setStatus("Modifiche confermate.");
       this.dispatchEvent(new CustomEvent("document-committed", { bubbles: true, composed: true }));
     } catch (err) {
