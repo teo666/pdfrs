@@ -269,7 +269,9 @@ async function main() {
     const doc = await PdfDocument.open(new Uint8Array(bytes));
     doc.movePage(3, 0); // move original page 3 to the front
     const order = doc.pages().map((p) => p.id);
-    return order.join(",") === "3,1,2,4" && doc.getPageCount() === 4 && !doc.hasPendingChanges();
+    // In memory only - nothing is sent to wasm - but it *is* a pending
+    // change: exportBytes()/commit() have to apply the new order.
+    return order.join(",") === "3,1,2,4" && doc.getPageCount() === 4 && doc.hasPendingChanges();
   }, fourPagesBytes);
 
   results["movePage clamps an out-of-range target index instead of throwing"] = await page.evaluate(async (bytes) => {
@@ -448,6 +450,88 @@ async function main() {
     },
     { photoBytes: photoJpgBytes, pdfBytes: onePageBytes },
   );
+
+  // --- undo/redo of a pending rotation, and a fresh action truncating redo ---
+  results["undo/redo restores a pending rotation"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    if (doc.canUndo() || doc.canRedo()) return false;
+
+    doc.rotatePage(1, 90);
+    if (!doc.canUndo()) return false;
+    if (!doc.undo()) return false;
+    const undone = doc.pages().find((p) => p.id === 1)?.pendingRotation === 0 && !doc.canUndo() && doc.canRedo();
+
+    if (!doc.redo()) return false;
+    const redone = doc.pages().find((p) => p.id === 1)?.pendingRotation === 90 && !doc.canRedo();
+
+    // undo() on an empty stack is a no-op returning false, not a throw.
+    doc.undo();
+    const emptyStackIsNoop = doc.undo() === false;
+
+    return undone && redone && emptyStackIsNoop;
+  }, fourPagesBytes);
+
+  results["undo restores the page order"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.movePage(3, 0);
+    const moved = doc.pages().map((p) => p.id).join(",") === "3,1,2,4";
+    doc.undo();
+    return moved && doc.pages().map((p) => p.id).join(",") === "1,2,3,4";
+  }, fourPagesBytes);
+
+  // --- The point of snapshotting the whole state (bytes included): a commit
+  // is undoable too, and undoing it brings back the pending state it consumed. ---
+  results["undo reverts a commit, pending state and all"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.deletePage(2);
+    await doc.commit();
+    if (doc.getPageCount() !== 3 || doc.hasPendingChanges()) return false;
+
+    if (!doc.undo()) return false;
+    const backToFour = doc.getPageCount() === 4;
+    const deletionIsPendingAgain = doc.pages().find((p) => p.id === 2)?.markedForDeletion === true;
+
+    if (!doc.redo()) return false;
+    return backToFour && deletionIsPendingAgain && doc.getPageCount() === 3;
+  }, fourPagesBytes);
+
+  results["a new action after an undo clears redo"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.rotatePage(1, 90);
+    doc.undo();
+    if (!doc.canRedo()) return false;
+    doc.deletePage(3);
+    return !doc.canRedo() && doc.canUndo();
+  }, fourPagesBytes);
+
+  // --- No-op calls must not leave a history step behind: an undo should
+  // always visibly do something. ---
+  results["no-op mutations record no history step"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.restorePage(1); // not deleted
+    doc.resetRotation(1); // not rotated
+    doc.rotatePage(1, 360); // no change to the pending rotation
+    doc.movePage(1, 0); // already there
+    await doc.commit(); // nothing pending
+    return !doc.canUndo();
+  }, fourPagesBytes);
+
+  // --- Regression: a reorder alone is a pending change, so exportBytes()
+  // must not shortcut back to the untouched baseline. ---
+  results["a reorder alone counts as a pending change"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    if (doc.hasPendingChanges()) return false;
+    doc.movePage(4, 0);
+    if (!doc.hasPendingChanges()) return false;
+    const exported = await doc.exportBytes();
+    return exported.length > 0 && exported !== doc.getBytes();
+  }, fourPagesBytes);
 
   results["no console/page errors"] = consoleErrors.length === 0;
 

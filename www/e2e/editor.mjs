@@ -101,6 +101,37 @@ async function main() {
     };
   });
 
+  // --- Undo/redo through the toolbar buttons: two undos peel off the delete
+  // and then the rotation, two redos put them back - so the state the rest
+  // of this test builds on is unchanged. ---
+  const clickHistory = (action) =>
+    page.evaluate(
+      (which) =>
+        document
+          .querySelector("pdf-editor-app")
+          .shadowRoot.querySelector("pdf-document-view")
+          .shadowRoot.querySelector(`[data-action="${which}"]`)
+          .click(),
+      action,
+    );
+  const editState = () =>
+    page.evaluate(() => {
+      const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+      const cards = Array.from(view.shadowRoot.querySelectorAll("pdf-page-card"));
+      return {
+        rotation: cards.find((c) => c.data.id === 1).data.pendingRotation,
+        deleted: cards.find((c) => c.data.id === 2).data.markedForDeletion,
+        redoDisabled: view.shadowRoot.querySelector('[data-action="redo"]').disabled,
+      };
+    });
+
+  await clickHistory("undo");
+  await clickHistory("undo");
+  const afterUndo = await editState();
+  await clickHistory("redo");
+  await clickHistory("redo");
+  const afterRedo = await editState();
+
   // --- Commit: page 2 should be gone, page count drops from 4 to 3 ---
   await page.evaluate(() =>
     document
@@ -295,6 +326,8 @@ async function main() {
     "opening 2 files renders one card per page for the active document": cardCountAfterOpen === 4,
     "drag & drop reorders the cards (drag page 1 onto page 3's spot)": orderAfterDrag.join(",") === "2,3,1,4",
     "rotate/delete update pending state locally": stateAfterEdits.rotation === 90 && stateAfterEdits.deleted === true,
+    "the Annulla button peels the pending edits back off": afterUndo.rotation === 0 && afterUndo.deleted === false,
+    "the Ripeti button puts them back": afterRedo.rotation === 90 && afterRedo.deleted === true && afterRedo.redoDisabled,
     "commit removes the deleted page (4 -> 3)": afterCommit.cardCount === 3 && afterCommit.heading.includes("3 pagine"),
     "merge registers a third document with the summed page count (3+2=5)":
       afterMerge.docCount === 3 && afterMerge.heading.includes("5 pagine"),
