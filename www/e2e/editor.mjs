@@ -132,6 +132,39 @@ async function main() {
   await clickHistory("redo");
   const afterRedo = await editState();
 
+  // --- History panel: clicking a row jumps straight to that state, however
+  // many steps away it is. Row 0 is the freshly opened document, so this
+  // undoes the drag, the rotation and the deletion in one click - then the
+  // last row puts all three back, leaving the state the rest of this test
+  // builds on unchanged. ---
+  const historyLabels = await page.evaluate(() => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    return Array.from(view.shadowRoot.querySelectorAll('[data-el="history"] li')).map((li) => li.textContent);
+  });
+  const clickHistoryRow = (index) =>
+    page.evaluate((i) => {
+      const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+      const rows = view.shadowRoot.querySelectorAll('[data-el="history"] li button');
+      rows[i === -1 ? rows.length - 1 : i].click();
+    }, index);
+
+  await clickHistoryRow(0);
+  const afterJumpToStart = await page.evaluate(() => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    const cards = Array.from(view.shadowRoot.querySelectorAll("pdf-page-card"));
+    const rows = Array.from(view.shadowRoot.querySelectorAll('[data-el="history"] li'));
+    return {
+      order: cards.map((c) => c.data.id).join(","),
+      rotation: cards.find((c) => c.data.id === 1).data.pendingRotation,
+      deleted: cards.find((c) => c.data.id === 2).data.markedForDeletion,
+      currentRow: rows.findIndex((li) => li.classList.contains("current")),
+      futureRows: rows.filter((li) => li.classList.contains("future")).length,
+    };
+  });
+
+  await clickHistoryRow(-1);
+  const afterJumpToEnd = await editState();
+
   // --- Commit: page 2 should be gone, page count drops from 4 to 3 ---
   await page.evaluate(() =>
     document
@@ -328,6 +361,14 @@ async function main() {
     "rotate/delete update pending state locally": stateAfterEdits.rotation === 90 && stateAfterEdits.deleted === true,
     "the Annulla button peels the pending edits back off": afterUndo.rotation === 0 && afterUndo.deleted === false,
     "the Ripeti button puts them back": afterRedo.rotation === 90 && afterRedo.deleted === true && afterRedo.redoDisabled,
+    "the history panel lists one labelled row per action": historyLabels.length === 4 && historyLabels[0].includes("Documento aperto") && historyLabels[3].includes("Elimina pagina 2"),
+    "clicking a history row jumps back across several steps at once":
+      afterJumpToStart.order === "1,2,3,4" &&
+      afterJumpToStart.rotation === 0 &&
+      afterJumpToStart.deleted === false &&
+      afterJumpToStart.currentRow === 0 &&
+      afterJumpToStart.futureRows === 3,
+    "clicking the last history row jumps forward again": afterJumpToEnd.rotation === 90 && afterJumpToEnd.deleted === true,
     "commit removes the deleted page (4 -> 3)": afterCommit.cardCount === 3 && afterCommit.heading.includes("3 pagine"),
     "merge registers a third document with the summed page count (3+2=5)":
       afterMerge.docCount === 3 && afterMerge.heading.includes("5 pagine"),
