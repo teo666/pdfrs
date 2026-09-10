@@ -79,6 +79,35 @@ Ritorna il numero di pagine di un PDF. Utile per sapere quante anteprime richied
 const count = await page_count(bytes);
 ```
 
+## `read_metadata(file: Uint8Array): Promise<PdfMetadata>`
+
+Legge il dizionario `/Info` del documento. Ritorna un oggetto semplice con **solo le chiavi effettivamente presenti** nel PDF: un documento senza metadati legge `{}`, e un campo assente resta assente (non diventa stringa vuota).
+
+I campi sono `title`, `author`, `subject`, `keywords`, `creator`, `producer`, `creationDate`, `modDate`. Le due date sono la stringa PDF grezza (`"D:20240115103000+01'00'"`), non convertita: il formato porta un offset (`+HH'mm'`) che nessun tipo nativo JS rappresenta, e rimaneggiarlo perderebbe informazione sulle molte date malformate dei PDF reali.
+
+```ts
+const { title, author } = await read_metadata(bytes);
+```
+
+## `write_metadata(file: Uint8Array, patch): Promise<Uint8Array>`
+
+Scrive il dizionario `/Info`, creandolo se il documento non ne aveva uno. `patch` è **a tre stati per campo**:
+
+| valore | effetto |
+| --- | --- |
+| chiave assente dall'oggetto | il campo resta com'è |
+| stringa | imposta il campo |
+| `null` | **cancella** la chiave dal dizionario |
+
+È la distinzione che permette di svuotare l'autore senza toccare il titolo. Una chiave sconosciuta viene rifiutata con un errore invece di finire nel trailer.
+
+```ts
+// Imposta il titolo, cancella l'autore, lascia tutto il resto com'è.
+const updated = await write_metadata(bytes, { title: "Relazione", author: null });
+```
+
+Il testo non ASCII viene codificato in UTF-16BE (ASCII resta in PDFDocEncoding), quindi accenti e alfabeti non latini sopravvivono al giro completo.
+
 ## `render_page_preview(file: Uint8Array, page: number, scale: number): Promise<Uint8Array>`
 
 > Dietro la feature Cargo `preview` (attiva di default, ma assente in una build "core" - vedi docs/architecture.md). Nel frontend `www/`, chiamarla è ciò che fa scaricare `pdfrs-full` (`pkg-full/`, ~4.3MB) al posto del solo pacchetto `pdfrs` core - vedi docs/development.md.

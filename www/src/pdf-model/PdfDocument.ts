@@ -4,11 +4,23 @@ import {
   encrypt_pdf,
   image_to_pdf,
   page_count,
+  read_metadata,
   render_page_preview,
   rotate_pages,
+  write_metadata,
 } from "../pdfrs-worker-client";
 import { renderPagesInParallel } from "../preview-worker-pool";
-import type { HistoryEntry, ImagePageOptions, PageId, PageInfo, PagePreview, PageRange } from "./types";
+import type {
+  HistoryEntry,
+  ImagePageOptions,
+  MetadataField,
+  MetadataPatch,
+  PageId,
+  PageInfo,
+  PagePreview,
+  PageRange,
+  PdfMetadata,
+} from "./types";
 
 export interface GetPreviewsOptions {
   /** 1-indexed, inclusive window over the current *display order* (positions, not original page ids). Defaults to the whole document - set it to render only a window of a large document. */
@@ -52,7 +64,23 @@ interface DocumentSnapshot {
   deletions: Set<PageId>;
   order: PageId[];
   previewCache: Map<string, Uint8Array>;
+  pendingMetadata: Map<MetadataField, string | null>;
+  baselineMetadata: PdfMetadata | null;
 }
+
+/** Italian labels for the history entries, so a step reads "Modifica metadati (titolo)". */
+const METADATA_LABELS: Record<MetadataField, string> = {
+  title: "titolo",
+  author: "autore",
+  subject: "oggetto",
+  keywords: "parole chiave",
+  creator: "creatore",
+  producer: "producer",
+  creationDate: "data creazione",
+  modDate: "data modifica",
+};
+
+const METADATA_FIELDS = Object.keys(METADATA_LABELS) as MetadataField[];
 
 function cacheKey(id: PageId, scale: number): string {
   return `${id}:${scale}`;
@@ -92,6 +120,14 @@ export class PdfDocument {
   // Snapshots of past states, oldest first; `redoStack` holds the states
   // undone away from, newest last. Any fresh mutation clears the redo stack
   // (standard semantics: acting after an undo drops the future).
+  // Pending metadata edits, same idea as `rotations`/`deletions`: a field
+  // present here overrides the baseline, `null` means "delete this key".
+  private readonly pendingMetadata = new Map<MetadataField, string | null>();
+  // What the baseline's /Info holds, read lazily on the first getMetadata()
+  // call and cached like the previews are - `null` means "not read yet".
+  // Invalidated wherever `previewCache` is, since it depends on exactly the
+  // same thing: the baseline bytes.
+  private baselineMetadata: PdfMetadata | null = null;
   private undoStack: DocumentSnapshot[] = [];
   private redoStack: DocumentSnapshot[] = [];
   // Describes how the *current* state was reached; moves onto a snapshot as
@@ -137,7 +173,12 @@ export class PdfDocument {
 
   /** Includes a pending *reorder*, not just rotations/deletions - `movePage` alone still changes the output document. */
   hasPendingChanges(): boolean {
-    return this.rotations.size > 0 || this.deletions.size > 0 || this.hasPendingReorder();
+    return (
+      this.rotations.size > 0 ||
+      this.deletions.size > 0 ||
+      this.pendingMetadata.size > 0 ||
+      this.hasPendingReorder()
+    );
   }
 
   private hasPendingReorder(): boolean {
@@ -229,6 +270,8 @@ export class PdfDocument {
       deletions: new Set(this.deletions),
       order: [...this.order],
       previewCache: new Map(this.previewCache),
+      pendingMetadata: new Map(this.pendingMetadata),
+      baselineMetadata: this.baselineMetadata,
     };
   }
 
@@ -247,6 +290,10 @@ export class PdfDocument {
 
     this.previewCache.clear();
     for (const [key, png] of snapshot.previewCache) this.previewCache.set(key, png);
+
+    this.pendingMetadata.clear();
+    for (const [field, value] of snapshot.pendingMetadata) this.pendingMetadata.set(field, value);
+    this.baselineMetadata = snapshot.baselineMetadata;
   }
 
   /**
@@ -327,6 +374,85 @@ export class PdfDocument {
     if (!this.deletions.has(id)) return;
     this.pushUndo(`Ripristina pagina ${id}`);
     this.deletions.delete(id);
+  }
+
+  /**
+   * The metadata as it would be after a commit: what the baseline holds, with
+   * any pending edits laid over it (a field pending as `null` is reported as
+   * absent, since that's what committing it would do).
+   *
+   * Async and lazy on purpose. `open()` deliberately makes only the one cheap
+   * `page_count` call and never renders anything eagerly; reading /Info up
+   * front would spend a second wasm round-trip per document on something most
+   * sessions never look at. The baseline read is cached afterwards, and that
+   * cache is invalidated exactly where `previewCache` is - both depend only
+   * on the baseline bytes.
+   */
+  async getMetadata(): Promise<PdfMetadata> {
+    const baseline = await this.ensureBaselineMetadata();
+
+    const metadata: PdfMetadata = { ...baseline };
+    for (const [field, value] of this.pendingMetadata) {
+      if (value === null) delete metadata[field];
+      else metadata[field] = value;
+    }
+    return metadata;
+  }
+
+  /** Which metadata fields currently carry an uncommitted edit - for a UI that wants to mark them. */
+  pendingMetadataFields(): Set<MetadataField> {
+    return new Set(this.pendingMetadata.keys());
+  }
+
+  /** Reads the baseline's /Info once and caches it; every later call is free until the baseline changes. */
+  private async ensureBaselineMetadata(): Promise<PdfMetadata> {
+    if (!this.baselineMetadata) {
+      this.baselineMetadata = (await read_metadata(this.bytes)) as PdfMetadata;
+    }
+    return this.baselineMetadata;
+  }
+
+  /**
+   * Queues a metadata edit. Nothing is sent to wasm until `commit()`/
+   * `exportBytes()`, like every other page-level edit - which is also what
+   * puts it in the undo history for free.
+   *
+   * Three-state per field: a field left out of `patch` is untouched, a string
+   * sets it, `null` deletes the key.
+   *
+   * Async where `rotatePage`/`deletePage` are sync, for a real reason:
+   * deciding whether an edit changes anything at all means knowing what the
+   * document already says, and that lives in the PDF. It reads the baseline
+   * itself rather than making callers remember to call `getMetadata()` first
+   * - after a `commit()` the cached baseline is gone, and that requirement
+   * would be a trap.
+   */
+  async setMetadata(patch: MetadataPatch): Promise<void> {
+    const baseline = await this.ensureBaselineMetadata();
+    const changed: MetadataField[] = [];
+    // Compare against the *effective* value, so re-typing what's already
+    // there - or clearing a field that was already absent - isn't an edit.
+    for (const field of METADATA_FIELDS) {
+      if (!(field in patch)) continue;
+      const next = patch[field] ?? null;
+      const current = this.pendingMetadata.has(field)
+        ? (this.pendingMetadata.get(field) as string | null)
+        : (baseline[field] ?? null);
+      if (next !== current) changed.push(field);
+    }
+
+    if (changed.length === 0) return;
+
+    this.pushUndo(`Modifica metadati (${changed.map((field) => METADATA_LABELS[field]).join(", ")})`);
+
+    for (const field of changed) {
+      const next = patch[field] ?? null;
+      // An edit that puts a field back to its baseline value is not a
+      // pending change any more - drop it rather than writing a redundant
+      // key at commit time.
+      if ((baseline[field] ?? null) === next) this.pendingMetadata.delete(field);
+      else this.pendingMetadata.set(field, next);
+    }
   }
 
   /**
@@ -427,7 +553,9 @@ export class PdfDocument {
     this.pageCount = this.order.length - this.deletions.size;
     this.rotations.clear();
     this.deletions.clear();
+    this.pendingMetadata.clear();
     this.previewCache.clear();
+    this.baselineMetadata = null;
     this.order = identityOrder(this.pageCount);
     // Recorded only once the wasm work has succeeded, so a failed commit
     // leaves no phantom history step. `pushUndo()` would snapshot the
@@ -445,6 +573,7 @@ export class PdfDocument {
     const before = this.snapshot(this.currentLabel);
     this.bytes = await encrypt_pdf(this.bytes, ownerPassword, userPassword);
     this.previewCache.clear();
+    this.baselineMetadata = null;
     this.recordSnapshot(before, "Cifra documento");
   }
 
@@ -454,6 +583,7 @@ export class PdfDocument {
     this.bytes = await decrypt_pdf(this.bytes, password);
     this.pageCount = await page_count(this.bytes);
     this.previewCache.clear();
+    this.baselineMetadata = null;
     this.order = identityOrder(this.pageCount);
     this.recordSnapshot(before, "Decifra documento");
   }
@@ -485,6 +615,30 @@ export class PdfDocument {
 
     if (rotations.length > 0) {
       bytes = await rotate_pages(bytes, rotations);
+    }
+
+    // Metadata goes last: it has to be written into the document that
+    // actually ships, and it never interacts with the page-level steps above
+    // (/Info lives in the trailer).
+    //
+    // `compose_pdf` builds a brand new document and only carries /Root over,
+    // so a plain delete or reorder would otherwise silently drop the
+    // document's title and author. When the page sequence changed, the whole
+    // baseline is re-written on top of the pending edits, not just the edits.
+    const rewritesDocument = !isUnchangedOrder;
+    if (this.pendingMetadata.size > 0 || rewritesDocument) {
+      const patch: Record<string, string | null> = {};
+      if (rewritesDocument) {
+        const baseline = this.baselineMetadata ?? ((await read_metadata(this.bytes)) as PdfMetadata);
+        this.baselineMetadata = baseline;
+        for (const field of METADATA_FIELDS) {
+          const value = baseline[field];
+          if (value !== undefined) patch[field] = value;
+        }
+      }
+      for (const [field, value] of this.pendingMetadata) patch[field] = value;
+
+      if (Object.keys(patch).length > 0) bytes = await write_metadata(bytes, patch);
     }
 
     return bytes;

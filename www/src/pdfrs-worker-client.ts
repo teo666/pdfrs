@@ -51,6 +51,16 @@ export function compose_pdf(sources: Uint8Array[], layout: unknown): Promise<Uin
   return call("compose_pdf", [sources, layout]);
 }
 
+/** Reads the `/Info` metadata. Only the keys actually present come back, so a document without metadata reads as `{}`. */
+export function read_metadata(file: Uint8Array): Promise<Record<string, string>> {
+  return call("read_metadata", [file]);
+}
+
+/** Writes `/Info` metadata. `patch` is three-state per field: key absent = untouched, string = set, `null` = delete the key. */
+export function write_metadata(file: Uint8Array, patch: Record<string, string | null>): Promise<Uint8Array> {
+  return call("write_metadata", [file, patch]);
+}
+
 export function encrypt_pdf(file: Uint8Array, ownerPassword: string, userPassword: string): Promise<Uint8Array> {
   return call("encrypt_pdf", [file, ownerPassword, userPassword]);
 }

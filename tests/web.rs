@@ -31,6 +31,26 @@ fn js_object(fields: &[(&str, u32)]) -> JsValue {
     obj.into()
 }
 
+/// Like `js_object`, but for string-valued fields - and `None` for an
+/// explicit JS `null`, which the metadata patch uses to mean "delete this
+/// key" (distinct from leaving the key out entirely).
+fn js_string_object(fields: &[(&str, Option<&str>)]) -> JsValue {
+    let obj = Object::new();
+    for (key, value) in fields {
+        let value = match value {
+            Some(text) => JsValue::from_str(text),
+            None => JsValue::NULL,
+        };
+        Reflect::set(&obj, &JsValue::from_str(key), &value).unwrap();
+    }
+    obj.into()
+}
+
+fn js_field(value: &JsValue, key: &str) -> Option<String> {
+    let field = Reflect::get(value, &JsValue::from_str(key)).unwrap();
+    field.as_string()
+}
+
 fn js_array(items: Vec<JsValue>) -> JsValue {
     let arr = Array::new();
     for item in items {
@@ -183,4 +203,69 @@ async fn image_to_pdf_result_can_be_merged_and_previewed() {
 async fn image_to_pdf_rejects_non_jpeg_input() {
     let result = pdfrs::image_to_pdf(bytes(ONE_PAGE), JsValue::UNDEFINED).await;
     assert!(result.is_err());
+}
+
+#[wasm_bindgen_test]
+async fn writes_and_reads_back_metadata() {
+    let patch = js_string_object(&[
+        ("title", Some("Relazione annuale")),
+        ("author", Some("Sofía Ünal")),
+        ("creationDate", Some("D:20240115103000+01'00'")),
+    ]);
+
+    let written = pdfrs::write_metadata(bytes(ONE_PAGE), patch)
+        .await
+        .expect("write_metadata should succeed");
+
+    let metadata = pdfrs::read_metadata(written)
+        .await
+        .expect("read_metadata should succeed");
+
+    // A plain JS object, not a Map - that's what the frontend expects to
+    // destructure, and it's the only exported function returning one.
+    assert!(!metadata.is_undefined() && !metadata.is_null());
+    assert_eq!(js_field(&metadata, "title").as_deref(), Some("Relazione annuale"));
+    assert_eq!(js_field(&metadata, "author").as_deref(), Some("Sofía Ünal"));
+    assert_eq!(
+        js_field(&metadata, "creationDate").as_deref(),
+        Some("D:20240115103000+01'00'")
+    );
+    // A key never written stays absent rather than coming back empty.
+    assert_eq!(js_field(&metadata, "subject"), None);
+}
+
+/// The three states of the patch have to survive the JS -> Rust boundary
+/// intact: a key left out is untouched, `null` deletes, a string sets.
+#[wasm_bindgen_test]
+async fn metadata_patch_is_three_state() {
+    let written = pdfrs::write_metadata(
+        bytes(ONE_PAGE),
+        js_string_object(&[("title", Some("Titolo")), ("author", Some("Autore"))]),
+    )
+    .await
+    .expect("first write should succeed");
+
+    // Only the author is mentioned, and it's null: the title must survive.
+    let updated = pdfrs::write_metadata(written, js_string_object(&[("author", None)]))
+        .await
+        .expect("second write should succeed");
+
+    let metadata = pdfrs::read_metadata(updated).await.unwrap();
+    assert_eq!(js_field(&metadata, "title").as_deref(), Some("Titolo"));
+    assert_eq!(js_field(&metadata, "author"), None);
+}
+
+#[wasm_bindgen_test]
+async fn read_metadata_of_a_document_without_info_is_empty() {
+    let metadata = pdfrs::read_metadata(bytes(FOUR_PAGES))
+        .await
+        .expect("read_metadata should succeed");
+
+    assert!(js_field(&metadata, "title").is_none());
+}
+
+#[wasm_bindgen_test]
+async fn write_metadata_rejects_an_unknown_field() {
+    let result = pdfrs::write_metadata(bytes(ONE_PAGE), js_string_object(&[("bogus", Some("x"))])).await;
+    assert!(result.is_err(), "an unknown metadata field should be rejected");
 }

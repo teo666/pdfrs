@@ -106,6 +106,33 @@ pub async fn page_count(file: Uint8Array) -> std::result::Result<u32, JsValue> {
     Ok(doc.get_pages().len() as u32)
 }
 
+/// Reads a PDF's `/Info` metadata as a JS object with the keys that are
+/// actually present (`{ title?, author?, subject?, keywords?, creator?,
+/// producer?, creationDate?, modDate? }`). Dates come back as the raw PDF
+/// date string (`"D:20240115103000+01'00'"`). A document without any
+/// metadata reads as `{}` rather than failing.
+#[wasm_bindgen]
+pub async fn read_metadata(file: Uint8Array) -> std::result::Result<JsValue, JsValue> {
+    let doc = load(&file.to_vec())?;
+    let metadata = operations::metadata::read(&doc);
+    // The only exported function returning a structured object rather than
+    // bytes - a struct (not a map) precisely because serde_wasm_bindgen
+    // serializes a map as a JS `Map`, and callers want a plain object.
+    serde_wasm_bindgen::to_value(&metadata).map_err(|err| PdfrsError::Options(err.to_string()).into())
+}
+
+/// Writes a PDF's `/Info` metadata. `patch` is a JS object that is
+/// three-state per field: a key left out is untouched, a string sets it, and
+/// `null` deletes it - so clearing the author doesn't disturb the title.
+/// Unknown keys are rejected rather than written into the trailer.
+#[wasm_bindgen]
+pub async fn write_metadata(file: Uint8Array, patch: JsValue) -> std::result::Result<Uint8Array, JsValue> {
+    let mut doc = load(&file.to_vec())?;
+    let patch: std::collections::HashMap<String, Option<String>> = parse_options(patch)?;
+    operations::metadata::write(&mut doc, &patch)?;
+    Ok(save(&mut doc)?)
+}
+
 /// Renders `page` (1-indexed) of a PDF file to a PNG image, for use as a
 /// browser preview thumbnail. `scale` multiplies the page's native size (e.g.
 /// `1.5` for a sharper-than-1:1 preview). Expects already-decrypted bytes.
@@ -139,7 +166,11 @@ pub async fn image_to_pdf(file: Uint8Array, options: JsValue) -> std::result::Re
     Ok(Uint8Array::from(pdf_bytes.as_slice()))
 }
 
+// Named `start`, not `main`: `#[wasm_bindgen(start)]` works with any
+// function name, and calling it `main` makes wasm-bindgen refuse to link the
+// test harness ("the name `main` is exported by multiple crates in this
+// build"), which is what kept `wasm-pack test` from running at all.
 #[wasm_bindgen(start)]
-pub fn main() {
+pub fn start() {
     utils::set_panic_hook();
 }
