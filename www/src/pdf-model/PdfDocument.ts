@@ -20,9 +20,36 @@ export interface GetPreviewsOptions {
 /** Above this many pages, getPreviews() spreads rendering across a worker pool instead of the single shared worker. */
 const PARALLEL_PREVIEW_THRESHOLD = 6;
 
+/** How many undo steps are kept. Snapshots are cheap (see `DocumentSnapshot`) but each one pins a baseline `bytes` buffer, so the stack is bounded rather than unlimited. */
+const MAX_HISTORY = 50;
+
 interface PendingRotation {
   page: number;
   degrees: number;
+}
+
+/**
+ * A full copy of everything mutable in a `PdfDocument`, i.e. everything
+ * `undo()` has to be able to put back.
+ *
+ * It snapshots the *whole* state, not just the pending edits: `bytes` and
+ * `pageCount` are in here too, so `commit()`/`encrypt()`/`decrypt()` - the
+ * operations that rewrite the baseline - are undoable as well, and undoing
+ * one is a pure reference swap with no wasm call. That's affordable because
+ * only the containers are copied, never the bytes: PDF buffers and rendered
+ * PNGs are never mutated in place (every operation produces a *new*
+ * `Uint8Array`), so a snapshot holding the old ones costs one reference
+ * each. Keeping `previewCache` along with the baseline it belongs to is what
+ * makes an undone commit re-render instantly instead of re-rasterising every
+ * page.
+ */
+interface DocumentSnapshot {
+  bytes: Uint8Array;
+  pageCount: number;
+  rotations: Map<PageId, number>;
+  deletions: Set<PageId>;
+  order: PageId[];
+  previewCache: Map<string, Uint8Array>;
 }
 
 function cacheKey(id: PageId, scale: number): string {
@@ -60,6 +87,11 @@ export class PdfDocument {
   // real by `computeCommittedBytes()` via `compose_pdf`'s arbitrary layout.
   // Reset to identity ([1, 2, ..., pageCount]) whenever the baseline changes.
   private order: PageId[];
+  // Snapshots of past states, oldest first; `redoStack` holds the states
+  // undone away from, newest last. Any fresh mutation clears the redo stack
+  // (standard semantics: acting after an undo drops the future).
+  private undoStack: DocumentSnapshot[] = [];
+  private redoStack: DocumentSnapshot[] = [];
 
   private constructor(bytes: Uint8Array, pageCount: number) {
     this.bytes = bytes;
@@ -98,8 +130,96 @@ export class PdfDocument {
     return this.bytes;
   }
 
+  /** Includes a pending *reorder*, not just rotations/deletions - `movePage` alone still changes the output document. */
   hasPendingChanges(): boolean {
-    return this.rotations.size > 0 || this.deletions.size > 0;
+    return this.rotations.size > 0 || this.deletions.size > 0 || this.hasPendingReorder();
+  }
+
+  private hasPendingReorder(): boolean {
+    return this.order.some((id, index) => id !== index + 1);
+  }
+
+  canUndo(): boolean {
+    return this.undoStack.length > 0;
+  }
+
+  canRedo(): boolean {
+    return this.redoStack.length > 0;
+  }
+
+  /**
+   * Reverts the last state-changing operation - including a `commit()`,
+   * `encrypt()` or `decrypt()`, which is why this restores the baseline too
+   * (see `DocumentSnapshot`). Synchronous and free: no wasm call, nothing
+   * re-rendered, since the preview cache travels with the snapshot.
+   *
+   * Returns false (and does nothing) when there is nothing to undo.
+   */
+  undo(): boolean {
+    const snapshot = this.undoStack.pop();
+    if (!snapshot) return false;
+    this.redoStack.push(this.snapshot());
+    this.restore(snapshot);
+    return true;
+  }
+
+  /** Re-applies the last undone operation. Returns false when there is nothing to redo. */
+  redo(): boolean {
+    const snapshot = this.redoStack.pop();
+    if (!snapshot) return false;
+    this.undoStack.push(this.snapshot());
+    this.restore(snapshot);
+    return true;
+  }
+
+  /** Drops the undo/redo history, keeping the current state - e.g. to release the baselines it pins. */
+  clearHistory(): void {
+    this.undoStack = [];
+    this.redoStack = [];
+  }
+
+  private snapshot(): DocumentSnapshot {
+    return {
+      bytes: this.bytes,
+      pageCount: this.pageCount,
+      rotations: new Map(this.rotations),
+      deletions: new Set(this.deletions),
+      order: [...this.order],
+      previewCache: new Map(this.previewCache),
+    };
+  }
+
+  /** `rotations`/`deletions`/`previewCache` are `readonly` fields, so they're refilled in place rather than reassigned. */
+  private restore(snapshot: DocumentSnapshot): void {
+    this.bytes = snapshot.bytes;
+    this.pageCount = snapshot.pageCount;
+    this.order = [...snapshot.order];
+
+    this.rotations.clear();
+    for (const [id, degrees] of snapshot.rotations) this.rotations.set(id, degrees);
+
+    this.deletions.clear();
+    for (const id of snapshot.deletions) this.deletions.add(id);
+
+    this.previewCache.clear();
+    for (const [key, png] of snapshot.previewCache) this.previewCache.set(key, png);
+  }
+
+  /**
+   * Records the current state as an undo step. Called by every mutating
+   * method *after* its validation and no-op early-returns, so the history
+   * only ever contains steps that actually changed something - an undo
+   * always visibly does something.
+   */
+  private pushUndo(): void {
+    this.recordSnapshot(this.snapshot());
+  }
+
+  /** `pushUndo()` for the async operations, which capture their "before" state up front and only commit it to the history once the wasm call has succeeded. */
+  private recordSnapshot(snapshot: DocumentSnapshot): void {
+    this.undoStack.push(snapshot);
+    if (this.undoStack.length > MAX_HISTORY) this.undoStack.shift();
+    this.redoStack = [];
   }
 
   /** Pages in their current display order (see `movePage`), not necessarily 1, 2, 3... */
@@ -119,6 +239,7 @@ export class PdfDocument {
     const fromIndex = this.order.indexOf(id);
     const clampedIndex = Math.max(0, Math.min(toIndex, this.order.length - 1));
     if (clampedIndex === fromIndex) return;
+    this.pushUndo();
     this.order.splice(fromIndex, 1);
     this.order.splice(clampedIndex, 0, id);
   }
@@ -132,6 +253,10 @@ export class PdfDocument {
     if (degrees % 90 !== 0) {
       throw new Error(`la rotazione deve essere un multiplo di 90, ricevuto ${degrees}`);
     }
+    // A multiple of 360 leaves the pending rotation exactly as it was - not
+    // a history step.
+    if (degrees % 360 === 0) return;
+    this.pushUndo();
     const current = this.rotations.get(id) ?? 0;
     const next = ((current + degrees) % 360 + 360) % 360;
     if (next === 0) this.rotations.delete(id);
@@ -140,16 +265,22 @@ export class PdfDocument {
 
   resetRotation(id: PageId): void {
     this.assertValidPage(id);
+    if (!this.rotations.has(id)) return;
+    this.pushUndo();
     this.rotations.delete(id);
   }
 
   deletePage(id: PageId): void {
     this.assertValidPage(id);
+    if (this.deletions.has(id)) return;
+    this.pushUndo();
     this.deletions.add(id);
   }
 
   restorePage(id: PageId): void {
     this.assertValidPage(id);
+    if (!this.deletions.has(id)) return;
+    this.pushUndo();
     this.deletions.delete(id);
   }
 
@@ -245,12 +376,18 @@ export class PdfDocument {
 
   /** Applies pending rotations/deletions, replacing this document's baseline and clearing pending state. */
   async commit(): Promise<void> {
+    if (!this.hasPendingChanges()) return;
+    const before = this.snapshot();
     this.bytes = await this.computeCommittedBytes();
     this.pageCount = this.order.length - this.deletions.size;
     this.rotations.clear();
     this.deletions.clear();
     this.previewCache.clear();
     this.order = identityOrder(this.pageCount);
+    // Recorded only once the wasm work has succeeded, so a failed commit
+    // leaves no phantom history step. `pushUndo()` would snapshot the
+    // *new* state, hence the pre-computed `before`.
+    this.recordSnapshot(before);
   }
 
   /** Same computation as `commit()`, without mutating this document - a preview of the final result. */
@@ -260,16 +397,20 @@ export class PdfDocument {
 
   /** Immediate, whole-document operation - no pending state, nothing to preview. */
   async encrypt(ownerPassword: string, userPassword: string): Promise<void> {
+    const before = this.snapshot();
     this.bytes = await encrypt_pdf(this.bytes, ownerPassword, userPassword);
     this.previewCache.clear();
+    this.recordSnapshot(before);
   }
 
   /** Immediate, whole-document operation - no pending state, nothing to preview. */
   async decrypt(password: string): Promise<void> {
+    const before = this.snapshot();
     this.bytes = await decrypt_pdf(this.bytes, password);
     this.pageCount = await page_count(this.bytes);
     this.previewCache.clear();
     this.order = identityOrder(this.pageCount);
+    this.recordSnapshot(before);
   }
 
   private async computeCommittedBytes(): Promise<Uint8Array> {

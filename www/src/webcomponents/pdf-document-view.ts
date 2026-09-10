@@ -44,6 +44,26 @@ export class PdfDocumentView extends HTMLElement {
   private positionByCard = new Map<PdfPageCard, number>();
   private pendingPositions = new Set<number>();
   private flushScheduled = false;
+  // Bound once so connected/disconnectedCallback add and remove the *same*
+  // function reference. Listens on `window`, not on the shadow root: with
+  // the focus on the page body (the usual case while looking at the grid)
+  // the keydown never reaches this component's own subtree.
+  private readonly onKeyDown = (event: KeyboardEvent): void => {
+    if (!this.doc || !(event.metaKey || event.ctrlKey) || event.altKey) return;
+    if (isEditableTarget(event.target)) return;
+
+    const key = event.key.toLowerCase();
+    const isRedo = (key === "z" && event.shiftKey) || (key === "y" && !event.shiftKey);
+    const isUndo = key === "z" && !event.shiftKey;
+    if (!isUndo && !isRedo) return;
+
+    event.preventDefault();
+    void this.applyHistory(isUndo ? "undo" : "redo");
+  };
+
+  connectedCallback(): void {
+    window.addEventListener("keydown", this.onKeyDown);
+  }
 
   constructor() {
     super();
@@ -53,6 +73,7 @@ export class PdfDocumentView extends HTMLElement {
         .toolbar { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.75rem; flex-wrap: wrap; }
         .toolbar h3 { margin: 0; font-size: 1rem; flex: 1; min-width: 8rem; }
         button { padding: 0.35rem 0.75rem; cursor: pointer; }
+        button:disabled { cursor: default; opacity: 0.45; }
         .grid { display: flex; flex-wrap: wrap; gap: 1.5rem; padding: 0.25rem; }
         .status { margin-top: 0.5rem; font-size: 0.85rem; color: #666; }
         .status--error { color: #dc2626; }
@@ -60,6 +81,8 @@ export class PdfDocumentView extends HTMLElement {
       </style>
       <div class="toolbar">
         <h3></h3>
+        <button type="button" data-action="undo" title="Annulla (Cmd/Ctrl+Z)" disabled>Annulla</button>
+        <button type="button" data-action="redo" title="Ripeti (Cmd+Shift+Z / Ctrl+Y)" disabled>Ripeti</button>
         <button type="button" data-action="commit">Conferma modifiche</button>
         <button type="button" data-action="export">Scarica anteprima risultato</button>
         <button type="button" data-action="download">Scarica documento</button>
@@ -73,6 +96,8 @@ export class PdfDocumentView extends HTMLElement {
     this.root.addEventListener("dragend", () => {
       this.lastDragOverTargetId = null;
     });
+    this.root.querySelector('[data-action="undo"]')?.addEventListener("click", () => void this.applyHistory("undo"));
+    this.root.querySelector('[data-action="redo"]')?.addEventListener("click", () => void this.applyHistory("redo"));
     this.root.querySelector('[data-action="commit"]')?.addEventListener("click", () => this.commit());
     this.root.querySelector('[data-action="export"]')?.addEventListener("click", () => this.exportPreview());
     this.root.querySelector('[data-action="download"]')?.addEventListener("click", () => this.downloadCurrent());
@@ -84,6 +109,7 @@ export class PdfDocumentView extends HTMLElement {
     (this.root.querySelector("h3") as HTMLElement).textContent = `${label} (${doc.getPageCount()} pagine)`;
     (this.root.querySelector(".empty") as HTMLElement).hidden = true;
     await this.refresh();
+    this.syncHistoryButtons();
   }
 
   private setStatus(message: string, isError = false): void {
@@ -217,7 +243,40 @@ export class PdfDocumentView extends HTMLElement {
   }
 
   disconnectedCallback(): void {
+    window.removeEventListener("keydown", this.onKeyDown);
     this.virtualObserver?.disconnect();
+  }
+
+  /** The buttons mirror the model's history, so they're re-synced after anything that can push, pop or clear a history step. */
+  private syncHistoryButtons(): void {
+    const undo = this.root.querySelector('[data-action="undo"]') as HTMLButtonElement;
+    const redo = this.root.querySelector('[data-action="redo"]') as HTMLButtonElement;
+    undo.disabled = !this.doc?.canUndo();
+    redo.disabled = !this.doc?.canRedo();
+  }
+
+  /**
+   * Undo/redo are synchronous on the model and never call wasm, but the view
+   * still needs a full `refresh()` rather than the single-card update
+   * `handlePageAction` uses: a step can be a reorder, or a commit being
+   * undone, either of which changes the whole grid (and the page count).
+   * The re-render is instant anyway - the restored snapshot brings its
+   * preview cache back with it.
+   */
+  private async applyHistory(direction: "undo" | "redo"): Promise<void> {
+    if (!this.doc) return;
+    const before = this.doc.getPageCount();
+    if (!(direction === "undo" ? this.doc.undo() : this.doc.redo())) return;
+
+    (this.root.querySelector("h3") as HTMLElement).textContent = `${this.label} (${this.doc.getPageCount()} pagine)`;
+    await this.refresh();
+    this.syncHistoryButtons();
+    this.setStatus(direction === "undo" ? "Annullato." : "Ripetuto.");
+    // Only a step that crossed a commit changes the page count - that's the
+    // one the doc list outside needs to redraw.
+    if (this.doc.getPageCount() !== before) {
+      this.dispatchEvent(new CustomEvent("document-committed", { bubbles: true, composed: true }));
+    }
   }
 
   /**
@@ -259,6 +318,7 @@ export class PdfDocumentView extends HTMLElement {
       // `png` if it was there, and is a no-op addition if it wasn't.
       card.data = { ...(card.data as CardData), ...updated } as CardData;
     }
+    this.syncHistoryButtons();
   }
 
   /**
@@ -292,6 +352,8 @@ export class PdfDocumentView extends HTMLElement {
       this.setStatus(`Errore: ${err instanceof Error ? err.message : String(err)}`, true);
       return;
     }
+
+    this.syncHistoryButtons();
 
     // Reorder the actual DOM nodes to match the model's new order.
     // `appendChild` on a node that's already in the tree just moves it.
@@ -328,6 +390,7 @@ export class PdfDocumentView extends HTMLElement {
       await this.doc.commit();
       (this.root.querySelector("h3") as HTMLElement).textContent = `${this.label} (${this.doc.getPageCount()} pagine)`;
       await this.refresh();
+      this.syncHistoryButtons();
       this.setStatus("Modifiche confermate.");
       this.dispatchEvent(new CustomEvent("document-committed", { bubbles: true, composed: true }));
     } catch (err) {
@@ -349,6 +412,13 @@ export class PdfDocumentView extends HTMLElement {
     if (!this.doc) return;
     downloadBytes(this.doc.getBytes(), this.label);
   }
+}
+
+/** Keyboard shortcuts must not fire while the user is typing - `composed: true` events cross shadow roots, so the target can be an input anywhere on the page. */
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName.toLowerCase();
+  return tag === "input" || tag === "textarea" || tag === "select" || target.isContentEditable;
 }
 
 customElements.define("pdf-document-view", PdfDocumentView);
