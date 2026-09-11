@@ -106,6 +106,33 @@ pub async fn page_count(file: Uint8Array) -> std::result::Result<u32, JsValue> {
     Ok(doc.get_pages().len() as u32)
 }
 
+/// Draws an image onto one page of an existing PDF - a signature, typically.
+///
+/// `pixels` is raw RGBA8 (`width * height * 4` bytes), already decoded: the
+/// browser's canvas does the PNG decoding, which keeps this operation free of
+/// any image-decoding dependency and therefore in the "core" build.
+///
+/// `placement` is `{ x, y, width }` as fractions (0..1) of the page **as
+/// displayed**, origin top-left - i.e. the coordinates of the preview the
+/// user positions the signature on. Pages with a `/Rotate` are handled here:
+/// the content stream knows nothing about that rotation, so the matrix is
+/// converted from displayed space to page space. The height follows from the
+/// image's aspect ratio.
+#[wasm_bindgen]
+pub async fn stamp_image(
+    file: Uint8Array,
+    page: u32,
+    pixels: Uint8Array,
+    width: u32,
+    height: u32,
+    placement: JsValue,
+) -> std::result::Result<Uint8Array, JsValue> {
+    let mut doc = load(&file.to_vec())?;
+    let placement: operations::stamp::StampPlacement = parse_options(placement)?;
+    operations::stamp::stamp_image(&mut doc, page, &pixels.to_vec(), width, height, placement)?;
+    Ok(save(&mut doc)?)
+}
+
 /// Reads a PDF's `/Info` metadata as a JS object with the keys that are
 /// actually present (`{ title?, author?, subject?, keywords?, creator?,
 /// producer?, creationDate?, modDate? }`). Dates come back as the raw PDF

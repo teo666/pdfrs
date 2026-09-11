@@ -79,6 +79,23 @@ Ritorna il numero di pagine di un PDF. Utile per sapere quante anteprime richied
 const count = await page_count(bytes);
 ```
 
+## `stamp_image(file, page, pixels, width, height, placement): Promise<Uint8Array>`
+
+Disegna un'immagine su **una** pagina di un PDF esistente — tipicamente una firma. Ritorna il PDF modificato.
+
+`pixels` è RGBA8 grezzo (`width * height * 4` byte), cioè **già decodificato**: la decodifica del PNG la fa il browser con la canvas (vedi `www/src/image-io.ts`), non il Rust. È la ragione per cui questa funzione non tira dentro nessuna libreria di decodifica immagini e resta nella build "core". Il canale alpha diventa una `/SMask`, quindi la trasparenza è preservata: una firma non copre il testo sotto.
+
+`placement` è `{ x, y, width }` in **frazioni (0..1) della pagina come la si vede**, con origine in alto a sinistra — le stesse coordinate del riquadro che l'utente trascina sull'anteprima. L'altezza non è un parametro: deriva da `width` e dalle proporzioni dell'immagine, così la firma non può essere stirata.
+
+Le pagine con `/Rotate` sono gestite: il content stream non sa nulla di quella rotazione (il visualizzatore la applica per conto suo), quindi la matrice viene convertita dallo spazio visualizzato a quello della pagina, e l'immagine ruotata di conseguenza per apparire dritta.
+
+```ts
+const { pixels, width, height } = await imageToRgba(pngFile); // canvas, lato browser
+const signed = await stamp_image(bytes, 1, pixels, width, height, { x: 0.6, y: 0.8, width: 0.25 });
+```
+
+> Il buffer dei pixel va passato come argomento a sé e non dentro un oggetto: il worker trasferisce (senza copiare) solo gli `Uint8Array` che trova ai livelli superiori degli argomenti.
+
 ## `read_metadata(file: Uint8Array): Promise<PdfMetadata>`
 
 Legge il dizionario `/Info` del documento. Ritorna un oggetto semplice con **solo le chiavi effettivamente presenti** nel PDF: un documento senza metadati legge `{}`, e un campo assente resta assente (non diventa stringa vuota).

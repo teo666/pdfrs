@@ -8,6 +8,7 @@ pub mod metadata;
 pub mod preview;
 pub mod rotate;
 pub mod split;
+pub mod stamp;
 
 #[cfg(test)]
 pub mod test_support {
