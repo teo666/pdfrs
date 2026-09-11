@@ -195,20 +195,55 @@ async function main() {
   const [rotateDownload] = await Promise.all([page.waitForEvent("download"), page.click("#rotate-run")]);
   const rotateStatus = await waitForSettledStatus("#rotate-status");
 
-  // --- Firma: stamp a PNG (with alpha) onto page 1 of four_pages.pdf ---
-  await switchTab("panel-firma");
-  await page.setInputFiles("#firma-input", [path.join(fixtures, "four_pages.pdf")]);
-  const firmaPagesStatus = await waitForSettledStatus("#firma-status");
-  await page.setInputFiles("#firma-image-input", {
-    name: "firma.png",
-    mimeType: "image/png",
-    buffer: makePngWithAlpha(40, 20),
+  // --- Annota: drop two PNGs (with alpha) onto the pages of four_pages.pdf ---
+  await switchTab("panel-annota");
+  await page.setInputFiles("#annota-input", [path.join(fixtures, "four_pages.pdf")]);
+  const annotaPagesStatus = await waitForSettledStatus("#annota-status");
+  await page.setInputFiles("#annota-image-input", [
+    { name: "firma.png", mimeType: "image/png", buffer: makePngWithAlpha(40, 20) },
+    { name: "timbro.png", mimeType: "image/png", buffer: makePngWithAlpha(20, 20) },
+  ]);
+  await waitForSettledStatus("#annota-status");
+  const annotaAssetCount = await page.locator("#annota-palette .annota-asset").count();
+
+  // Place an image by clicking its palette card, the keyboard-reachable
+  // equivalent of dragging it onto the page. The drag itself isn't driven
+  // here: Playwright's dragTo jumps the pointer to the target before the drag
+  // begins, so the browser picks the page image as the drag source instead of
+  // the palette card, and synthetic mouse events don't raise HTML5 drag
+  // events at all. The click path exercises the same placement code.
+  await page.click("#annota-palette .annota-asset");
+  const annotaBoxCount = await page.locator("#annota-stage .annota-box").count();
+
+  // ...and drop the second one at a specific spot. Driven with synthetic
+  // DragEvents rather than the mouse: Playwright's dragTo moves the pointer to
+  // the target before the drag starts (so the browser picks the page image as
+  // the source), and synthetic mouse events raise no HTML5 drag events at all.
+  // Dispatching the events directly still exercises the panel's own drop
+  // handling - which is the part worth testing.
+  const droppedBox = await page.evaluate(() => {
+    const card = document.querySelectorAll("#annota-palette .annota-asset")[1];
+    const stage = document.querySelector("#annota-stage");
+    const rect = document.querySelector("#annota-page-img").getBoundingClientRect();
+    const dataTransfer = new DataTransfer();
+    const at = { clientX: rect.left + rect.width * 0.65, clientY: rect.top + rect.height * 0.5 };
+
+    card.dispatchEvent(new DragEvent("dragstart", { dataTransfer, bubbles: true }));
+    stage.dispatchEvent(new DragEvent("dragover", { dataTransfer, bubbles: true, cancelable: true, ...at }));
+    stage.dispatchEvent(new DragEvent("drop", { dataTransfer, bubbles: true, cancelable: true, ...at }));
+    card.dispatchEvent(new DragEvent("dragend", { dataTransfer, bubbles: true }));
+
+    const boxes = stage.querySelectorAll(".annota-box");
+    return boxes.length === 2 ? parseFloat(boxes[1].style.left) : null;
   });
-  await waitForSettledStatus("#firma-status");
-  // The signature box only appears once both the page and the image are in.
-  const firmaBoxVisible = await page.isVisible("#firma-box");
-  const [firmaDownload] = await Promise.all([page.waitForEvent("download"), page.click("#firma-run")]);
-  const firmaStatus = await waitForSettledStatus("#firma-status");
+
+  // ...then replicate it onto every page, and check the badges appear.
+  await page.click("#annota-all-pages");
+  await waitForSettledStatus("#annota-status");
+  const annotaBadges = await page.locator("#annota-pages .count:not([hidden])").count();
+
+  const [annotaDownload] = await Promise.all([page.waitForEvent("download"), page.click("#annota-run")]);
+  const annotaStatus = await waitForSettledStatus("#annota-status");
 
   // --- Compose: interleave pages from two_pages.pdf and one_page.pdf ---
   await switchTab("panel-compose");
@@ -334,10 +369,14 @@ async function main() {
     "split downloads 2 files": splitDownloads.length === 2,
     "split status succeeds": splitStatus.startsWith("Fatto"),
     "rotate downloads rotated.pdf": rotateDownload.suggestedFilename() === "rotated.pdf",
-    "firma renders the page thumbnails": firmaPagesStatus.startsWith("Fatto"),
-    "firma shows the draggable signature box once an image is loaded": firmaBoxVisible,
-    "firma downloads the signed PDF": firmaDownload.suggestedFilename() === "four_pages-firmato.pdf",
-    "firma status succeeds": firmaStatus.startsWith("Fatto"),
+    "annota renders the page thumbnails": annotaPagesStatus.startsWith("Fatto"),
+    "annota loads several images into the palette": annotaAssetCount === 2,
+    "annota places an image on the page": annotaBoxCount === 1,
+    // Dropped at 65% with a 25%-wide box, so its left edge lands near 52.5%.
+    "annota drops an image where it was released": droppedBox !== null && Math.abs(droppedBox - 52.5) < 2,
+    "annota replicates a placement onto every page": annotaBadges === 4,
+    "annota downloads the annotated PDF": annotaDownload.suggestedFilename() === "four_pages-annotato.pdf",
+    "annota status succeeds": annotaStatus.startsWith("Fatto"),
     "rotate status succeeds": rotateStatus.startsWith("Fatto"),
     "compose downloads composed.pdf": composeDownload.suggestedFilename() === "composed.pdf",
     "compose status succeeds": composeStatus.startsWith("Fatto"),

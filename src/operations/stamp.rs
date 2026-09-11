@@ -8,99 +8,184 @@ use crate::error::{PdfrsError, Result};
 /// giving up - guards against a malformed document with a `/Parent` cycle.
 const INHERIT_LIMIT: usize = 32;
 
-/// Where the stamp goes, as fractions (0..1) of the page **as displayed**,
-/// with the origin at the top-left and `y` growing downwards - i.e. the
-/// coordinate system of the preview the user drags the box on, not the PDF's
-/// own (bottom-left, `/Rotate` not applied). Converting between the two is
-/// this module's job; see `stamp_matrix`.
+/// One decoded image, ready to be drawn. Decoding happens in the browser
+/// (canvas), which is what keeps this module free of any image-decoding
+/// dependency - and therefore in the "core" wasm build.
+#[derive(Debug, Clone, Copy)]
+pub struct ImageAsset<'a> {
+    /// RGBA8, row-major: `width * height * 4` bytes.
+    pub pixels: &'a [u8],
+    pub width: u32,
+    pub height: u32,
+}
+
+/// What an annotation draws. An enum from the start so that adding text later
+/// is a new variant rather than a rewrite of everything around it.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum AnnotationKind {
+    /// Index into the `assets` slice passed alongside the annotations.
+    Image { asset: usize },
+}
+
+/// One thing drawn on one page.
+///
+/// `x`/`y`/`width` are fractions (0..1) of the page **as displayed**, with the
+/// origin at the top-left and `y` growing downwards - i.e. the coordinate
+/// system of the preview the user drags the box on, not the PDF's own
+/// (bottom-left, `/Rotate` not applied). Converting between the two is this
+/// module's job; see `stamp_matrix`.
 ///
 /// There is no height: it follows from `width` and the image's aspect ratio,
 /// so a signature can't be stretched out of shape.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct StampPlacement {
+pub struct Annotation {
+    /// 1-indexed, like every other page number in this crate.
+    pub page: u32,
     pub x: f64,
     pub y: f64,
     pub width: f64,
+    #[serde(flatten)]
+    pub kind: AnnotationKind,
 }
 
-/// Draws `pixels` (RGBA8, row-major, `width` x `height`) onto `page`
-/// (1-indexed) at `placement`.
+/// Draws every annotation onto the document, in one pass.
 ///
-/// The image arrives already decoded - the browser's canvas does that - so
-/// this operation pulls in no image-decoding dependency and ships in the
-/// "core" wasm build.
-pub fn stamp_image(
-    doc: &mut Document,
-    page: u32,
-    pixels: &[u8],
-    width: u32,
-    height: u32,
-    placement: StampPlacement,
-) -> Result<()> {
-    if width == 0 || height == 0 {
-        return Err(PdfrsError::InvalidArgument(
-            "l'immagine della firma ha larghezza o altezza nulla".to_string(),
-        ));
+/// Two things this does that applying them one at a time wouldn't:
+///
+/// - **One XObject per asset, not per annotation.** The same signature placed
+///   on fifty pages is one image stream referenced fifty times, not fifty
+///   copies - the difference between a 1MB file and a 50MB one. Assets no
+///   annotation refers to are never added at all.
+/// - **One content rewrite per page.** `change_page_content` decodes and
+///   re-encodes a page's whole content stream, so a page with ten
+///   annotations is done in a single pass rather than ten.
+///
+/// Everything is validated before the document is touched, so a list with a
+/// bad entry at the end can't leave a half-annotated PDF behind.
+pub fn annotate(doc: &mut Document, assets: &[ImageAsset], annotations: &[Annotation]) -> Result<()> {
+    for (index, asset) in assets.iter().enumerate() {
+        validate_asset(index, asset)?;
     }
 
-    let expected = (width as usize)
-        .checked_mul(height as usize)
+    // Resolve every page up front: this rejects a bad page number before any
+    // drawing happens, and gives the pages in a stable order afterwards.
+    let pages = doc.get_pages();
+    let mut targets: Vec<(u32, ObjectId, Vec<&Annotation>)> = Vec::new();
+    for annotation in annotations {
+        validate_annotation(annotation, assets.len())?;
+        let page_id = *pages.get(&annotation.page).ok_or(PdfrsError::PageNotFound(annotation.page))?;
+        match targets.iter_mut().find(|(page, _, _)| *page == annotation.page) {
+            Some((_, _, grouped)) => grouped.push(annotation),
+            None => targets.push((annotation.page, page_id, vec![annotation])),
+        }
+    }
+
+    // Built lazily, so an asset nobody placed doesn't end up in the file.
+    let mut image_ids: Vec<Option<ObjectId>> = vec![None; assets.len()];
+
+    for (page, page_id, grouped) in targets {
+        let (media_x, media_y, page_width, page_height) = page_box(doc, page_id, page)?;
+        let rotation = page_rotation(doc, page_id);
+
+        // Must happen before add_xobject: see the function's own comment for
+        // what goes wrong otherwise.
+        materialize_inherited_resources(doc, page_id)?;
+
+        let mut content = doc.get_and_decode_page_content(page_id)?;
+
+        for annotation in grouped {
+            let AnnotationKind::Image { asset } = annotation.kind;
+            let image = assets[asset];
+
+            let image_id = match image_ids[asset] {
+                Some(id) => id,
+                None => {
+                    let id = add_image_object(doc, image.pixels, image.width, image.height)?;
+                    image_ids[asset] = Some(id);
+                    id
+                }
+            };
+
+            // The resource name only has to be unique within the page, and the
+            // object number already is unique within the document - so the
+            // same asset keeps the same name everywhere, which makes the
+            // output easier to read.
+            let name = format!("An{}", image_id.0);
+            doc.add_xobject(page_id, name.as_bytes(), image_id)?;
+
+            let matrix = stamp_matrix(
+                *annotation,
+                image.height as f64 / image.width as f64,
+                page_width,
+                page_height,
+                rotation,
+                media_x,
+                media_y,
+            );
+
+            // Same shape as lopdf's own `Document::insert_image`, but writing
+            // the full matrix ourselves: that helper only takes a position and
+            // a size, which can't express the rotation a page with /Rotate
+            // needs.
+            content.operations.push(Operation::new("q", vec![]));
+            content.operations.push(Operation::new(
+                "cm",
+                matrix.iter().map(|value| Object::Real(*value as f32)).collect::<Vec<_>>(),
+            ));
+            content.operations.push(Operation::new("Do", vec![Object::Name(name.into_bytes())]));
+            content.operations.push(Operation::new("Q", vec![]));
+        }
+
+        let encoded = content.encode().map_err(|err| PdfrsError::InvalidArgument(err.to_string()))?;
+        doc.change_page_content(page_id, encoded)?;
+    }
+
+    Ok(())
+}
+
+fn validate_asset(index: usize, asset: &ImageAsset) -> Result<()> {
+    if asset.width == 0 || asset.height == 0 {
+        return Err(PdfrsError::InvalidArgument(format!(
+            "l'immagine {index} ha larghezza o altezza nulla"
+        )));
+    }
+
+    let expected = (asset.width as usize)
+        .checked_mul(asset.height as usize)
         .and_then(|pixel_count| pixel_count.checked_mul(4))
-        .ok_or_else(|| PdfrsError::InvalidArgument("immagine troppo grande".to_string()))?;
-    if pixels.len() != expected {
+        .ok_or_else(|| PdfrsError::InvalidArgument(format!("l'immagine {index} è troppo grande")))?;
+    if asset.pixels.len() != expected {
         return Err(PdfrsError::InvalidArgument(format!(
-            "i pixel non corrispondono alle dimensioni dichiarate: attesi {expected} byte RGBA per {width}x{height}, ricevuti {}",
-            pixels.len()
+            "i pixel dell'immagine {index} non corrispondono alle dimensioni dichiarate: attesi {expected} byte RGBA per {}x{}, ricevuti {}",
+            asset.width,
+            asset.height,
+            asset.pixels.len()
         )));
     }
 
-    if !placement.width.is_finite() || placement.width <= 0.0 {
+    Ok(())
+}
+
+fn validate_annotation(annotation: &Annotation, asset_count: usize) -> Result<()> {
+    let AnnotationKind::Image { asset } = annotation.kind;
+    if asset >= asset_count {
         return Err(PdfrsError::InvalidArgument(format!(
-            "larghezza della firma non valida: {}",
-            placement.width
+            "l'annotazione sulla pagina {} usa l'immagine {asset}, ma ne sono state passate {asset_count}",
+            annotation.page
         )));
     }
-    if !placement.x.is_finite() || !placement.y.is_finite() {
-        return Err(PdfrsError::InvalidArgument("posizione della firma non valida".to_string()));
+
+    if !annotation.width.is_finite() || annotation.width <= 0.0 {
+        return Err(PdfrsError::InvalidArgument(format!(
+            "larghezza dell'annotazione non valida: {}",
+            annotation.width
+        )));
     }
-
-    let page_id = *doc.get_pages().get(&page).ok_or(PdfrsError::PageNotFound(page))?;
-
-    let (media_x, media_y, page_width, page_height) = page_box(doc, page_id, page)?;
-    let rotation = page_rotation(doc, page_id);
-
-    let matrix = stamp_matrix(
-        placement,
-        height as f64 / width as f64,
-        page_width,
-        page_height,
-        rotation,
-        media_x,
-        media_y,
-    );
-
-    // Must happen before add_xobject: see the function's comment for what
-    // goes wrong otherwise.
-    materialize_inherited_resources(doc, page_id)?;
-
-    let image_id = add_image_object(doc, pixels, width, height)?;
-    let name = format!("Sig{}", image_id.0);
-    doc.add_xobject(page_id, name.as_bytes(), image_id)?;
-
-    // Same shape as lopdf's own `Document::insert_image`, but writing the
-    // full matrix ourselves: that helper only takes a position and a size,
-    // which can't express the rotation a page with /Rotate needs.
-    let mut content = doc.get_and_decode_page_content(page_id)?;
-    content.operations.push(Operation::new("q", vec![]));
-    content.operations.push(Operation::new(
-        "cm",
-        matrix.iter().map(|value| Object::Real(*value as f32)).collect::<Vec<_>>(),
-    ));
-    content.operations.push(Operation::new("Do", vec![Object::Name(name.into_bytes())]));
-    content.operations.push(Operation::new("Q", vec![]));
-
-    doc.change_page_content(page_id, content.encode().map_err(|err| PdfrsError::InvalidArgument(err.to_string()))?)?;
+    if !annotation.x.is_finite() || !annotation.y.is_finite() {
+        return Err(PdfrsError::InvalidArgument("posizione dell'annotazione non valida".to_string()));
+    }
 
     Ok(())
 }
@@ -269,7 +354,7 @@ fn page_rotation(doc: &Document, page_id: ObjectId) -> i64 {
 ///    rotation is what also makes the signature come out upright on screen
 ///    rather than lying on its side.
 fn stamp_matrix(
-    placement: StampPlacement,
+    placement: Annotation,
     aspect_ratio: f64,
     page_width: f64,
     page_height: f64,
@@ -330,13 +415,34 @@ mod tests {
         (vec![255, 0, 0, 255, 0, 0, 0, 0], 2, 1)
     }
 
-    fn centered() -> StampPlacement {
-        StampPlacement { x: 0.25, y: 0.25, width: 0.5 }
+    pub(super) fn at(page: u32, x: f64, y: f64, width: f64, asset: usize) -> Annotation {
+        Annotation { page, x, y, width, kind: AnnotationKind::Image { asset } }
+    }
+
+    fn centered() -> Annotation {
+        at(1, 0.25, 0.25, 0.5, 0)
     }
 
     fn stamp(doc: &mut Document, page: u32) -> Result<()> {
         let (pixels, width, height) = tiny_image();
-        stamp_image(doc, page, &pixels, width, height, centered())
+        let asset = ImageAsset { pixels: &pixels, width, height };
+        annotate(doc, &[asset], &[at(page, 0.25, 0.25, 0.5, 0)])
+    }
+
+    /// Every image stream in the document - the count is what proves an asset
+    /// shared by several annotations isn't duplicated.
+    fn image_stream_count(doc: &Document) -> usize {
+        doc.objects
+            .values()
+            .filter(|object| {
+                object
+                    .as_stream()
+                    .ok()
+                    .and_then(|stream| stream.dict.get(b"Subtype").ok())
+                    .and_then(|subtype| subtype.as_name().ok())
+                    == Some(b"Image".as_ref())
+            })
+            .count()
     }
 
     /// The `cm` operands of the (single) stamp we just drew.
@@ -399,7 +505,12 @@ mod tests {
         // hold is that a *large* one does get compressed.
         let big = vec![7u8; 100 * 100 * 4];
         let mut doc2 = multi_page_document(1);
-        stamp_image(&mut doc2, 1, &big, 100, 100, centered()).unwrap();
+        annotate(
+            &mut doc2,
+            &[ImageAsset { pixels: &big, width: 100, height: 100 }],
+            &[centered()],
+        )
+        .unwrap();
         let big_id = xobject_ids(&doc2, 1)[0];
         let big_image = doc2.get_object(big_id).unwrap().as_stream().unwrap();
         assert_eq!(big_image.dict.get(b"Filter").unwrap().as_name().unwrap(), b"FlateDecode");
@@ -483,7 +594,7 @@ mod tests {
     #[test]
     fn every_rotation_places_the_stamp_inside_the_page() {
         // Top-left-ish, deliberately asymmetric so the rotations differ.
-        let placement = StampPlacement { x: 0.1, y: 0.1, width: 0.2 };
+        let placement = at(1, 0.1, 0.1, 0.2, 0);
         for rotation in [0, 90, 180, 270] {
             let matrix = stamp_matrix(placement, 0.5, 595.0, 842.0, rotation, 0.0, 0.0);
             // The unit square's corners, mapped through the matrix.
@@ -510,7 +621,12 @@ mod tests {
     #[test]
     fn rejects_pixels_that_do_not_match_the_dimensions() {
         let mut doc = multi_page_document(1);
-        let err = stamp_image(&mut doc, 1, &[0, 0, 0, 0], 4, 4, centered()).unwrap_err();
+        let err = annotate(
+            &mut doc,
+            &[ImageAsset { pixels: &[0, 0, 0, 0], width: 4, height: 4 }],
+            &[centered()],
+        )
+        .unwrap_err();
         assert!(matches!(err, PdfrsError::InvalidArgument(_)));
     }
 
@@ -518,8 +634,117 @@ mod tests {
     fn rejects_a_nonexistent_page() {
         let mut doc = multi_page_document(1);
         let (pixels, width, height) = tiny_image();
-        let err = stamp_image(&mut doc, 9, &pixels, width, height, centered()).unwrap_err();
+        let err = annotate(
+            &mut doc,
+            &[ImageAsset { pixels: &pixels, width, height }],
+            &[at(9, 0.25, 0.25, 0.5, 0)],
+        )
+        .unwrap_err();
         assert!(matches!(err, PdfrsError::PageNotFound(9)));
+    }
+
+    #[test]
+    fn rejects_an_asset_index_out_of_range_without_touching_the_document() {
+        let mut doc = multi_page_document(1);
+        let (pixels, width, height) = tiny_image();
+        let before = image_stream_count(&doc);
+
+        let err = annotate(
+            &mut doc,
+            &[ImageAsset { pixels: &pixels, width, height }],
+            // The first annotation is fine; the second points at nothing.
+            &[at(1, 0.1, 0.1, 0.2, 0), at(1, 0.5, 0.5, 0.2, 7)],
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, PdfrsError::InvalidArgument(_)));
+        assert_eq!(
+            image_stream_count(&doc),
+            before,
+            "a rejected list must not leave a half-annotated document"
+        );
+    }
+
+    /// The payoff of the asset/placement split: the same signature on many
+    /// pages is one image stream, not one per page.
+    #[test]
+    fn an_asset_used_on_several_pages_becomes_a_single_image_stream() {
+        let mut doc = multi_page_document(3);
+        let (pixels, width, height) = tiny_image();
+
+        annotate(
+            &mut doc,
+            &[ImageAsset { pixels: &pixels, width, height }],
+            &[at(1, 0.1, 0.1, 0.2, 0), at(2, 0.1, 0.1, 0.2, 0), at(3, 0.1, 0.1, 0.2, 0)],
+        )
+        .unwrap();
+
+        // One colour image + its one /SMask, however many pages use it.
+        assert_eq!(image_stream_count(&doc), 2);
+        // ...and every page can actually reach it.
+        for page in 1..=3 {
+            assert_eq!(xobject_ids(&doc, page).len(), 1, "page {} should see the image", page);
+        }
+    }
+
+    #[test]
+    fn two_assets_produce_two_image_streams() {
+        let mut doc = multi_page_document(2);
+        let red = vec![255u8, 0, 0, 255];
+        let blue = vec![0u8, 0, 255, 255];
+
+        annotate(
+            &mut doc,
+            &[
+                ImageAsset { pixels: &red, width: 1, height: 1 },
+                ImageAsset { pixels: &blue, width: 1, height: 1 },
+            ],
+            &[at(1, 0.1, 0.1, 0.2, 0), at(2, 0.1, 0.1, 0.2, 1)],
+        )
+        .unwrap();
+
+        // Two images, each with its own mask.
+        assert_eq!(image_stream_count(&doc), 4);
+    }
+
+    #[test]
+    fn an_unused_asset_never_reaches_the_document() {
+        let mut doc = multi_page_document(1);
+        let (pixels, width, height) = tiny_image();
+
+        annotate(
+            &mut doc,
+            &[
+                ImageAsset { pixels: &pixels, width, height },
+                // Never referenced by any annotation.
+                ImageAsset { pixels: &pixels, width, height },
+            ],
+            &[at(1, 0.1, 0.1, 0.2, 0)],
+        )
+        .unwrap();
+
+        assert_eq!(image_stream_count(&doc), 2, "only the placed asset should be embedded");
+    }
+
+    /// Several annotations on one page go in with a single content rewrite.
+    #[test]
+    fn annotations_on_the_same_page_are_applied_together() {
+        let mut doc = multi_page_document(1);
+        let page_id = *doc.get_pages().get(&1).unwrap();
+        let before = doc.get_and_decode_page_content(page_id).unwrap().operations.len();
+
+        let (pixels, width, height) = tiny_image();
+        annotate(
+            &mut doc,
+            &[ImageAsset { pixels: &pixels, width, height }],
+            &[at(1, 0.1, 0.1, 0.2, 0), at(1, 0.5, 0.5, 0.2, 0), at(1, 0.8, 0.2, 0.1, 0)],
+        )
+        .unwrap();
+
+        let after = doc.get_and_decode_page_content(page_id).unwrap().operations.len();
+        assert_eq!(after, before + 12, "q/cm/Do/Q for each of the three annotations");
+        // One stream, not three: /Contents stayed a single reference.
+        assert_eq!(doc.get_page_contents(page_id).len(), 1);
     }
 
     #[test]
@@ -543,12 +768,34 @@ mod tests {
 #[cfg(all(test, feature = "preview"))]
 mod render_tests {
     use super::*;
+    // The little builders the unit tests use, shared rather than duplicated.
+    use super::tests::at;
     use crate::operations::preview::render_page_preview;
     use crate::operations::test_support::multi_page_document;
     use hayro::vello_cpu::Pixmap;
 
     /// Centre of mass of the red pixels, in fractions of the rendered image,
     /// with the origin at the top-left (the way a viewer sees it).
+    fn colour_centroid(png: &[u8], pick: impl Fn(u8, u8, u8) -> bool) -> (f64, f64) {
+        let pixmap = Pixmap::from_png(std::io::Cursor::new(png)).expect("preview should be a valid PNG");
+        let (width, height) = (pixmap.width(), pixmap.height());
+
+        let (mut sum_x, mut sum_y, mut count) = (0.0f64, 0.0f64, 0usize);
+        for y in 0..height {
+            for x in 0..width {
+                let pixel = pixmap.sample(x, y);
+                if pick(pixel.r, pixel.g, pixel.b) {
+                    sum_x += x as f64;
+                    sum_y += y as f64;
+                    count += 1;
+                }
+            }
+        }
+
+        assert!(count > 0, "no matching pixels found: the annotation didn't get drawn at all");
+        (sum_x / count as f64 / width as f64, sum_y / count as f64 / height as f64)
+    }
+
     fn red_centroid(png: &[u8]) -> (f64, f64) {
         let pixmap = Pixmap::from_png(std::io::Cursor::new(png)).expect("preview should be a valid PNG");
         let (width, height) = (pixmap.width(), pixmap.height());
@@ -570,7 +817,7 @@ mod render_tests {
         (sum_x / count as f64 / width as f64, sum_y / count as f64 / height as f64)
     }
 
-    fn stamped_preview(rotation: Option<i64>, placement: StampPlacement) -> Vec<u8> {
+    fn stamped_preview(rotation: Option<i64>, placement: Annotation) -> Vec<u8> {
         let mut doc = multi_page_document(1);
         if let Some(degrees) = rotation {
             let page_id = *doc.get_pages().get(&1).unwrap();
@@ -583,7 +830,12 @@ mod render_tests {
 
         // A fully opaque red square.
         let pixels = vec![255u8, 0, 0, 255].repeat(16 * 16);
-        stamp_image(&mut doc, 1, &pixels, 16, 16, placement).expect("stamp should succeed");
+        annotate(
+            &mut doc,
+            &[ImageAsset { pixels: &pixels, width: 16, height: 16 }],
+            &[placement],
+        )
+        .expect("annotate should succeed");
 
         let mut bytes = Vec::new();
         doc.save_to(&mut bytes).unwrap();
@@ -593,7 +845,7 @@ mod render_tests {
     #[test]
     fn lands_where_it_was_placed_on_an_unrotated_page() {
         // Top-left corner of the page.
-        let placement = StampPlacement { x: 0.05, y: 0.05, width: 0.2 };
+        let placement = at(1, 0.05, 0.05, 0.2, 0);
         let (x, y) = red_centroid(&stamped_preview(None, placement));
 
         assert!(x < 0.4, "expected the stamp on the left, centroid x was {}", x);
@@ -605,7 +857,7 @@ mod render_tests {
     /// show up where the user dropped it.
     #[test]
     fn lands_where_it_was_placed_on_rotated_pages() {
-        let placement = StampPlacement { x: 0.05, y: 0.05, width: 0.2 };
+        let placement = at(1, 0.05, 0.05, 0.2, 0);
         for rotation in [90, 180, 270] {
             let (x, y) = red_centroid(&stamped_preview(Some(rotation), placement));
             assert!(
@@ -620,9 +872,51 @@ mod render_tests {
 
     /// Same page, opposite corner - proves the position is actually being
     /// honoured rather than the stamp always landing in one place.
+    /// Two different images on two different pages must not swap places -
+    /// the check that the per-page grouping actually keeps them apart.
+    #[test]
+    fn each_page_gets_its_own_annotation() {
+        let mut doc = multi_page_document(2);
+        let red = vec![255u8, 0, 0, 255].repeat(16 * 16);
+        let blue = vec![0u8, 0, 255, 255].repeat(16 * 16);
+
+        annotate(
+            &mut doc,
+            &[
+                ImageAsset { pixels: &red, width: 16, height: 16 },
+                ImageAsset { pixels: &blue, width: 16, height: 16 },
+            ],
+            // Red top-left of page 1, blue bottom-right of page 2.
+            &[at(1, 0.05, 0.05, 0.2, 0), at(2, 0.7, 0.8, 0.2, 1)],
+        )
+        .unwrap();
+
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+
+        let page1 = render_page_preview(&bytes, 1, 0.5).unwrap();
+        let (x1, y1) = colour_centroid(&page1, |r, g, b| r > 120 && g < 80 && b < 80);
+        assert!(x1 < 0.4 && y1 < 0.4, "page 1's red should be top-left, was ({}, {})", x1, y1);
+
+        let page2 = render_page_preview(&bytes, 2, 0.5).unwrap();
+        let (x2, y2) = colour_centroid(&page2, |r, g, b| b > 120 && r < 80 && g < 80);
+        assert!(x2 > 0.6 && y2 > 0.6, "page 2's blue should be bottom-right, was ({}, {})", x2, y2);
+
+        // And neither colour leaked onto the other page.
+        let pixmap = Pixmap::from_png(std::io::Cursor::new(page1.as_slice())).unwrap();
+        let blue_on_page1 = (0..pixmap.height())
+            .flat_map(|y| (0..pixmap.width()).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                let pixel = pixmap.sample(*x, *y);
+                pixel.b > 120 && pixel.r < 80 && pixel.g < 80
+            })
+            .count();
+        assert_eq!(blue_on_page1, 0, "page 2's annotation must not appear on page 1");
+    }
+
     #[test]
     fn a_different_placement_lands_in_a_different_corner() {
-        let placement = StampPlacement { x: 0.7, y: 0.8, width: 0.2 };
+        let placement = at(1, 0.7, 0.8, 0.2, 0);
         let (x, y) = red_centroid(&stamped_preview(None, placement));
 
         assert!(x > 0.6, "expected the stamp on the right, centroid x was {}", x);
@@ -634,7 +928,12 @@ mod render_tests {
         let mut doc = multi_page_document(1);
         // Fully transparent red: the SMask should stop any of it showing.
         let pixels = vec![255u8, 0, 0, 0].repeat(16 * 16);
-        stamp_image(&mut doc, 1, &pixels, 16, 16, StampPlacement { x: 0.05, y: 0.05, width: 0.4 }).unwrap();
+        annotate(
+            &mut doc,
+            &[ImageAsset { pixels: &pixels, width: 16, height: 16 }],
+            &[at(1, 0.05, 0.05, 0.4, 0)],
+        )
+        .unwrap();
 
         let mut bytes = Vec::new();
         doc.save_to(&mut bytes).unwrap();

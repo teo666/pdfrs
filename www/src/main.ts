@@ -9,9 +9,10 @@ import {
   merge_pdfs,
   page_count,
   render_page_preview,
+  annotate_pdf,
   rotate_pages,
   split_pdf,
-  stamp_image,
+  type Annotation,
 } from "./pdfrs-worker-client";
 import { bytesToObjectUrl, downloadBytes, fileToUint8Array, setupFileInput } from "./pdf-io";
 import { parseLayout, parseRanges, parseRotations } from "./parsers";
@@ -317,68 +318,150 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
   );
 }
 
-// --- Firma: stamp a PNG signature onto one page of a PDF ---
+// --- Annota: place one or more images onto the pages of a PDF ---
 //
-// The PNG is decoded here, in the browser, and only raw RGBA pixels are sent
-// to wasm - which is what keeps `stamp_image` out of the image-decoding
-// ("full") build. The position/size the user drags out is stored in
-// percentages of the displayed page, the same units the wasm side takes, so
-// nothing depends on the scale the preview happens to be rendered at.
+// Two levels, and the split is what makes "the same signature on every page"
+// cheap: an *asset* is an image loaded once, a *placement* is one appearance
+// of it on one page. Ten placements of one asset become a single XObject in
+// the output PDF, not ten copies.
+//
+// Images are decoded here in the browser (canvas) and only raw RGBA reaches
+// wasm, which is what keeps `annotate_pdf` in the "core" build.
 {
-  const status = byId<HTMLElement>("firma-status");
-  const pagesEl = byId<HTMLElement>("firma-pages");
-  const stage = byId<HTMLElement>("firma-stage");
-  const pageImg = byId<HTMLImageElement>("firma-page-img");
-  const box = byId<HTMLElement>("firma-box");
-  const boxImg = byId<HTMLImageElement>("firma-box-img");
-  const handle = byId<HTMLElement>("firma-handle");
+  const status = byId<HTMLElement>("annota-status");
+  const pagesEl = byId<HTMLElement>("annota-pages");
+  const paletteEl = byId<HTMLElement>("annota-palette");
+  const stage = byId<HTMLElement>("annota-stage");
+  const pageImg = byId<HTMLImageElement>("annota-page-img");
+  const hint = byId<HTMLElement>("annota-hint");
+  const allPagesButton = byId<HTMLButtonElement>("annota-all-pages");
+  const deleteButton = byId<HTMLButtonElement>("annota-delete");
+
+  interface Asset {
+    id: number;
+    name: string;
+    objectUrl: string;
+    image: DecodedImage;
+  }
+
+  /** One appearance of an asset on one page. Coordinates are fractions of the page as displayed. */
+  interface Placement {
+    id: number;
+    assetId: number;
+    page: number;
+    x: number;
+    y: number;
+    width: number;
+  }
 
   let pdfBytes: Uint8Array | null = null;
   let pdfName = "documento.pdf";
-  let selectedPage: number | null = null;
-  let signature: DecodedImage | null = null;
-  // Fractions of the displayed page: x/y are the box's top-left corner, width
-  // its width. The height follows from the image's aspect ratio, so the
-  // signature can't be stretched.
-  let placement = { x: 0.1, y: 0.7, width: 0.3 };
+  let pageCount = 0;
+  let currentPage: number | null = null;
+  const assets: Asset[] = [];
+  let placements: Placement[] = [];
+  let selectedId: number | null = null;
+  let nextId = 1;
+  // Which palette image is being dragged. Kept here rather than read back out
+  // of `dataTransfer` for the same reason the editor keeps `activeDragId` in a
+  // module variable: the browser fills the drag payload with its own
+  // representation of the dragged image, and custom data doesn't survive it.
+  // Only one drag can be in flight at a time, so one variable is enough.
+  let draggingAssetId: number | null = null;
 
-  const aspectRatio = () => (signature ? signature.height / signature.width : 1);
-
-  function drawBox(): void {
-    if (!signature || selectedPage === null) {
-      box.hidden = true;
-      return;
-    }
-    const stageWidth = pageImg.clientWidth;
-    const stageHeight = pageImg.clientHeight;
-    if (stageWidth === 0 || stageHeight === 0) return;
-
-    // The box keeps the image's proportions in *pixels*, so the percentage
-    // height differs from the percentage width whenever the page isn't square.
-    const widthPx = placement.width * stageWidth;
-    const heightPx = widthPx * aspectRatio();
-    box.hidden = false;
-    box.style.left = `${placement.x * 100}%`;
-    box.style.top = `${placement.y * 100}%`;
-    box.style.width = `${placement.width * 100}%`;
-    box.style.height = `${(heightPx / stageHeight) * 100}%`;
-  }
+  const assetById = (id: number) => assets.find((asset) => asset.id === id);
+  const aspectRatio = (assetId: number) => {
+    const asset = assetById(assetId);
+    return asset ? asset.image.height / asset.image.width : 1;
+  };
 
   function clamp(value: number, min: number, max: number): number {
     return Math.max(min, Math.min(max, value));
   }
 
-  // One pointer gesture at a time: dragging the box, or resizing from the corner.
-  function startGesture(event: PointerEvent, mode: "move" | "resize"): void {
-    if (!signature || selectedPage === null) return;
+  function syncToolbar(): void {
+    const selected = placements.find((placement) => placement.id === selectedId);
+    allPagesButton.disabled = !selected || pageCount < 2;
+    deleteButton.disabled = !selected;
+    hint.textContent = selected
+      ? "Trascina per spostare, usa l'angolo per ridimensionare. Canc per eliminare."
+      : assets.length === 0
+        ? "Carica una o più immagini, poi trascinale sulla pagina."
+        : "Trascina un'immagine dalla palette sulla pagina, o cliccala per metterla al centro.";
+  }
+
+  /** Page thumbnails carry a badge with how many annotations they hold. */
+  function syncPageBadges(): void {
+    for (const thumb of Array.from(pagesEl.querySelectorAll<HTMLElement>(".annota-thumb"))) {
+      const page = Number(thumb.dataset.page);
+      const count = placements.filter((placement) => placement.page === page).length;
+      const badge = thumb.querySelector(".count") as HTMLElement;
+      badge.textContent = count > 0 ? String(count) : "";
+      badge.hidden = count === 0;
+    }
+  }
+
+  /** Rebuilds the boxes for the current page. Cheap enough to redo wholesale on every change. */
+  function renderPlacements(): void {
+    for (const box of Array.from(stage.querySelectorAll(".annota-box"))) box.remove();
+    if (currentPage === null) return;
+
+    const stageWidth = pageImg.clientWidth;
+    const stageHeight = pageImg.clientHeight;
+    if (stageWidth === 0 || stageHeight === 0) return;
+
+    for (const placement of placements.filter((item) => item.page === currentPage)) {
+      const asset = assetById(placement.assetId);
+      if (!asset) continue;
+
+      const box = document.createElement("div");
+      box.className = "annota-box";
+      box.dataset.id = String(placement.id);
+      if (placement.id === selectedId) box.classList.add("selected");
+      // Keeps the browser's native drag (used by the palette) from starting here.
+      box.draggable = false;
+
+      const widthPx = placement.width * stageWidth;
+      box.style.left = `${placement.x * 100}%`;
+      box.style.top = `${placement.y * 100}%`;
+      box.style.width = `${placement.width * 100}%`;
+      box.style.height = `${((widthPx * aspectRatio(placement.assetId)) / stageHeight) * 100}%`;
+
+      const img = document.createElement("img");
+      img.src = asset.objectUrl;
+      img.draggable = false;
+      const handle = document.createElement("div");
+      handle.className = "annota-handle";
+      box.append(img, handle);
+
+      box.addEventListener("pointerdown", (event) => startGesture(event, placement.id, "move"));
+      handle.addEventListener("pointerdown", (event) => startGesture(event, placement.id, "resize"));
+
+      stage.appendChild(box);
+    }
+  }
+
+  function select(id: number | null): void {
+    selectedId = id;
+    renderPlacements();
+    syncToolbar();
+  }
+
+  /** One pointer gesture at a time: moving a box, or resizing it from its corner. */
+  function startGesture(event: PointerEvent, placementId: number, mode: "move" | "resize"): void {
     event.preventDefault();
     event.stopPropagation();
+    select(placementId);
+
+    const placement = placements.find((item) => item.id === placementId);
+    if (!placement) return;
 
     const stageWidth = pageImg.clientWidth;
     const stageHeight = pageImg.clientHeight;
     const startX = event.clientX;
     const startY = event.clientY;
     const start = { ...placement };
+    const ratio = aspectRatio(placement.assetId);
     const target = event.currentTarget as HTMLElement;
     target.setPointerCapture(event.pointerId);
 
@@ -387,19 +470,16 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
       const deltaY = (move.clientY - startY) / stageHeight;
 
       if (mode === "move") {
-        const heightFraction = (start.width * stageWidth * aspectRatio()) / stageHeight;
-        placement = {
-          ...start,
-          x: clamp(start.x + deltaX, 0, 1 - start.width),
-          y: clamp(start.y + deltaY, 0, Math.max(0, 1 - heightFraction)),
-        };
+        const heightFraction = (start.width * stageWidth * ratio) / stageHeight;
+        placement.x = clamp(start.x + deltaX, 0, 1 - start.width);
+        placement.y = clamp(start.y + deltaY, 0, Math.max(0, 1 - heightFraction));
       } else {
         const width = clamp(start.width + deltaX, 0.02, 1 - start.x);
+        const heightFraction = (width * stageWidth * ratio) / stageHeight;
         // Don't let the corner drag push the box off the bottom edge.
-        const heightFraction = (width * stageWidth * aspectRatio()) / stageHeight;
-        placement = { ...start, width: start.y + heightFraction > 1 ? start.width : width };
+        if (start.y + heightFraction <= 1) placement.width = width;
       }
-      drawBox();
+      renderPlacements();
     };
 
     const onUp = () => {
@@ -412,49 +492,131 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
     target.addEventListener("pointerup", onUp);
   }
 
-  box.addEventListener("pointerdown", (event) => startGesture(event, "move"));
-  handle.addEventListener("pointerdown", (event) => startGesture(event, "resize"));
+  /**
+   * Adds a placement of `assetId` on the current page, centred on
+   * (`centreX`, `centreY`) in fractions of the page - or in the middle of it
+   * when no point is given.
+   */
+  function place(assetId: number, centreX = 0.5, centreY = 0.5): void {
+    if (currentPage === null) return;
+    const rect = pageImg.getBoundingClientRect();
+    const width = 0.25;
+    const heightFraction = (width * rect.width * aspectRatio(assetId)) / rect.height;
+
+    const placement: Placement = {
+      id: nextId++,
+      assetId,
+      page: currentPage,
+      x: clamp(centreX - width / 2, 0, 1 - width),
+      y: clamp(centreY - heightFraction / 2, 0, Math.max(0, 1 - heightFraction)),
+      width,
+    };
+    placements.push(placement);
+    select(placement.id);
+    syncPageBadges();
+  }
+
+  // Clicking the bare page clears the selection.
+  stage.addEventListener("pointerdown", () => select(null));
+
+  // --- Dropping an asset from the palette onto the page ---
+  // Native HTML5 drag & drop is safe here: unlike the editor, this panel has
+  // no page reordering to collide with.
+  stage.addEventListener("dragover", (event) => {
+    if (currentPage === null) return;
+    event.preventDefault();
+    (event as DragEvent).dataTransfer!.dropEffect = "copy";
+  });
+
+  stage.addEventListener("drop", (event) => {
+    const dragEvent = event as DragEvent;
+    dragEvent.preventDefault();
+    if (currentPage === null) return;
+
+    if (draggingAssetId === null) return;
+    if (!assetById(draggingAssetId)) return;
+
+    // The drop point becomes the centre of the box - that's where the cursor is.
+    const rect = pageImg.getBoundingClientRect();
+    place(draggingAssetId, (dragEvent.clientX - rect.left) / rect.width, (dragEvent.clientY - rect.top) / rect.height);
+  });
+
+  window.addEventListener("keydown", (event) => {
+    if (event.key !== "Delete" && event.key !== "Backspace") return;
+    if (selectedId === null) return;
+    // Only when this panel is the visible one, and not while typing.
+    if (byId<HTMLElement>("panel-annota").hidden) return;
+    const target = event.target as HTMLElement | null;
+    if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
+    event.preventDefault();
+    removeSelected();
+  });
+
+  function removeSelected(): void {
+    placements = placements.filter((placement) => placement.id !== selectedId);
+    select(null);
+    syncPageBadges();
+  }
+
+  deleteButton.addEventListener("click", () => removeSelected());
+
+  allPagesButton.addEventListener("click", () => {
+    const selected = placements.find((placement) => placement.id === selectedId);
+    if (!selected) return;
+    for (let page = 1; page <= pageCount; page++) {
+      if (page === selected.page) continue;
+      placements.push({ ...selected, id: nextId++, page });
+    }
+    syncPageBadges();
+    setStatus(status, `Fatto: annotazione replicata su ${pageCount} pagine`, "ok");
+  });
 
   async function selectPage(page: number): Promise<void> {
     if (!pdfBytes) return;
-    selectedPage = page;
-    for (const thumb of Array.from(pagesEl.querySelectorAll(".firma-thumb"))) {
+    currentPage = page;
+    for (const thumb of Array.from(pagesEl.querySelectorAll(".annota-thumb"))) {
       thumb.classList.toggle("selected", Number((thumb as HTMLElement).dataset.page) === page);
     }
-    // Rendered bigger than the thumbnails: this is the one you aim with.
-    // CSS caps how tall it displays; the box's percentages are read off the
+    // Rendered bigger than the thumbnails: this is the one you aim with. CSS
+    // caps how tall it displays; the placements' percentages are read off the
     // displayed size, so the two stay consistent.
     const png = await render_page_preview(pdfBytes, page, 0.7);
     pageImg.src = bytesToObjectUrl(png, "image/png");
     stage.hidden = false;
     await pageImg.decode().catch(() => undefined);
-    drawBox();
+    select(null);
   }
 
-  setupFileInput(byId<HTMLElement>("firma-drop"), byId<HTMLInputElement>("firma-input"), (files) => {
+  setupFileInput(byId<HTMLElement>("annota-drop"), byId<HTMLInputElement>("annota-input"), (files) => {
     const file = files[0];
     if (!file) return;
     pdfName = file.name;
-    byId<HTMLElement>("firma-filename").textContent = file.name;
+    byId<HTMLElement>("annota-filename").textContent = file.name;
 
     void runWithStatus(status, async () => {
       pagesEl.innerHTML = "";
       stage.hidden = true;
-      selectedPage = null;
+      currentPage = null;
+      // A new document invalidates every placement: they point at page numbers.
+      placements = [];
+      selectedId = null;
 
       pdfBytes = await fileToUint8Array(file);
-      const count = await page_count(pdfBytes);
+      pageCount = await page_count(pdfBytes);
 
       const thumbs = new Map<number, HTMLImageElement>();
-      for (let page = 1; page <= count; page++) {
+      for (let page = 1; page <= pageCount; page++) {
         const button = document.createElement("button");
         button.type = "button";
-        button.className = "firma-thumb";
+        button.className = "annota-thumb";
         button.dataset.page = String(page);
         const img = document.createElement("img");
         const label = document.createElement("span");
         label.textContent = `Pagina ${page}`;
-        button.append(img, label);
+        const badge = document.createElement("span");
+        badge.className = "count";
+        badge.hidden = true;
+        button.append(img, label, badge);
         button.addEventListener("click", () => void runWithStatus(status, () => selectPage(page)));
         pagesEl.appendChild(button);
         thumbs.set(page, img);
@@ -466,58 +628,104 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
       };
 
       const bytes = pdfBytes;
-      if (count > PARALLEL_PREVIEW_THRESHOLD) {
-        await renderPagesInParallel(bytes, Array.from({ length: count }, (_, index) => index + 1), 0.25, fill);
+      if (pageCount > PARALLEL_PREVIEW_THRESHOLD) {
+        await renderPagesInParallel(bytes, Array.from({ length: pageCount }, (_, index) => index + 1), 0.25, fill);
       } else {
-        for (let page = 1; page <= count; page++) fill(page, await render_page_preview(bytes, page, 0.25));
+        for (let page = 1; page <= pageCount; page++) fill(page, await render_page_preview(bytes, page, 0.25));
       }
 
       await selectPage(1);
-      setStatus(status, `Fatto: ${count} pagine, scegli quella da firmare`, "ok");
+      setStatus(status, `Fatto: ${pageCount} pagine, scegli quella da annotare`, "ok");
     });
   });
 
   setupFileInput(
-    byId<HTMLElement>("firma-image-drop"),
-    byId<HTMLInputElement>("firma-image-input"),
+    byId<HTMLElement>("annota-image-drop"),
+    byId<HTMLInputElement>("annota-image-input"),
     (files) => {
-      const file = files[0];
-      if (!file) return;
-      byId<HTMLElement>("firma-image-filename").textContent = file.name;
-
+      if (files.length === 0) return;
       void runWithStatus(status, async () => {
-        signature = await imageToRgba(file);
-        boxImg.src = URL.createObjectURL(file);
-        drawBox();
-        const warning = hasTransparency(signature)
-          ? ""
-          : " (attenzione: il PNG non ha trasparenza, coprirà il testo sotto)";
-        setStatus(status, `Fatto: firma caricata, trascinala sulla pagina${warning}`, "ok");
+        let warned = false;
+        for (const file of files) {
+          const image = await imageToRgba(file);
+          if (!hasTransparency(image)) warned = true;
+
+          const asset: Asset = { id: nextId++, name: file.name, objectUrl: URL.createObjectURL(file), image };
+          assets.push(asset);
+
+          const card = document.createElement("div");
+          card.className = "annota-asset";
+          card.draggable = true;
+          card.title = `${file.name} — trascinala sulla pagina`;
+          const img = document.createElement("img");
+          img.src = asset.objectUrl;
+          img.draggable = false;
+          const label = document.createElement("span");
+          label.textContent = file.name;
+          card.append(img, label);
+          card.addEventListener("dragstart", (event) => {
+            draggingAssetId = asset.id;
+            // Some payload has to be set for a drag to start at all in some
+            // browsers; what it holds doesn't matter, the id is read above.
+            (event as DragEvent).dataTransfer?.setData("text/plain", asset.name);
+          });
+          card.addEventListener("dragend", () => {
+            draggingAssetId = null;
+          });
+          // Clicking is the same thing without the drag: it drops the image in
+          // the middle of the current page, from where it can be moved. Keeps
+          // the panel usable without a pointer - and dragging is awkward to
+          // drive from a test.
+          card.addEventListener("click", () => {
+            if (currentPage === null) {
+              setStatus(status, "Scegli prima una pagina", "error");
+              return;
+            }
+            place(asset.id);
+          });
+          paletteEl.appendChild(card);
+        }
+
+        syncToolbar();
+        const warning = warned ? " (attenzione: un'immagine non ha trasparenza, coprirà il testo sotto)" : "";
+        setStatus(status, `Fatto: ${files.length} immagini caricate, trascinale sulla pagina${warning}`, "ok");
       });
     },
     (file) => file.type === "image/png",
   );
 
-  byId<HTMLButtonElement>("firma-run").addEventListener("click", () =>
+  byId<HTMLButtonElement>("annota-run").addEventListener("click", () =>
     void runWithStatus(status, async () => {
       if (!pdfBytes) throw new Error("seleziona un PDF");
-      if (selectedPage === null) throw new Error("scegli la pagina da firmare");
-      if (!signature) throw new Error("carica il PNG della firma");
+      if (placements.length === 0) throw new Error("trascina almeno un'immagine su una pagina");
 
-      // Every top-level Uint8Array argument is *transferred* to the worker
-      // (see collectTransferables), which neuters ours - so hand over copies
-      // of both buffers and stay able to sign a second page without
-      // re-opening the file.
-      const signed = await stamp_image(
+      // Only the assets actually placed are sent, and each one once - the
+      // wasm side turns each into a single shared XObject.
+      const usedIds = Array.from(new Set(placements.map((placement) => placement.assetId)));
+      const used = usedIds.map((id) => assetById(id)).filter((asset): asset is Asset => Boolean(asset));
+
+      const annotations: Annotation[] = placements.map((placement) => ({
+        page: placement.page,
+        x: placement.x,
+        y: placement.y,
+        width: placement.width,
+        kind: "image",
+        asset: usedIds.indexOf(placement.assetId),
+      }));
+
+      // Copies: the worker *transfers* these buffers and neuters ours, and
+      // we want to stay able to apply again without reloading anything.
+      const annotated = await annotate_pdf(
         new Uint8Array(pdfBytes),
-        selectedPage,
-        new Uint8Array(signature.pixels),
-        signature.width,
-        signature.height,
-        placement,
+        used.map((asset) => new Uint8Array(asset.image.pixels)),
+        used.map((asset) => ({ width: asset.image.width, height: asset.image.height })),
+        annotations,
       );
-      downloadBytes(signed, pdfName.replace(/\.pdf$/i, "") + "-firmato.pdf");
-      setStatus(status, `Fatto: firma applicata alla pagina ${selectedPage}`, "ok");
+
+      downloadBytes(annotated, pdfName.replace(/\.pdf$/i, "") + "-annotato.pdf");
+      setStatus(status, `Fatto: ${placements.length} annotazioni applicate`, "ok");
     }),
   );
+
+  syncToolbar();
 }
