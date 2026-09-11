@@ -347,6 +347,13 @@ fn annotation(page: u32, x: f64, y: f64, width: f64, asset: u32) -> JsValue {
     obj.into()
 }
 
+/// `annotation`, turned by `rotation` degrees.
+fn turned_annotation(page: u32, x: f64, y: f64, width: f64, asset: u32, rotation: f64) -> JsValue {
+    let obj = annotation(page, x, y, width, asset);
+    Reflect::set(&obj, &JsValue::from_str("rotation"), &JsValue::from_f64(rotation)).unwrap();
+    obj
+}
+
 fn asset_meta(width: u32, height: u32) -> JsValue {
     js_object(&[("width", width), ("height", height)])
 }
@@ -452,4 +459,55 @@ async fn annotate_pdf_rejects_a_nonexistent_page() {
     )
     .await;
     assert!(result.is_err(), "annotating a page that doesn't exist should be rejected");
+}
+
+#[wasm_bindgen_test]
+async fn annotations_can_be_rotated() {
+    let annotated = pdfrs::annotate_pdf(
+        bytes(ONE_PAGE),
+        js_uint8_array(vec![rgba_square(255, 0, 0, 255)]),
+        js_array(vec![asset_meta(2, 2)]),
+        js_array(vec![turned_annotation(1, 0.3, 0.3, 0.3, 0, 37.5)]),
+    )
+    .await
+    .expect("a rotated annotation should be accepted");
+
+    assert_eq!(page_draw_count(&annotated, 1), 1);
+}
+
+/// `rotation` is optional: annotations written before it existed must still
+/// work, and must come out identical to an explicit zero.
+#[wasm_bindgen_test]
+async fn a_missing_rotation_means_upright() {
+    let without = pdfrs::annotate_pdf(
+        bytes(ONE_PAGE),
+        js_uint8_array(vec![rgba_square(255, 0, 0, 255)]),
+        js_array(vec![asset_meta(2, 2)]),
+        js_array(vec![annotation(1, 0.3, 0.3, 0.3, 0)]),
+    )
+    .await
+    .expect("an annotation without a rotation should be accepted");
+
+    let with_zero = pdfrs::annotate_pdf(
+        bytes(ONE_PAGE),
+        js_uint8_array(vec![rgba_square(255, 0, 0, 255)]),
+        js_array(vec![asset_meta(2, 2)]),
+        js_array(vec![turned_annotation(1, 0.3, 0.3, 0.3, 0, 0.0)]),
+    )
+    .await
+    .expect("an explicit zero rotation should be accepted");
+
+    assert_eq!(without.to_vec(), with_zero.to_vec(), "omitting rotation must equal rotation: 0");
+}
+
+#[wasm_bindgen_test]
+async fn annotate_pdf_rejects_a_rotation_that_is_not_a_number() {
+    let result = pdfrs::annotate_pdf(
+        bytes(ONE_PAGE),
+        js_uint8_array(vec![rgba_square(255, 0, 0, 255)]),
+        js_array(vec![asset_meta(2, 2)]),
+        js_array(vec![turned_annotation(1, 0.3, 0.3, 0.3, 0, f64::NAN)]),
+    )
+    .await;
+    assert!(result.is_err(), "a NaN rotation should be rejected");
 }

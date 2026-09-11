@@ -46,6 +46,12 @@ pub struct Annotation {
     pub x: f64,
     pub y: f64,
     pub width: f64,
+    /// Degrees, clockwise **as the reader sees the page** - the same sense as
+    /// `/Rotate`. Rotation happens about the image's own centre, so it
+    /// doesn't move where the image sits. Absent means 0, so annotations
+    /// written before this field existed still work.
+    #[serde(default)]
+    pub rotation: f64,
     #[serde(flatten)]
     pub kind: AnnotationKind,
 }
@@ -197,6 +203,12 @@ fn validate_annotation(annotation: &Annotation, asset_count: usize) -> Result<()
     }
     if !annotation.x.is_finite() || !annotation.y.is_finite() {
         return Err(PdfrsError::InvalidArgument("posizione dell'annotazione non valida".to_string()));
+    }
+    if !annotation.rotation.is_finite() {
+        return Err(PdfrsError::InvalidArgument(format!(
+            "rotazione dell'annotazione non valida: {}",
+            annotation.rotation
+        )));
     }
 
     Ok(())
@@ -362,7 +374,9 @@ fn page_rotation(doc: &Document, page_id: ObjectId) -> i64 {
 /// 1. Map the image's unit square onto the requested rectangle of the
 ///    displayed page, flipping `y` (the UI measures from the top, PDF from
 ///    the bottom).
-/// 2. Multiply by the displayed -> page transform for this `/Rotate`. That
+/// 2. Turn that rectangle about its own centre by the annotation's own
+///    `rotation`, if any.
+/// 3. Multiply by the displayed -> page transform for this `/Rotate`. That
 ///    rotation is what also makes the signature come out upright on screen
 ///    rather than lying on its side.
 fn stamp_matrix(
@@ -387,7 +401,24 @@ fn stamp_matrix(
     // the bottom, and the rectangle is anchored by its top-left corner.
     let bottom = view_height - placement.y * view_height - stamp_height;
 
-    let place = [stamp_width, 0.0, 0.0, stamp_height, left, bottom];
+    // Rotating about the rectangle's own centre: shift the unit square onto
+    // the origin, scale it, turn it, then move it to where the centre goes.
+    //
+    // The angle is negated because `[cos, sin, -sin, cos]` turns
+    // *anticlockwise* in this space (y grows upwards here, as it does in the
+    // finished page), and `rotation` promises clockwise - the same sense as
+    // `/Rotate`, and the one people expect from a rotation handle. Which way
+    // it actually comes out is not something to reason about and hope:
+    // `the_image_turns_clockwise_as_the_reader_sees_it` renders the page and
+    // checks where the marker's red band lands.
+    let theta = (-placement.rotation).to_radians();
+    let (sin, cos) = theta.sin_cos();
+    let centred = [1.0, 0.0, 0.0, 1.0, -0.5, -0.5];
+    let scale = [stamp_width, 0.0, 0.0, stamp_height, 0.0, 0.0];
+    let turn = [cos, sin, -sin, cos, 0.0, 0.0];
+    let to_centre = [1.0, 0.0, 0.0, 1.0, left + stamp_width / 2.0, bottom + stamp_height / 2.0];
+
+    let place = multiply(multiply(multiply(centred, scale), turn), to_centre);
 
     let to_page = match rotation {
         90 => [0.0, 1.0, -1.0, 0.0, page_width, 0.0],
@@ -428,7 +459,12 @@ mod tests {
     }
 
     pub(super) fn at(page: u32, x: f64, y: f64, width: f64, asset: usize) -> Annotation {
-        Annotation { page, x, y, width, kind: AnnotationKind::Image { asset } }
+        Annotation { page, x, y, width, rotation: 0.0, kind: AnnotationKind::Image { asset } }
+    }
+
+    /// `at`, turned by `rotation` degrees clockwise as the reader sees it.
+    pub(super) fn turned(page: u32, x: f64, y: f64, width: f64, asset: usize, rotation: f64) -> Annotation {
+        Annotation { rotation, ..at(page, x, y, width, asset) }
     }
 
     fn centered() -> Annotation {
@@ -630,6 +666,60 @@ mod tests {
         assert_eq!(shifted[5] - plain[5], 30.0);
     }
 
+    /// A rotation of zero must produce exactly the matrix it produced before
+    /// rotation existed - a pure scale and translate, no rotation terms.
+    #[test]
+    fn a_zero_rotation_changes_nothing() {
+        let upright = stamp_matrix(at(1, 0.2, 0.3, 0.4, 0), 0.5, 595.0, 842.0, 0, 0.0, 0.0);
+        assert_eq!(upright[1], 0.0);
+        assert_eq!(upright[2], 0.0);
+        assert!(upright[0] > 0.0 && upright[3] > 0.0);
+
+        // ...and a full turn comes back to the same place.
+        let full_turn = stamp_matrix(turned(1, 0.2, 0.3, 0.4, 0, 360.0), 0.5, 595.0, 842.0, 0, 0.0, 0.0);
+        for (index, (a, b)) in upright.iter().zip(full_turn.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-6, "matrix entry {} differs: {} vs {}", index, a, b);
+        }
+    }
+
+    /// Turning about the centre must not move the centre.
+    #[test]
+    fn rotation_keeps_the_centre_where_it_was() {
+        let centre_of = |rotation: f64| {
+            let matrix = stamp_matrix(turned(1, 0.2, 0.3, 0.4, 0, rotation), 0.5, 595.0, 842.0, 0, 0.0, 0.0);
+            // The unit square's centre, mapped through the matrix.
+            (
+                matrix[0] * 0.5 + matrix[2] * 0.5 + matrix[4],
+                matrix[1] * 0.5 + matrix[3] * 0.5 + matrix[5],
+            )
+        };
+
+        let upright = centre_of(0.0);
+        for rotation in [17.0, 45.0, 90.0, 180.0, 270.0, -30.0] {
+            let turned = centre_of(rotation);
+            assert!(
+                (upright.0 - turned.0).abs() < 1e-6 && (upright.1 - turned.1).abs() < 1e-6,
+                "rotation {}: centre moved from {:?} to {:?}",
+                rotation,
+                upright,
+                turned
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_rotation_that_is_not_a_number() {
+        let mut doc = multi_page_document(1);
+        let (pixels, width, height) = tiny_image();
+        let err = annotate(
+            &mut doc,
+            &[ImageAsset { pixels: &pixels, width, height }],
+            &[turned(1, 0.2, 0.2, 0.3, 0, f64::NAN)],
+        )
+        .unwrap_err();
+        assert!(matches!(err, PdfrsError::InvalidArgument(_)));
+    }
+
     #[test]
     fn rejects_pixels_that_do_not_match_the_dimensions() {
         let mut doc = multi_page_document(1);
@@ -783,7 +873,7 @@ mod tests {
 mod render_tests {
     use super::*;
     // The little builders the unit tests use, shared rather than duplicated.
-    use super::tests::at;
+    use super::tests::{at, turned};
     use crate::operations::preview::render_page_preview;
     use crate::operations::test_support::multi_page_document;
     use hayro::vello_cpu::Pixmap;
@@ -961,7 +1051,7 @@ mod render_tests {
     /// Renders the marker at `placement` on a page rotated by `rotation`, and
     /// reports where the red and blue bands ended up, as fractions of the
     /// displayed page.
-    fn marker_bands(rotation: i64, placement: Annotation) -> ((f64, f64), (f64, f64)) {
+    fn marker_bands_of(rotation: i64, placement: Annotation) -> ((f64, f64), (f64, f64)) {
         let mut doc = multi_page_document(1);
         if rotation != 0 {
             let page_id = *doc.get_pages().get(&1).unwrap();
@@ -990,7 +1080,7 @@ mod render_tests {
     #[test]
     fn the_image_is_not_flipped_or_mirrored_on_any_rotation() {
         for rotation in [0, 90, 180, 270] {
-            let ((red_x, red_y), (blue_x, blue_y)) = marker_bands(rotation, at(1, 0.2, 0.2, 0.4, 0));
+            let ((red_x, red_y), (blue_x, blue_y)) = marker_bands_of(rotation, at(1, 0.2, 0.2, 0.4, 0));
 
             assert!(
                 red_y < blue_y,
@@ -1063,6 +1153,75 @@ mod render_tests {
             clean.1,
             dirty.1
         );
+    }
+
+    /// Pins down which way `rotation` turns. The marker's red band starts at
+    /// the top: a quarter turn clockwise - the way the reader sees it - must
+    /// put it on the right, half a turn at the bottom, three quarters on the
+    /// left. Getting the sign backwards would still place the image correctly
+    /// and would still look plausible on a solid-colour square, so this is
+    /// the test that actually decides the convention.
+    #[test]
+    fn the_image_turns_clockwise_as_the_reader_sees_it() {
+        // Centred, so a rotation can't be confused with a shift.
+        let placement = |rotation: f64| turned(1, 0.3, 0.3, 0.4, 0, rotation);
+
+        let ((up_x, up_y), _) = marker_bands_of(0, placement(0.0));
+        let ((right_x, right_y), _) = marker_bands_of(0, placement(90.0));
+        let ((down_x, down_y), _) = marker_bands_of(0, placement(180.0));
+        let ((left_x, left_y), _) = marker_bands_of(0, placement(270.0));
+
+        // A quarter turn clockwise sends the top band to the right-hand side.
+        assert!(
+            right_x > up_x && (right_y - up_y).abs() < 0.12,
+            "90 deg: red band should move right, from ({}, {}) to ({}, {})",
+            up_x,
+            up_y,
+            right_x,
+            right_y
+        );
+        // Half a turn sends it to the bottom.
+        assert!(
+            down_y > up_y && (down_x - up_x).abs() < 0.12,
+            "180 deg: red band should move down, from ({}, {}) to ({}, {})",
+            up_x,
+            up_y,
+            down_x,
+            down_y
+        );
+        // Three quarters, to the left.
+        assert!(
+            left_x < up_x && (left_y - up_y).abs() < 0.12,
+            "270 deg: red band should move left, from ({}, {}) to ({}, {})",
+            up_x,
+            up_y,
+            left_x,
+            left_y
+        );
+    }
+
+    /// The annotation's own rotation works the same way whatever the page's
+    /// `/Rotate` is: a quarter turn clockwise still sends the marker's top
+    /// band to the right.
+    ///
+    /// Compared within the same page rotation, deliberately: a page with
+    /// `/Rotate 90` is displayed landscape, so the same annotation covers a
+    /// quite different fraction of it vertically, and comparing those
+    /// fractions across page shapes would mean nothing.
+    #[test]
+    fn annotation_rotation_composes_with_the_page_rotation() {
+        for page_rotation in [0, 90, 180, 270] {
+            let ((upright_x, _), _) = marker_bands_of(page_rotation, turned(1, 0.3, 0.3, 0.4, 0, 0.0));
+            let ((turned_x, _), _) = marker_bands_of(page_rotation, turned(1, 0.3, 0.3, 0.4, 0, 90.0));
+
+            assert!(
+                turned_x > upright_x,
+                "/Rotate {}: turning the annotation 90 deg clockwise should move the red band right, {} -> {}",
+                page_rotation,
+                upright_x,
+                turned_x
+            );
+        }
     }
 
     #[test]
