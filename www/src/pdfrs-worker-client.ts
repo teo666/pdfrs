@@ -58,6 +58,8 @@ export interface Annotation {
   x: number;
   y: number;
   width: number;
+  /** Degrees, clockwise as the reader sees the page, about the image's own centre. Optional: absent means upright. */
+  rotation?: number;
   kind: "image";
   asset: number;
 }

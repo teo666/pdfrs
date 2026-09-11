@@ -237,6 +237,24 @@ async function main() {
     return boxes.length === 2 ? parseFloat(boxes[1].style.left) : null;
   });
 
+  // Turn the placed image with its rotation grip. Pointer events, which
+  // Playwright drives without trouble (unlike the HTML5 drag above); Shift
+  // snaps to 15 degrees so the result is exactly 90.
+  await page.locator("#annota-stage .annota-box").first().scrollIntoViewIfNeeded();
+  // The grip only exists on the selected box, so select this one first.
+  await page.locator("#annota-stage .annota-box").first().click();
+  const rotBox = await page.locator("#annota-stage .annota-box").first().boundingBox();
+  const rotGrip = await page.locator("#annota-stage .annota-box .annota-rotate").first().boundingBox();
+  await page.mouse.move(rotGrip.x + rotGrip.width / 2, rotGrip.y + rotGrip.height / 2);
+  await page.mouse.down();
+  await page.keyboard.down("Shift");
+  await page.mouse.move(rotBox.x + rotBox.width / 2 + 120, rotBox.y + rotBox.height / 2, { steps: 12 });
+  await page.keyboard.up("Shift");
+  await page.mouse.up();
+  const annotaRotation = await page.evaluate(
+    () => document.querySelector("#annota-stage .annota-box").style.transform,
+  );
+
   // ...then replicate it onto every page, and check the badges appear.
   await page.click("#annota-all-pages");
   await waitForSettledStatus("#annota-status");
@@ -374,6 +392,7 @@ async function main() {
     "annota places an image on the page": annotaBoxCount === 1,
     // Dropped at 65% with a 25%-wide box, so its left edge lands near 52.5%.
     "annota drops an image where it was released": droppedBox !== null && Math.abs(droppedBox - 52.5) < 2,
+    "annota rotates a placement with its grip": annotaRotation === "rotate(90deg)",
     "annota replicates a placement onto every page": annotaBadges === 4,
     "annota downloads the annotated PDF": annotaDownload.suggestedFilename() === "four_pages-annotato.pdf",
     "annota status succeeds": annotaStatus.startsWith("Fatto"),

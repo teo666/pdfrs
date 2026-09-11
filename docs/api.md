@@ -94,7 +94,8 @@ I parametri:
 
 - **`assets`**: un array di `Uint8Array`, uno per immagine, con RGBA8 grezzo (`width * height * 4` byte) **già decodificato**. La decodifica del PNG la fa il browser con la canvas (vedi `www/src/image-io.ts`), non il Rust: è la ragione per cui questa funzione non tira dentro nessuna libreria di decodifica immagini e resta nella build "core". Il canale alpha diventa una `/SMask`, quindi la trasparenza è preservata e una firma non copre il testo sotto.
 - **`assetsMeta`**: `[{ width, height }]`, parallelo ad `assets`.
-- **`annotations`**: `[{ page, x, y, width, kind: "image", asset }]`, dove `asset` è l'indice dentro `assets`. `x`/`y`/`width` sono **frazioni (0..1) della pagina come la si vede**, con origine in alto a sinistra — le stesse coordinate del riquadro che l'utente trascina sull'anteprima. L'altezza non è un parametro: deriva da `width` e dalle proporzioni dell'immagine, così un'immagine non può essere stirata.
+- **`annotations`**: `[{ page, x, y, width, rotation?, kind: "image", asset }]`, dove `asset` è l'indice dentro `assets`. `x`/`y`/`width` sono **frazioni (0..1) della pagina come la si vede**, con origine in alto a sinistra — le stesse coordinate del riquadro che l'utente trascina sull'anteprima. L'altezza non è un parametro: deriva da `width` e dalle proporzioni dell'immagine, così un'immagine non può essere stirata.
+- **`rotation`** (opzionale, default 0): gradi **in senso orario come li vede chi guarda la pagina**, lo stesso verso di `/Rotate`. La rotazione avviene attorno al centro dell'immagine, quindi non ne sposta la posizione, e `x`/`y`/`width` restano quelli del rettangolo **non ruotato**. Ometterlo equivale a passare `0`.
 
 Le pagine con `/Rotate` sono gestite: il content stream non sa nulla di quella rotazione (il visualizzatore la applica per conto suo), quindi la matrice viene convertita dallo spazio visualizzato a quello della pagina, e l'immagine ruotata di conseguenza per apparire dritta.
 
@@ -104,10 +105,10 @@ const annotato = await annotate_pdf(
   bytes,
   [firma.pixels],
   [{ width: firma.width, height: firma.height }],
-  // La stessa firma, in fondo a pagina 1 e a pagina 2.
+  // La stessa firma, in fondo a pagina 1 e a pagina 2, la seconda inclinata.
   [
     { page: 1, x: 0.6, y: 0.8, width: 0.25, kind: "image", asset: 0 },
-    { page: 2, x: 0.6, y: 0.8, width: 0.25, kind: "image", asset: 0 },
+    { page: 2, x: 0.6, y: 0.8, width: 0.25, rotation: -12, kind: "image", asset: 0 },
   ],
 );
 ```

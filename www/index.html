@@ -223,6 +223,30 @@
         cursor: nwse-resize;
         touch-action: none;
       }
+      /* Rotation grip, on a short stem above the box. */
+      .annota-rotate {
+        position: absolute;
+        left: 50%;
+        top: -22px;
+        width: 12px;
+        height: 12px;
+        margin-left: -6px;
+        background: #fff;
+        border: 2px solid #3b82f6;
+        border-radius: 50%;
+        cursor: grab;
+        touch-action: none;
+      }
+      .annota-rotate::before {
+        content: "";
+        position: absolute;
+        left: 50%;
+        top: 12px;
+        width: 0;
+        height: 10px;
+        border-left: 1px solid #3b82f6;
+      }
+      .annota-box:not(.selected) .annota-rotate { display: none; }
       .preview-card span {
         display: block;
         margin-top: 0.3rem;

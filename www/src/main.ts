@@ -352,6 +352,8 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
     x: number;
     y: number;
     width: number;
+    /** Degrees, clockwise as seen on screen. x/y/width describe the *unrotated* rectangle, exactly as the wasm side expects. */
+    rotation: number;
   }
 
   let pdfBytes: Uint8Array | null = null;
@@ -411,6 +413,10 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
     box.style.top = `${placement.y * 100}%`;
     box.style.width = `${placement.width * 100}%`;
     box.style.height = `${((widthPx * aspectRatio(placement.assetId)) / stageHeight) * 100}%`;
+    // Turned about its own centre, so left/top/width stay those of the
+    // unrotated rectangle - which is what gets sent to wasm.
+    box.style.transform = placement.rotation ? `rotate(${placement.rotation}deg)` : "";
+    box.style.transformOrigin = "center";
   }
 
   /** Rebuilds the boxes for the current page. Cheap enough to redo wholesale on every change. */
@@ -440,10 +446,19 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
       img.draggable = false;
       const handle = document.createElement("div");
       handle.className = "annota-handle";
-      box.append(img, handle);
+      const rotateGrip = document.createElement("div");
+      rotateGrip.className = "annota-rotate";
+      rotateGrip.title = "Trascina per ruotare (Shift: scatti di 15°, doppio click: azzera)";
+      box.append(img, handle, rotateGrip);
 
       box.addEventListener("pointerdown", (event) => startGesture(event, placement.id, "move"));
       handle.addEventListener("pointerdown", (event) => startGesture(event, placement.id, "resize"));
+      rotateGrip.addEventListener("pointerdown", (event) => startGesture(event, placement.id, "rotate"));
+      rotateGrip.addEventListener("dblclick", (event) => {
+        event.stopPropagation();
+        placement.rotation = 0;
+        renderPlacements();
+      });
 
       stage.appendChild(box);
     }
@@ -470,7 +485,7 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
   }
 
   /** One pointer gesture at a time: moving a box, or resizing it from its corner. */
-  function startGesture(event: PointerEvent, placementId: number, mode: "move" | "resize"): void {
+  function startGesture(event: PointerEvent, placementId: number, mode: "move" | "resize" | "rotate"): void {
     event.preventDefault();
     event.stopPropagation();
     selectInPlace(placementId);
@@ -493,19 +508,39 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
     const ratio = aspectRatio(placement.assetId);
     target.setPointerCapture(event.pointerId);
 
+    // Centre of the box on screen, needed to measure a rotation.
+    const rect = pageImg.getBoundingClientRect();
+    const centre = {
+      x: rect.left + (start.x + start.width / 2) * rect.width,
+      y: rect.top + (start.y + (start.width * stageWidth * ratio) / stageHeight / 2) * rect.height,
+    };
+    const startAngle = Math.atan2(startY - centre.y, startX - centre.x);
+
     const onMove = (move: PointerEvent) => {
       const deltaX = (move.clientX - startX) / stageWidth;
       const deltaY = (move.clientY - startY) / stageHeight;
 
       if (mode === "move") {
         const heightFraction = (start.width * stageWidth * ratio) / stageHeight;
-        placement.x = clamp(start.x + deltaX, 0, 1 - start.width);
-        placement.y = clamp(start.y + deltaY, 0, Math.max(0, 1 - heightFraction));
+        // Only the centre is kept on the page: a turned image is allowed to
+        // hang over an edge, rather than being shoved back in as it turns.
+        placement.x = clamp(start.x + deltaX + start.width / 2, 0, 1) - start.width / 2;
+        placement.y = clamp(start.y + deltaY + heightFraction / 2, 0, 1) - heightFraction / 2;
+      } else if (mode === "resize") {
+        // On a turned box the pointer's travel isn't a change of width any
+        // more: only its component along the box's own x axis is. Without
+        // this, dragging the corner of an image turned 45 degrees grows it
+        // sideways relative to the mouse.
+        const theta = (placement.rotation * Math.PI) / 180;
+        const along = deltaX * Math.cos(theta) + (deltaY * stageHeight * Math.sin(theta)) / stageWidth;
+        placement.width = Math.max(0.02, start.width + along);
       } else {
-        const width = clamp(start.width + deltaX, 0.02, 1 - start.x);
-        const heightFraction = (width * stageWidth * ratio) / stageHeight;
-        // Don't let the corner drag push the box off the bottom edge.
-        if (start.y + heightFraction <= 1) placement.width = width;
+        const angle = Math.atan2(move.clientY - centre.y, move.clientX - centre.x);
+        let degrees = start.rotation + ((angle - startAngle) * 180) / Math.PI;
+        // Shift snaps to 15 degrees, which is how you get back to an exact
+        // 0/45/90 by hand.
+        if (move.shiftKey) degrees = Math.round(degrees / 15) * 15;
+        placement.rotation = degrees;
       }
       // Restyle in place - see the comment on `box` above.
       if (box) styleBox(box, placement);
@@ -543,9 +578,12 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
       id: nextId++,
       assetId,
       page: currentPage,
-      x: clamp(centreX - width / 2, 0, 1 - width),
-      y: clamp(centreY - heightFraction / 2, 0, Math.max(0, 1 - heightFraction)),
+      // The centre is what's kept on the page (see the gesture handler), so a
+      // rotated image can hang over an edge without being shoved back in.
+      x: clamp(centreX, 0, 1) - width / 2,
+      y: clamp(centreY, 0, 1) - heightFraction / 2,
       width,
+      rotation: 0,
     };
     placements.push(placement);
     select(placement.id);
@@ -745,6 +783,7 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
         x: placement.x,
         y: placement.y,
         width: placement.width,
+        rotation: placement.rotation,
         kind: "image",
         asset: usedIds.indexOf(placement.assetId),
       }));
