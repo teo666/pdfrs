@@ -9,12 +9,15 @@ import {
   merge_pdfs,
   page_count,
   render_page_preview,
+  annotate_pdf,
   rotate_pages,
   split_pdf,
+  type Annotation,
 } from "./pdfrs-worker-client";
 import { bytesToObjectUrl, downloadBytes, fileToUint8Array, setupFileInput } from "./pdf-io";
 import { parseLayout, parseRanges, parseRotations } from "./parsers";
 import { renderPagesInParallel } from "./preview-worker-pool";
+import { hasTransparency, imageToRgba, type DecodedImage } from "./image-io";
 // Side-effect import: registers <pdf-editor-app> (and the components it uses
 // internally) for the "Editor" tab. See src/webcomponents/index.ts.
 import "./webcomponents";
@@ -313,4 +316,491 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
       setStatus(status, "Fatto: decrypted.pdf", "ok");
     }),
   );
+}
+
+// --- Annota: place one or more images onto the pages of a PDF ---
+//
+// Two levels, and the split is what makes "the same signature on every page"
+// cheap: an *asset* is an image loaded once, a *placement* is one appearance
+// of it on one page. Ten placements of one asset become a single XObject in
+// the output PDF, not ten copies.
+//
+// Images are decoded here in the browser (canvas) and only raw RGBA reaches
+// wasm, which is what keeps `annotate_pdf` in the "core" build.
+{
+  const status = byId<HTMLElement>("annota-status");
+  const pagesEl = byId<HTMLElement>("annota-pages");
+  const paletteEl = byId<HTMLElement>("annota-palette");
+  const stage = byId<HTMLElement>("annota-stage");
+  const pageImg = byId<HTMLImageElement>("annota-page-img");
+  const hint = byId<HTMLElement>("annota-hint");
+  const allPagesButton = byId<HTMLButtonElement>("annota-all-pages");
+  const deleteButton = byId<HTMLButtonElement>("annota-delete");
+
+  interface Asset {
+    id: number;
+    name: string;
+    objectUrl: string;
+    image: DecodedImage;
+  }
+
+  /** One appearance of an asset on one page. Coordinates are fractions of the page as displayed. */
+  interface Placement {
+    id: number;
+    assetId: number;
+    page: number;
+    x: number;
+    y: number;
+    width: number;
+    /** Degrees, clockwise as seen on screen. x/y/width describe the *unrotated* rectangle, exactly as the wasm side expects. */
+    rotation: number;
+  }
+
+  let pdfBytes: Uint8Array | null = null;
+  let pdfName = "documento.pdf";
+  let pageCount = 0;
+  let currentPage: number | null = null;
+  const assets: Asset[] = [];
+  let placements: Placement[] = [];
+  let selectedId: number | null = null;
+  let nextId = 1;
+  // Which palette image is being dragged. Kept here rather than read back out
+  // of `dataTransfer` for the same reason the editor keeps `activeDragId` in a
+  // module variable: the browser fills the drag payload with its own
+  // representation of the dragged image, and custom data doesn't survive it.
+  // Only one drag can be in flight at a time, so one variable is enough.
+  let draggingAssetId: number | null = null;
+
+  const assetById = (id: number) => assets.find((asset) => asset.id === id);
+  const aspectRatio = (assetId: number) => {
+    const asset = assetById(assetId);
+    return asset ? asset.image.height / asset.image.width : 1;
+  };
+
+  function clamp(value: number, min: number, max: number): number {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function syncToolbar(): void {
+    const selected = placements.find((placement) => placement.id === selectedId);
+    allPagesButton.disabled = !selected || pageCount < 2;
+    deleteButton.disabled = !selected;
+    hint.textContent = selected
+      ? "Trascina per spostare, usa l'angolo per ridimensionare. Canc per eliminare."
+      : assets.length === 0
+        ? "Carica una o più immagini, poi trascinale sulla pagina."
+        : "Trascina un'immagine dalla palette sulla pagina, o cliccala per metterla al centro.";
+  }
+
+  /** Page thumbnails carry a badge with how many annotations they hold. */
+  function syncPageBadges(): void {
+    for (const thumb of Array.from(pagesEl.querySelectorAll<HTMLElement>(".annota-thumb"))) {
+      const page = Number(thumb.dataset.page);
+      const count = placements.filter((placement) => placement.page === page).length;
+      const badge = thumb.querySelector(".count") as HTMLElement;
+      badge.textContent = count > 0 ? String(count) : "";
+      badge.hidden = count === 0;
+    }
+  }
+
+  /** Positions one existing box from its placement, without rebuilding it. */
+  function styleBox(box: HTMLElement, placement: Placement): void {
+    const stageWidth = pageImg.clientWidth;
+    const stageHeight = pageImg.clientHeight;
+    if (stageWidth === 0 || stageHeight === 0) return;
+    const widthPx = placement.width * stageWidth;
+    box.style.left = `${placement.x * 100}%`;
+    box.style.top = `${placement.y * 100}%`;
+    box.style.width = `${placement.width * 100}%`;
+    box.style.height = `${((widthPx * aspectRatio(placement.assetId)) / stageHeight) * 100}%`;
+    // Turned about its own centre, so left/top/width stay those of the
+    // unrotated rectangle - which is what gets sent to wasm.
+    box.style.transform = placement.rotation ? `rotate(${placement.rotation}deg)` : "";
+    box.style.transformOrigin = "center";
+  }
+
+  /** Rebuilds the boxes for the current page. Cheap enough to redo wholesale on every change. */
+  function renderPlacements(): void {
+    for (const box of Array.from(stage.querySelectorAll(".annota-box"))) box.remove();
+    if (currentPage === null) return;
+
+    const stageWidth = pageImg.clientWidth;
+    const stageHeight = pageImg.clientHeight;
+    if (stageWidth === 0 || stageHeight === 0) return;
+
+    for (const placement of placements.filter((item) => item.page === currentPage)) {
+      const asset = assetById(placement.assetId);
+      if (!asset) continue;
+
+      const box = document.createElement("div");
+      box.className = "annota-box";
+      box.dataset.id = String(placement.id);
+      if (placement.id === selectedId) box.classList.add("selected");
+      // Keeps the browser's native drag (used by the palette) from starting here.
+      box.draggable = false;
+
+      styleBox(box, placement);
+
+      const img = document.createElement("img");
+      img.src = asset.objectUrl;
+      img.draggable = false;
+      const handle = document.createElement("div");
+      handle.className = "annota-handle";
+      const rotateGrip = document.createElement("div");
+      rotateGrip.className = "annota-rotate";
+      rotateGrip.title = "Trascina per ruotare (Shift: scatti di 15°, doppio click: azzera)";
+      box.append(img, handle, rotateGrip);
+
+      box.addEventListener("pointerdown", (event) => startGesture(event, placement.id, "move"));
+      handle.addEventListener("pointerdown", (event) => startGesture(event, placement.id, "resize"));
+      rotateGrip.addEventListener("pointerdown", (event) => startGesture(event, placement.id, "rotate"));
+      rotateGrip.addEventListener("dblclick", (event) => {
+        event.stopPropagation();
+        placement.rotation = 0;
+        renderPlacements();
+      });
+
+      stage.appendChild(box);
+    }
+  }
+
+  function select(id: number | null): void {
+    selectedId = id;
+    renderPlacements();
+    syncToolbar();
+  }
+
+  /**
+   * Same as `select`, but only flips the CSS classes instead of rebuilding
+   * the boxes. Used when a gesture is starting: rebuilding would detach the
+   * very element the pointer was captured on, and the drag would never get
+   * going.
+   */
+  function selectInPlace(id: number | null): void {
+    selectedId = id;
+    for (const box of Array.from(stage.querySelectorAll<HTMLElement>(".annota-box"))) {
+      box.classList.toggle("selected", Number(box.dataset.id) === id);
+    }
+    syncToolbar();
+  }
+
+  /** One pointer gesture at a time: moving a box, or resizing it from its corner. */
+  function startGesture(event: PointerEvent, placementId: number, mode: "move" | "resize" | "rotate"): void {
+    event.preventDefault();
+    event.stopPropagation();
+    selectInPlace(placementId);
+
+    const placement = placements.find((item) => item.id === placementId);
+    if (!placement) return;
+
+    const target = event.currentTarget as HTMLElement;
+    // The box being dragged, which must stay in the DOM for the whole
+    // gesture: re-rendering the boxes mid-drag would detach the very element
+    // holding the pointer capture, so the drag would die after a few pixels
+    // (and the next setPointerCapture would throw InvalidStateError).
+    const box = target.closest(".annota-box") as HTMLElement | null;
+
+    const stageWidth = pageImg.clientWidth;
+    const stageHeight = pageImg.clientHeight;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const start = { ...placement };
+    const ratio = aspectRatio(placement.assetId);
+    target.setPointerCapture(event.pointerId);
+
+    // Centre of the box on screen, needed to measure a rotation.
+    const rect = pageImg.getBoundingClientRect();
+    const centre = {
+      x: rect.left + (start.x + start.width / 2) * rect.width,
+      y: rect.top + (start.y + (start.width * stageWidth * ratio) / stageHeight / 2) * rect.height,
+    };
+    const startAngle = Math.atan2(startY - centre.y, startX - centre.x);
+
+    const onMove = (move: PointerEvent) => {
+      const deltaX = (move.clientX - startX) / stageWidth;
+      const deltaY = (move.clientY - startY) / stageHeight;
+
+      if (mode === "move") {
+        const heightFraction = (start.width * stageWidth * ratio) / stageHeight;
+        // Only the centre is kept on the page: a turned image is allowed to
+        // hang over an edge, rather than being shoved back in as it turns.
+        placement.x = clamp(start.x + deltaX + start.width / 2, 0, 1) - start.width / 2;
+        placement.y = clamp(start.y + deltaY + heightFraction / 2, 0, 1) - heightFraction / 2;
+      } else if (mode === "resize") {
+        // On a turned box the pointer's travel isn't a change of width any
+        // more: only its component along the box's own x axis is. Without
+        // this, dragging the corner of an image turned 45 degrees grows it
+        // sideways relative to the mouse.
+        const theta = (placement.rotation * Math.PI) / 180;
+        const along = deltaX * Math.cos(theta) + (deltaY * stageHeight * Math.sin(theta)) / stageWidth;
+        placement.width = Math.max(0.02, start.width + along);
+      } else {
+        const angle = Math.atan2(move.clientY - centre.y, move.clientX - centre.x);
+        let degrees = start.rotation + ((angle - startAngle) * 180) / Math.PI;
+        // Shift snaps to 15 degrees, which is how you get back to an exact
+        // 0/45/90 by hand.
+        if (move.shiftKey) degrees = Math.round(degrees / 15) * 15;
+        placement.rotation = degrees;
+      }
+      // Restyle in place - see the comment on `box` above.
+      if (box) styleBox(box, placement);
+    };
+
+    const onUp = () => {
+      // The capture may already be gone if the element was replaced anyway.
+      try {
+        target.releasePointerCapture(event.pointerId);
+      } catch {
+        // nothing to release
+      }
+      target.removeEventListener("pointermove", onMove);
+      target.removeEventListener("pointerup", onUp);
+      target.removeEventListener("pointercancel", onUp);
+    };
+
+    target.addEventListener("pointermove", onMove);
+    target.addEventListener("pointerup", onUp);
+    target.addEventListener("pointercancel", onUp);
+  }
+
+  /**
+   * Adds a placement of `assetId` on the current page, centred on
+   * (`centreX`, `centreY`) in fractions of the page - or in the middle of it
+   * when no point is given.
+   */
+  function place(assetId: number, centreX = 0.5, centreY = 0.5): void {
+    if (currentPage === null) return;
+    const rect = pageImg.getBoundingClientRect();
+    const width = 0.25;
+    const heightFraction = (width * rect.width * aspectRatio(assetId)) / rect.height;
+
+    const placement: Placement = {
+      id: nextId++,
+      assetId,
+      page: currentPage,
+      // The centre is what's kept on the page (see the gesture handler), so a
+      // rotated image can hang over an edge without being shoved back in.
+      x: clamp(centreX, 0, 1) - width / 2,
+      y: clamp(centreY, 0, 1) - heightFraction / 2,
+      width,
+      rotation: 0,
+    };
+    placements.push(placement);
+    select(placement.id);
+    syncPageBadges();
+  }
+
+  // Clicking the bare page clears the selection.
+  stage.addEventListener("pointerdown", () => select(null));
+
+  // --- Dropping an asset from the palette onto the page ---
+  // Native HTML5 drag & drop is safe here: unlike the editor, this panel has
+  // no page reordering to collide with.
+  stage.addEventListener("dragover", (event) => {
+    if (currentPage === null) return;
+    event.preventDefault();
+    (event as DragEvent).dataTransfer!.dropEffect = "copy";
+  });
+
+  stage.addEventListener("drop", (event) => {
+    const dragEvent = event as DragEvent;
+    dragEvent.preventDefault();
+    if (currentPage === null) return;
+
+    if (draggingAssetId === null) return;
+    if (!assetById(draggingAssetId)) return;
+
+    // The drop point becomes the centre of the box - that's where the cursor is.
+    const rect = pageImg.getBoundingClientRect();
+    place(draggingAssetId, (dragEvent.clientX - rect.left) / rect.width, (dragEvent.clientY - rect.top) / rect.height);
+  });
+
+  window.addEventListener("keydown", (event) => {
+    if (event.key !== "Delete" && event.key !== "Backspace") return;
+    if (selectedId === null) return;
+    // Only when this panel is the visible one, and not while typing.
+    if (byId<HTMLElement>("panel-annota").hidden) return;
+    const target = event.target as HTMLElement | null;
+    if (target && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
+    event.preventDefault();
+    removeSelected();
+  });
+
+  function removeSelected(): void {
+    placements = placements.filter((placement) => placement.id !== selectedId);
+    select(null);
+    syncPageBadges();
+  }
+
+  deleteButton.addEventListener("click", () => removeSelected());
+
+  allPagesButton.addEventListener("click", () => {
+    const selected = placements.find((placement) => placement.id === selectedId);
+    if (!selected) return;
+    for (let page = 1; page <= pageCount; page++) {
+      if (page === selected.page) continue;
+      placements.push({ ...selected, id: nextId++, page });
+    }
+    syncPageBadges();
+    setStatus(status, `Fatto: annotazione replicata su ${pageCount} pagine`, "ok");
+  });
+
+  async function selectPage(page: number): Promise<void> {
+    if (!pdfBytes) return;
+    currentPage = page;
+    for (const thumb of Array.from(pagesEl.querySelectorAll(".annota-thumb"))) {
+      thumb.classList.toggle("selected", Number((thumb as HTMLElement).dataset.page) === page);
+    }
+    // Rendered bigger than the thumbnails: this is the one you aim with. CSS
+    // caps how tall it displays; the placements' percentages are read off the
+    // displayed size, so the two stay consistent.
+    const png = await render_page_preview(pdfBytes, page, 0.7);
+    pageImg.src = bytesToObjectUrl(png, "image/png");
+    stage.hidden = false;
+    await pageImg.decode().catch(() => undefined);
+    select(null);
+  }
+
+  setupFileInput(byId<HTMLElement>("annota-drop"), byId<HTMLInputElement>("annota-input"), (files) => {
+    const file = files[0];
+    if (!file) return;
+    pdfName = file.name;
+    byId<HTMLElement>("annota-filename").textContent = file.name;
+
+    void runWithStatus(status, async () => {
+      pagesEl.innerHTML = "";
+      stage.hidden = true;
+      currentPage = null;
+      // A new document invalidates every placement: they point at page numbers.
+      placements = [];
+      selectedId = null;
+
+      pdfBytes = await fileToUint8Array(file);
+      pageCount = await page_count(pdfBytes);
+
+      const thumbs = new Map<number, HTMLImageElement>();
+      for (let page = 1; page <= pageCount; page++) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "annota-thumb";
+        button.dataset.page = String(page);
+        const img = document.createElement("img");
+        const label = document.createElement("span");
+        label.textContent = `Pagina ${page}`;
+        const badge = document.createElement("span");
+        badge.className = "count";
+        badge.hidden = true;
+        button.append(img, label, badge);
+        button.addEventListener("click", () => void runWithStatus(status, () => selectPage(page)));
+        pagesEl.appendChild(button);
+        thumbs.set(page, img);
+      }
+
+      const fill = (page: number, png: Uint8Array) => {
+        const img = thumbs.get(page);
+        if (img) img.src = bytesToObjectUrl(png, "image/png");
+      };
+
+      const bytes = pdfBytes;
+      if (pageCount > PARALLEL_PREVIEW_THRESHOLD) {
+        await renderPagesInParallel(bytes, Array.from({ length: pageCount }, (_, index) => index + 1), 0.25, fill);
+      } else {
+        for (let page = 1; page <= pageCount; page++) fill(page, await render_page_preview(bytes, page, 0.25));
+      }
+
+      await selectPage(1);
+      setStatus(status, `Fatto: ${pageCount} pagine, scegli quella da annotare`, "ok");
+    });
+  });
+
+  setupFileInput(
+    byId<HTMLElement>("annota-image-drop"),
+    byId<HTMLInputElement>("annota-image-input"),
+    (files) => {
+      if (files.length === 0) return;
+      void runWithStatus(status, async () => {
+        let warned = false;
+        for (const file of files) {
+          const image = await imageToRgba(file);
+          if (!hasTransparency(image)) warned = true;
+
+          const asset: Asset = { id: nextId++, name: file.name, objectUrl: URL.createObjectURL(file), image };
+          assets.push(asset);
+
+          const card = document.createElement("div");
+          card.className = "annota-asset";
+          card.draggable = true;
+          card.title = `${file.name} — trascinala sulla pagina`;
+          const img = document.createElement("img");
+          img.src = asset.objectUrl;
+          img.draggable = false;
+          const label = document.createElement("span");
+          label.textContent = file.name;
+          card.append(img, label);
+          card.addEventListener("dragstart", (event) => {
+            draggingAssetId = asset.id;
+            // Some payload has to be set for a drag to start at all in some
+            // browsers; what it holds doesn't matter, the id is read above.
+            (event as DragEvent).dataTransfer?.setData("text/plain", asset.name);
+          });
+          card.addEventListener("dragend", () => {
+            draggingAssetId = null;
+          });
+          // Clicking is the same thing without the drag: it drops the image in
+          // the middle of the current page, from where it can be moved. Keeps
+          // the panel usable without a pointer - and dragging is awkward to
+          // drive from a test.
+          card.addEventListener("click", () => {
+            if (currentPage === null) {
+              setStatus(status, "Scegli prima una pagina", "error");
+              return;
+            }
+            place(asset.id);
+          });
+          paletteEl.appendChild(card);
+        }
+
+        syncToolbar();
+        const warning = warned ? " (attenzione: un'immagine non ha trasparenza, coprirà il testo sotto)" : "";
+        setStatus(status, `Fatto: ${files.length} immagini caricate, trascinale sulla pagina${warning}`, "ok");
+      });
+    },
+    (file) => file.type === "image/png",
+  );
+
+  byId<HTMLButtonElement>("annota-run").addEventListener("click", () =>
+    void runWithStatus(status, async () => {
+      if (!pdfBytes) throw new Error("seleziona un PDF");
+      if (placements.length === 0) throw new Error("trascina almeno un'immagine su una pagina");
+
+      // Only the assets actually placed are sent, and each one once - the
+      // wasm side turns each into a single shared XObject.
+      const usedIds = Array.from(new Set(placements.map((placement) => placement.assetId)));
+      const used = usedIds.map((id) => assetById(id)).filter((asset): asset is Asset => Boolean(asset));
+
+      const annotations: Annotation[] = placements.map((placement) => ({
+        page: placement.page,
+        x: placement.x,
+        y: placement.y,
+        width: placement.width,
+        rotation: placement.rotation,
+        kind: "image",
+        asset: usedIds.indexOf(placement.assetId),
+      }));
+
+      // Copies: the worker *transfers* these buffers and neuters ours, and
+      // we want to stay able to apply again without reloading anything.
+      const annotated = await annotate_pdf(
+        new Uint8Array(pdfBytes),
+        used.map((asset) => new Uint8Array(asset.image.pixels)),
+        used.map((asset) => ({ width: asset.image.width, height: asset.image.height })),
+        annotations,
+      );
+
+      downloadBytes(annotated, pdfName.replace(/\.pdf$/i, "") + "-annotato.pdf");
+      setStatus(status, `Fatto: ${placements.length} annotazioni applicate`, "ok");
+    }),
+  );
+
+  syncToolbar();
 }

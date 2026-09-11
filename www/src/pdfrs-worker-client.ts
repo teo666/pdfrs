@@ -51,6 +51,39 @@ export function compose_pdf(sources: Uint8Array[], layout: unknown): Promise<Uin
   return call("compose_pdf", [sources, layout]);
 }
 
+/** One thing drawn on one page; `asset` indexes into the `assets` array passed alongside. */
+export interface Annotation {
+  page: number;
+  /** Fractions (0..1) of the page as displayed, origin top-left. */
+  x: number;
+  y: number;
+  width: number;
+  /** Degrees, clockwise as the reader sees the page, about the image's own centre. Optional: absent means upright. */
+  rotation?: number;
+  kind: "image";
+  asset: number;
+}
+
+/**
+ * Draws images onto pages, all in one pass.
+ *
+ * The pixel buffers travel as a top-level array of `Uint8Array` rather than
+ * inside objects on purpose: `collectTransferables` recurses into arrays but
+ * not into objects, so buffers nested in an options object would be copied
+ * instead of transferred - a copy per image, of megabytes each.
+ *
+ * Note that transferring **neuters** the caller's buffers, so pass copies if
+ * you intend to keep using them.
+ */
+export function annotate_pdf(
+  file: Uint8Array,
+  assets: Uint8Array[],
+  assetsMeta: { width: number; height: number }[],
+  annotations: Annotation[],
+): Promise<Uint8Array> {
+  return call("annotate_pdf", [file, assets, assetsMeta, annotations]);
+}
+
 /** Reads the `/Info` metadata. Only the keys actually present come back, so a document without metadata reads as `{}`. */
 export function read_metadata(file: Uint8Array): Promise<Record<string, string>> {
   return call("read_metadata", [file]);

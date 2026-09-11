@@ -142,6 +142,111 @@
         display: block;
         border: 1px solid #8882;
       }
+      /* --- Annota --- */
+      .annota-pages { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
+      .annota-thumb {
+        width: 90px;
+        border: 2px solid transparent;
+        border-radius: 4px;
+        padding: 0.2rem;
+        cursor: pointer;
+        background: none;
+        font: inherit;
+        color: #666;
+        font-size: 0.7rem;
+      }
+      .annota-thumb img { width: 100%; display: block; border: 1px solid #8882; }
+      .annota-thumb.selected { border-color: #3b82f6; background: #3b82f611; }
+      /* The stage is sized to the preview image; the signature box is positioned
+         inside it in percentages, which is exactly what the wasm side expects. */
+      /* user-select off: without it, dragging the signature box selects the
+         page image underneath and paints it with the browser's blue
+         selection highlight. */
+      .annota-stage {
+        position: relative;
+        display: inline-block;
+        margin-top: 0.75rem;
+        line-height: 0;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      /* Capped so a full page fits on screen without scrolling: the signature
+         box is positioned in percentages, so shrinking the image here costs
+         nothing in accuracy. */
+      .annota-stage img.page { display: block; max-width: 100%; max-height: 60vh; width: auto; border: 1px solid #8884; }
+      .annota-box {
+        position: absolute;
+        border: 1px dashed #3b82f6;
+        background: #3b82f611;
+        cursor: move;
+        touch-action: none;
+      }
+      .annota-box img { width: 100%; height: 100%; display: block; pointer-events: none; }
+      /* Palette of loaded images: drag one onto the page to place it. */
+      .annota-palette { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
+      .annota-asset {
+        width: 90px;
+        border: 1px solid #8884;
+        border-radius: 4px;
+        padding: 0.25rem;
+        text-align: center;
+        font-size: 0.7rem;
+        color: #666;
+        cursor: grab;
+        background: #fff;
+      }
+      .annota-asset img { width: 100%; display: block; max-height: 50px; object-fit: contain; }
+      .annota-asset span { display: block; margin-top: 0.2rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      /* A page that already carries annotations, so you can find them again. */
+      .annota-thumb .count {
+        display: inline-block;
+        min-width: 1.1em;
+        margin-top: 0.15rem;
+        border-radius: 999px;
+        background: #3b82f6;
+        color: #fff;
+        font-size: 0.65rem;
+        padding: 0 0.3em;
+      }
+      .annota-box.selected { border-style: solid; border-width: 2px; background: #3b82f61a; }
+      .annota-box:not(.selected) .annota-handle { display: none; }
+      .annota-toolbar { display: flex; gap: 0.5rem; align-items: center; margin-top: 0.5rem; flex-wrap: wrap; }
+      .annota-toolbar .hint { margin: 0; }
+      .annota-handle {
+        position: absolute;
+        right: -6px;
+        bottom: -6px;
+        width: 12px;
+        height: 12px;
+        background: #3b82f6;
+        border-radius: 2px;
+        cursor: nwse-resize;
+        touch-action: none;
+      }
+      /* Rotation grip, on a short stem above the box. */
+      .annota-rotate {
+        position: absolute;
+        left: 50%;
+        top: -22px;
+        width: 12px;
+        height: 12px;
+        margin-left: -6px;
+        background: #fff;
+        border: 2px solid #3b82f6;
+        border-radius: 50%;
+        cursor: grab;
+        touch-action: none;
+      }
+      .annota-rotate::before {
+        content: "";
+        position: absolute;
+        left: 50%;
+        top: 12px;
+        width: 0;
+        height: 10px;
+        border-left: 1px solid #3b82f6;
+      }
+      .annota-box:not(.selected) .annota-rotate { display: none; }
       .preview-card span {
         display: block;
         margin-top: 0.3rem;
@@ -179,6 +284,7 @@
         <button type="button" class="tab" data-target="panel-compose">Compose</button>
         <button type="button" class="tab" data-target="panel-encrypt">Encrypt</button>
         <button type="button" class="tab" data-target="panel-decrypt">Decrypt</button>
+        <button type="button" class="tab" data-target="panel-annota">Annota</button>
         <button type="button" class="tab" data-target="panel-editor">Editor</button>
       </nav>
 
@@ -274,6 +380,33 @@
           </div>
           <button id="decrypt-run" type="button">Esegui decrypt</button>
           <div class="status" id="decrypt-status"></div>
+        </section>
+
+        <section class="panel" id="panel-annota">
+          <h2>Annota</h2>
+          <div class="dropzone" id="annota-drop">Trascina un PDF qui, o clicca per scegliere</div>
+          <input type="file" id="annota-input" accept="application/pdf" hidden />
+          <div class="hint" id="annota-filename">Nessun file selezionato</div>
+          <div class="annota-pages" id="annota-pages"></div>
+
+          <div class="dropzone" id="annota-image-drop">Trascina qui una o più immagini PNG (con trasparenza), o clicca per sceglierle</div>
+          <input type="file" id="annota-image-input" accept="image/png" multiple hidden />
+          <div class="annota-palette" id="annota-palette"></div>
+
+          <div class="annota-stage" id="annota-stage" hidden>
+            <img class="page" id="annota-page-img" alt="Pagina selezionata" />
+          </div>
+
+          <div class="annota-toolbar">
+            <button id="annota-all-pages" type="button" disabled>Metti su tutte le pagine</button>
+            <button id="annota-delete" type="button" disabled>Elimina selezionata</button>
+            <span class="hint" id="annota-hint">Trascina un'immagine dalla palette sulla pagina, o cliccala per metterla al centro.</span>
+          </div>
+
+          <div class="row">
+            <button id="annota-run" type="button">Applica annotazioni</button>
+          </div>
+          <div class="status" id="annota-status"></div>
         </section>
 
         <section class="panel" id="panel-editor">

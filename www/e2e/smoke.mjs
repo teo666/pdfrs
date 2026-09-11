@@ -7,6 +7,7 @@
 import { chromium } from "playwright";
 import { spawn } from "node:child_process";
 import path from "node:path";
+import zlib from "node:zlib";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -37,6 +38,63 @@ const vite = spawn(viteBin, ["--port", String(port), "--strictPort"], {
   cwd: wwwRoot,
   stdio: "ignore",
 });
+
+
+/**
+ * Builds a tiny PNG with an alpha channel, in-process.
+ *
+ * Cheaper than carrying a binary fixture around, and it avoids enabling the
+ * `png` feature on the Rust side just to *generate* test data (the crate
+ * itself never decodes PNGs - the browser does).
+ */
+function makePngWithAlpha(width, height) {
+  const raw = Buffer.alloc(height * (1 + width * 4));
+  for (let y = 0; y < height; y++) {
+    const rowStart = y * (1 + width * 4);
+    raw[rowStart] = 0; // filter: none
+    for (let x = 0; x < width; x++) {
+      const px = rowStart + 1 + x * 4;
+      raw[px] = 255;
+      raw[px + 1] = 0;
+      raw[px + 2] = 0;
+      // Half the pixels transparent, so the image really exercises /SMask.
+      raw[px + 3] = x % 2 === 0 ? 255 : 0;
+    }
+  }
+
+  const chunk = (type, data) => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    const typeAndData = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(zlib.crc32 ? zlib.crc32(typeAndData) >>> 0 : crc32(typeAndData));
+    return Buffer.concat([length, typeAndData, crc]);
+  };
+
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 6; // colour type: RGBA
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", ihdr),
+    chunk("IDAT", zlib.deflateSync(raw)),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+/** Fallback for Node versions without zlib.crc32. */
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) {
+      crc = crc & 1 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1;
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
 
 async function main() {
   await waitForServer(baseUrl, 20_000);
@@ -136,6 +194,74 @@ async function main() {
   await page.fill("#rotate-rotations", "1:90");
   const [rotateDownload] = await Promise.all([page.waitForEvent("download"), page.click("#rotate-run")]);
   const rotateStatus = await waitForSettledStatus("#rotate-status");
+
+  // --- Annota: drop two PNGs (with alpha) onto the pages of four_pages.pdf ---
+  await switchTab("panel-annota");
+  await page.setInputFiles("#annota-input", [path.join(fixtures, "four_pages.pdf")]);
+  const annotaPagesStatus = await waitForSettledStatus("#annota-status");
+  await page.setInputFiles("#annota-image-input", [
+    { name: "firma.png", mimeType: "image/png", buffer: makePngWithAlpha(40, 20) },
+    { name: "timbro.png", mimeType: "image/png", buffer: makePngWithAlpha(20, 20) },
+  ]);
+  await waitForSettledStatus("#annota-status");
+  const annotaAssetCount = await page.locator("#annota-palette .annota-asset").count();
+
+  // Place an image by clicking its palette card, the keyboard-reachable
+  // equivalent of dragging it onto the page. The drag itself isn't driven
+  // here: Playwright's dragTo jumps the pointer to the target before the drag
+  // begins, so the browser picks the page image as the drag source instead of
+  // the palette card, and synthetic mouse events don't raise HTML5 drag
+  // events at all. The click path exercises the same placement code.
+  await page.click("#annota-palette .annota-asset");
+  const annotaBoxCount = await page.locator("#annota-stage .annota-box").count();
+
+  // ...and drop the second one at a specific spot. Driven with synthetic
+  // DragEvents rather than the mouse: Playwright's dragTo moves the pointer to
+  // the target before the drag starts (so the browser picks the page image as
+  // the source), and synthetic mouse events raise no HTML5 drag events at all.
+  // Dispatching the events directly still exercises the panel's own drop
+  // handling - which is the part worth testing.
+  const droppedBox = await page.evaluate(() => {
+    const card = document.querySelectorAll("#annota-palette .annota-asset")[1];
+    const stage = document.querySelector("#annota-stage");
+    const rect = document.querySelector("#annota-page-img").getBoundingClientRect();
+    const dataTransfer = new DataTransfer();
+    const at = { clientX: rect.left + rect.width * 0.65, clientY: rect.top + rect.height * 0.5 };
+
+    card.dispatchEvent(new DragEvent("dragstart", { dataTransfer, bubbles: true }));
+    stage.dispatchEvent(new DragEvent("dragover", { dataTransfer, bubbles: true, cancelable: true, ...at }));
+    stage.dispatchEvent(new DragEvent("drop", { dataTransfer, bubbles: true, cancelable: true, ...at }));
+    card.dispatchEvent(new DragEvent("dragend", { dataTransfer, bubbles: true }));
+
+    const boxes = stage.querySelectorAll(".annota-box");
+    return boxes.length === 2 ? parseFloat(boxes[1].style.left) : null;
+  });
+
+  // Turn the placed image with its rotation grip. Pointer events, which
+  // Playwright drives without trouble (unlike the HTML5 drag above); Shift
+  // snaps to 15 degrees so the result is exactly 90.
+  await page.locator("#annota-stage .annota-box").first().scrollIntoViewIfNeeded();
+  // The grip only exists on the selected box, so select this one first.
+  await page.locator("#annota-stage .annota-box").first().click();
+  const rotBox = await page.locator("#annota-stage .annota-box").first().boundingBox();
+  const rotGrip = await page.locator("#annota-stage .annota-box .annota-rotate").first().boundingBox();
+  await page.mouse.move(rotGrip.x + rotGrip.width / 2, rotGrip.y + rotGrip.height / 2);
+  await page.mouse.down();
+  await page.keyboard.down("Shift");
+  await page.mouse.move(rotBox.x + rotBox.width / 2 + 120, rotBox.y + rotBox.height / 2, { steps: 12 });
+  await page.keyboard.up("Shift");
+  await page.mouse.up();
+  const annotaRotation = await page.evaluate(
+    () => document.querySelector("#annota-stage .annota-box").style.transform,
+  );
+
+  // ...then replicate it onto every page, and check the badges appear.
+  await page.click("#annota-all-pages");
+  await waitForSettledStatus("#annota-status");
+  const annotaBadges = await page.locator("#annota-pages .count:not([hidden])").count();
+
+  const [annotaDownload] = await Promise.all([page.waitForEvent("download"), page.click("#annota-run")]);
+  const annotaStatus = await waitForSettledStatus("#annota-status");
 
   // --- Compose: interleave pages from two_pages.pdf and one_page.pdf ---
   await switchTab("panel-compose");
@@ -261,6 +387,15 @@ async function main() {
     "split downloads 2 files": splitDownloads.length === 2,
     "split status succeeds": splitStatus.startsWith("Fatto"),
     "rotate downloads rotated.pdf": rotateDownload.suggestedFilename() === "rotated.pdf",
+    "annota renders the page thumbnails": annotaPagesStatus.startsWith("Fatto"),
+    "annota loads several images into the palette": annotaAssetCount === 2,
+    "annota places an image on the page": annotaBoxCount === 1,
+    // Dropped at 65% with a 25%-wide box, so its left edge lands near 52.5%.
+    "annota drops an image where it was released": droppedBox !== null && Math.abs(droppedBox - 52.5) < 2,
+    "annota rotates a placement with its grip": annotaRotation === "rotate(90deg)",
+    "annota replicates a placement onto every page": annotaBadges === 4,
+    "annota downloads the annotated PDF": annotaDownload.suggestedFilename() === "four_pages-annotato.pdf",
+    "annota status succeeds": annotaStatus.startsWith("Fatto"),
     "rotate status succeeds": rotateStatus.startsWith("Fatto"),
     "compose downloads composed.pdf": composeDownload.suggestedFilename() === "composed.pdf",
     "compose status succeeds": composeStatus.startsWith("Fatto"),

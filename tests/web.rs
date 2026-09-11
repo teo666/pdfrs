@@ -46,6 +46,14 @@ fn js_string_object(fields: &[(&str, Option<&str>)]) -> JsValue {
     obj.into()
 }
 
+fn js_number_object(fields: &[(&str, f64)]) -> JsValue {
+    let obj = Object::new();
+    for (key, value) in fields {
+        Reflect::set(&obj, &JsValue::from_str(key), &JsValue::from_f64(*value)).unwrap();
+    }
+    obj.into()
+}
+
 fn js_field(value: &JsValue, key: &str) -> Option<String> {
     let field = Reflect::get(value, &JsValue::from_str(key)).unwrap();
     field.as_string()
@@ -268,4 +276,238 @@ async fn read_metadata_of_a_document_without_info_is_empty() {
 async fn write_metadata_rejects_an_unknown_field() {
     let result = pdfrs::write_metadata(bytes(ONE_PAGE), js_string_object(&[("bogus", Some("x"))])).await;
     assert!(result.is_err(), "an unknown metadata field should be rejected");
+}
+
+/// Counts the XObjects reachable from a page's own /Resources.
+fn page_xobject_count(pdf_bytes: &Uint8Array, page: u32) -> usize {
+    let doc = lopdf::Document::load_mem(&pdf_bytes.to_vec()).expect("saved PDF should be loadable");
+    let page_id = *doc.get_pages().get(&page).expect("page should exist");
+    let resources = doc
+        .get_dictionary(page_id)
+        .unwrap()
+        .get(b"Resources")
+        .expect("an annotated page should carry its own /Resources");
+    let resources = doc.dereference(resources).unwrap().1.as_dict().unwrap();
+    match resources.get(b"XObject") {
+        Ok(xobjects) => xobjects.as_dict().unwrap().len(),
+        Err(_) => 0,
+    }
+}
+
+/// How many times a page actually *draws* an XObject.
+///
+/// Not the same as what its /Resources list: many PDFs (these fixtures
+/// included) share one /Resources dictionary across every page, so declaring
+/// an image for one page makes it visible to all of them. Only the `Do`
+/// operators in the content stream decide what gets painted.
+fn page_draw_count(pdf_bytes: &Uint8Array, page: u32) -> usize {
+    let doc = lopdf::Document::load_mem(&pdf_bytes.to_vec()).expect("saved PDF should be loadable");
+    let page_id = *doc.get_pages().get(&page).expect("page should exist");
+    doc.get_and_decode_page_content(page_id)
+        .expect("page content should decode")
+        .operations
+        .iter()
+        .filter(|operation| operation.operator == "Do")
+        .count()
+}
+
+/// Every image stream in the document, however many pages reference it.
+fn image_stream_count(pdf_bytes: &Uint8Array) -> usize {
+    let doc = lopdf::Document::load_mem(&pdf_bytes.to_vec()).expect("saved PDF should be loadable");
+    doc.objects
+        .values()
+        .filter(|object| {
+            object
+                .as_stream()
+                .ok()
+                .and_then(|stream| stream.dict.get(b"Subtype").ok())
+                .and_then(|subtype| subtype.as_name().ok())
+                == Some(b"Image".as_ref())
+        })
+        .count()
+}
+
+/// A 2x2 RGBA image: `alpha` applied to every pixel.
+fn rgba_square(r: u8, g: u8, b: u8, alpha: u8) -> Uint8Array {
+    let mut pixels = Vec::new();
+    for _ in 0..4 {
+        pixels.extend_from_slice(&[r, g, b, alpha]);
+    }
+    Uint8Array::from(pixels.as_slice())
+}
+
+fn annotation(page: u32, x: f64, y: f64, width: f64, asset: u32) -> JsValue {
+    let obj = Object::new();
+    Reflect::set(&obj, &JsValue::from_str("page"), &JsValue::from(page)).unwrap();
+    Reflect::set(&obj, &JsValue::from_str("x"), &JsValue::from_f64(x)).unwrap();
+    Reflect::set(&obj, &JsValue::from_str("y"), &JsValue::from_f64(y)).unwrap();
+    Reflect::set(&obj, &JsValue::from_str("width"), &JsValue::from_f64(width)).unwrap();
+    Reflect::set(&obj, &JsValue::from_str("kind"), &JsValue::from_str("image")).unwrap();
+    Reflect::set(&obj, &JsValue::from_str("asset"), &JsValue::from(asset)).unwrap();
+    obj.into()
+}
+
+/// `annotation`, turned by `rotation` degrees.
+fn turned_annotation(page: u32, x: f64, y: f64, width: f64, asset: u32, rotation: f64) -> JsValue {
+    let obj = annotation(page, x, y, width, asset);
+    Reflect::set(&obj, &JsValue::from_str("rotation"), &JsValue::from_f64(rotation)).unwrap();
+    obj
+}
+
+fn asset_meta(width: u32, height: u32) -> JsValue {
+    js_object(&[("width", width), ("height", height)])
+}
+
+fn js_uint8_array(items: Vec<Uint8Array>) -> Array {
+    let arr = Array::new();
+    for item in items {
+        arr.push(&item);
+    }
+    arr
+}
+
+#[wasm_bindgen_test]
+async fn annotates_a_page_with_an_image() {
+    let annotated = pdfrs::annotate_pdf(
+        bytes(ONE_PAGE),
+        js_uint8_array(vec![rgba_square(255, 0, 0, 255)]),
+        js_array(vec![asset_meta(2, 2)]),
+        js_array(vec![annotation(1, 0.1, 0.7, 0.3, 0)]),
+    )
+    .await
+    .expect("annotate_pdf should succeed");
+
+    assert!(annotated.length() > 0);
+    assert_eq!(expected_page_count(&annotated), 1, "annotating must not change the page count");
+    assert_eq!(page_xobject_count(&annotated, 1), 1);
+}
+
+/// The point of the asset/placement split: one image on several pages is a
+/// single stream in the file, reachable from each of them.
+#[wasm_bindgen_test]
+async fn one_asset_on_several_pages_is_embedded_once() {
+    let annotated = pdfrs::annotate_pdf(
+        bytes(FOUR_PAGES),
+        js_uint8_array(vec![rgba_square(0, 0, 255, 255)]),
+        js_array(vec![asset_meta(2, 2)]),
+        js_array(vec![
+            annotation(1, 0.1, 0.1, 0.2, 0),
+            annotation(2, 0.1, 0.1, 0.2, 0),
+            annotation(4, 0.1, 0.1, 0.2, 0),
+        ]),
+    )
+    .await
+    .expect("annotate_pdf should succeed");
+
+    // One colour image + one /SMask, shared by all three pages.
+    assert_eq!(image_stream_count(&annotated), 2);
+    for page in [1, 2, 4] {
+        assert_eq!(page_xobject_count(&annotated, page), 1, "page {page} should see the image");
+        assert_eq!(page_draw_count(&annotated, page), 1, "page {page} should draw it once");
+    }
+    // Page 3 may *see* the image (these fixtures share one /Resources across
+    // every page) but must never draw it.
+    assert_eq!(page_draw_count(&annotated, 3), 0, "page 3 was never annotated");
+}
+
+#[wasm_bindgen_test]
+async fn two_assets_on_one_page() {
+    let annotated = pdfrs::annotate_pdf(
+        bytes(ONE_PAGE),
+        js_uint8_array(vec![rgba_square(255, 0, 0, 255), rgba_square(0, 255, 0, 128)]),
+        js_array(vec![asset_meta(2, 2), asset_meta(2, 2)]),
+        js_array(vec![annotation(1, 0.1, 0.1, 0.2, 0), annotation(1, 0.6, 0.6, 0.2, 1)]),
+    )
+    .await
+    .expect("annotate_pdf should succeed");
+
+    assert_eq!(page_xobject_count(&annotated, 1), 2);
+    assert_eq!(image_stream_count(&annotated), 4, "two images, each with its own mask");
+}
+
+#[wasm_bindgen_test]
+async fn annotate_pdf_rejects_an_out_of_range_asset_index() {
+    let result = pdfrs::annotate_pdf(
+        bytes(ONE_PAGE),
+        js_uint8_array(vec![rgba_square(255, 0, 0, 255)]),
+        js_array(vec![asset_meta(2, 2)]),
+        js_array(vec![annotation(1, 0.1, 0.1, 0.2, 5)]),
+    )
+    .await;
+    assert!(result.is_err(), "an asset index past the end should be rejected");
+}
+
+#[wasm_bindgen_test]
+async fn annotate_pdf_rejects_a_pixel_buffer_of_the_wrong_length() {
+    let result = pdfrs::annotate_pdf(
+        bytes(ONE_PAGE),
+        js_uint8_array(vec![Uint8Array::from(&[0u8, 0, 0, 0][..])]),
+        js_array(vec![asset_meta(4, 4)]), // claims 4x4, sends one pixel
+        js_array(vec![annotation(1, 0.1, 0.1, 0.2, 0)]),
+    )
+    .await;
+    assert!(result.is_err(), "a mismatched pixel buffer should be rejected");
+}
+
+#[wasm_bindgen_test]
+async fn annotate_pdf_rejects_a_nonexistent_page() {
+    let result = pdfrs::annotate_pdf(
+        bytes(ONE_PAGE),
+        js_uint8_array(vec![rgba_square(255, 0, 0, 255)]),
+        js_array(vec![asset_meta(2, 2)]),
+        js_array(vec![annotation(99, 0.1, 0.1, 0.2, 0)]),
+    )
+    .await;
+    assert!(result.is_err(), "annotating a page that doesn't exist should be rejected");
+}
+
+#[wasm_bindgen_test]
+async fn annotations_can_be_rotated() {
+    let annotated = pdfrs::annotate_pdf(
+        bytes(ONE_PAGE),
+        js_uint8_array(vec![rgba_square(255, 0, 0, 255)]),
+        js_array(vec![asset_meta(2, 2)]),
+        js_array(vec![turned_annotation(1, 0.3, 0.3, 0.3, 0, 37.5)]),
+    )
+    .await
+    .expect("a rotated annotation should be accepted");
+
+    assert_eq!(page_draw_count(&annotated, 1), 1);
+}
+
+/// `rotation` is optional: annotations written before it existed must still
+/// work, and must come out identical to an explicit zero.
+#[wasm_bindgen_test]
+async fn a_missing_rotation_means_upright() {
+    let without = pdfrs::annotate_pdf(
+        bytes(ONE_PAGE),
+        js_uint8_array(vec![rgba_square(255, 0, 0, 255)]),
+        js_array(vec![asset_meta(2, 2)]),
+        js_array(vec![annotation(1, 0.3, 0.3, 0.3, 0)]),
+    )
+    .await
+    .expect("an annotation without a rotation should be accepted");
+
+    let with_zero = pdfrs::annotate_pdf(
+        bytes(ONE_PAGE),
+        js_uint8_array(vec![rgba_square(255, 0, 0, 255)]),
+        js_array(vec![asset_meta(2, 2)]),
+        js_array(vec![turned_annotation(1, 0.3, 0.3, 0.3, 0, 0.0)]),
+    )
+    .await
+    .expect("an explicit zero rotation should be accepted");
+
+    assert_eq!(without.to_vec(), with_zero.to_vec(), "omitting rotation must equal rotation: 0");
+}
+
+#[wasm_bindgen_test]
+async fn annotate_pdf_rejects_a_rotation_that_is_not_a_number() {
+    let result = pdfrs::annotate_pdf(
+        bytes(ONE_PAGE),
+        js_uint8_array(vec![rgba_square(255, 0, 0, 255)]),
+        js_array(vec![asset_meta(2, 2)]),
+        js_array(vec![turned_annotation(1, 0.3, 0.3, 0.3, 0, f64::NAN)]),
+    )
+    .await;
+    assert!(result.is_err(), "a NaN rotation should be rejected");
 }
