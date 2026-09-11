@@ -11,10 +11,12 @@ import {
   render_page_preview,
   rotate_pages,
   split_pdf,
+  stamp_image,
 } from "./pdfrs-worker-client";
 import { bytesToObjectUrl, downloadBytes, fileToUint8Array, setupFileInput } from "./pdf-io";
 import { parseLayout, parseRanges, parseRotations } from "./parsers";
 import { renderPagesInParallel } from "./preview-worker-pool";
+import { hasTransparency, imageToRgba, type DecodedImage } from "./image-io";
 // Side-effect import: registers <pdf-editor-app> (and the components it uses
 // internally) for the "Editor" tab. See src/webcomponents/index.ts.
 import "./webcomponents";
@@ -311,6 +313,211 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
       const decrypted = await decrypt_pdf(bytes, passwordInput.value);
       downloadBytes(decrypted, "decrypted.pdf");
       setStatus(status, "Fatto: decrypted.pdf", "ok");
+    }),
+  );
+}
+
+// --- Firma: stamp a PNG signature onto one page of a PDF ---
+//
+// The PNG is decoded here, in the browser, and only raw RGBA pixels are sent
+// to wasm - which is what keeps `stamp_image` out of the image-decoding
+// ("full") build. The position/size the user drags out is stored in
+// percentages of the displayed page, the same units the wasm side takes, so
+// nothing depends on the scale the preview happens to be rendered at.
+{
+  const status = byId<HTMLElement>("firma-status");
+  const pagesEl = byId<HTMLElement>("firma-pages");
+  const stage = byId<HTMLElement>("firma-stage");
+  const pageImg = byId<HTMLImageElement>("firma-page-img");
+  const box = byId<HTMLElement>("firma-box");
+  const boxImg = byId<HTMLImageElement>("firma-box-img");
+  const handle = byId<HTMLElement>("firma-handle");
+
+  let pdfBytes: Uint8Array | null = null;
+  let pdfName = "documento.pdf";
+  let selectedPage: number | null = null;
+  let signature: DecodedImage | null = null;
+  // Fractions of the displayed page: x/y are the box's top-left corner, width
+  // its width. The height follows from the image's aspect ratio, so the
+  // signature can't be stretched.
+  let placement = { x: 0.1, y: 0.7, width: 0.3 };
+
+  const aspectRatio = () => (signature ? signature.height / signature.width : 1);
+
+  function drawBox(): void {
+    if (!signature || selectedPage === null) {
+      box.hidden = true;
+      return;
+    }
+    const stageWidth = pageImg.clientWidth;
+    const stageHeight = pageImg.clientHeight;
+    if (stageWidth === 0 || stageHeight === 0) return;
+
+    // The box keeps the image's proportions in *pixels*, so the percentage
+    // height differs from the percentage width whenever the page isn't square.
+    const widthPx = placement.width * stageWidth;
+    const heightPx = widthPx * aspectRatio();
+    box.hidden = false;
+    box.style.left = `${placement.x * 100}%`;
+    box.style.top = `${placement.y * 100}%`;
+    box.style.width = `${placement.width * 100}%`;
+    box.style.height = `${(heightPx / stageHeight) * 100}%`;
+  }
+
+  function clamp(value: number, min: number, max: number): number {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  // One pointer gesture at a time: dragging the box, or resizing from the corner.
+  function startGesture(event: PointerEvent, mode: "move" | "resize"): void {
+    if (!signature || selectedPage === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const stageWidth = pageImg.clientWidth;
+    const stageHeight = pageImg.clientHeight;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const start = { ...placement };
+    const target = event.currentTarget as HTMLElement;
+    target.setPointerCapture(event.pointerId);
+
+    const onMove = (move: PointerEvent) => {
+      const deltaX = (move.clientX - startX) / stageWidth;
+      const deltaY = (move.clientY - startY) / stageHeight;
+
+      if (mode === "move") {
+        const heightFraction = (start.width * stageWidth * aspectRatio()) / stageHeight;
+        placement = {
+          ...start,
+          x: clamp(start.x + deltaX, 0, 1 - start.width),
+          y: clamp(start.y + deltaY, 0, Math.max(0, 1 - heightFraction)),
+        };
+      } else {
+        const width = clamp(start.width + deltaX, 0.02, 1 - start.x);
+        // Don't let the corner drag push the box off the bottom edge.
+        const heightFraction = (width * stageWidth * aspectRatio()) / stageHeight;
+        placement = { ...start, width: start.y + heightFraction > 1 ? start.width : width };
+      }
+      drawBox();
+    };
+
+    const onUp = () => {
+      target.releasePointerCapture(event.pointerId);
+      target.removeEventListener("pointermove", onMove);
+      target.removeEventListener("pointerup", onUp);
+    };
+
+    target.addEventListener("pointermove", onMove);
+    target.addEventListener("pointerup", onUp);
+  }
+
+  box.addEventListener("pointerdown", (event) => startGesture(event, "move"));
+  handle.addEventListener("pointerdown", (event) => startGesture(event, "resize"));
+
+  async function selectPage(page: number): Promise<void> {
+    if (!pdfBytes) return;
+    selectedPage = page;
+    for (const thumb of Array.from(pagesEl.querySelectorAll(".firma-thumb"))) {
+      thumb.classList.toggle("selected", Number((thumb as HTMLElement).dataset.page) === page);
+    }
+    // Rendered bigger than the thumbnails: this is the one you aim with.
+    // CSS caps how tall it displays; the box's percentages are read off the
+    // displayed size, so the two stay consistent.
+    const png = await render_page_preview(pdfBytes, page, 0.7);
+    pageImg.src = bytesToObjectUrl(png, "image/png");
+    stage.hidden = false;
+    await pageImg.decode().catch(() => undefined);
+    drawBox();
+  }
+
+  setupFileInput(byId<HTMLElement>("firma-drop"), byId<HTMLInputElement>("firma-input"), (files) => {
+    const file = files[0];
+    if (!file) return;
+    pdfName = file.name;
+    byId<HTMLElement>("firma-filename").textContent = file.name;
+
+    void runWithStatus(status, async () => {
+      pagesEl.innerHTML = "";
+      stage.hidden = true;
+      selectedPage = null;
+
+      pdfBytes = await fileToUint8Array(file);
+      const count = await page_count(pdfBytes);
+
+      const thumbs = new Map<number, HTMLImageElement>();
+      for (let page = 1; page <= count; page++) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "firma-thumb";
+        button.dataset.page = String(page);
+        const img = document.createElement("img");
+        const label = document.createElement("span");
+        label.textContent = `Pagina ${page}`;
+        button.append(img, label);
+        button.addEventListener("click", () => void runWithStatus(status, () => selectPage(page)));
+        pagesEl.appendChild(button);
+        thumbs.set(page, img);
+      }
+
+      const fill = (page: number, png: Uint8Array) => {
+        const img = thumbs.get(page);
+        if (img) img.src = bytesToObjectUrl(png, "image/png");
+      };
+
+      const bytes = pdfBytes;
+      if (count > PARALLEL_PREVIEW_THRESHOLD) {
+        await renderPagesInParallel(bytes, Array.from({ length: count }, (_, index) => index + 1), 0.25, fill);
+      } else {
+        for (let page = 1; page <= count; page++) fill(page, await render_page_preview(bytes, page, 0.25));
+      }
+
+      await selectPage(1);
+      setStatus(status, `Fatto: ${count} pagine, scegli quella da firmare`, "ok");
+    });
+  });
+
+  setupFileInput(
+    byId<HTMLElement>("firma-image-drop"),
+    byId<HTMLInputElement>("firma-image-input"),
+    (files) => {
+      const file = files[0];
+      if (!file) return;
+      byId<HTMLElement>("firma-image-filename").textContent = file.name;
+
+      void runWithStatus(status, async () => {
+        signature = await imageToRgba(file);
+        boxImg.src = URL.createObjectURL(file);
+        drawBox();
+        const warning = hasTransparency(signature)
+          ? ""
+          : " (attenzione: il PNG non ha trasparenza, coprirà il testo sotto)";
+        setStatus(status, `Fatto: firma caricata, trascinala sulla pagina${warning}`, "ok");
+      });
+    },
+    (file) => file.type === "image/png",
+  );
+
+  byId<HTMLButtonElement>("firma-run").addEventListener("click", () =>
+    void runWithStatus(status, async () => {
+      if (!pdfBytes) throw new Error("seleziona un PDF");
+      if (selectedPage === null) throw new Error("scegli la pagina da firmare");
+      if (!signature) throw new Error("carica il PNG della firma");
+
+      // Every top-level Uint8Array argument is *transferred* to the worker
+      // (see collectTransferables), which neuters ours - so hand over copies
+      // of both buffers and stay able to sign a second page without
+      // re-opening the file.
+      const signed = await stamp_image(
+        new Uint8Array(pdfBytes),
+        selectedPage,
+        new Uint8Array(signature.pixels),
+        signature.width,
+        signature.height,
+        placement,
+      );
+      downloadBytes(signed, pdfName.replace(/\.pdf$/i, "") + "-firmato.pdf");
+      setStatus(status, `Fatto: firma applicata alla pagina ${selectedPage}`, "ok");
     }),
   );
 }

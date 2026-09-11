@@ -10,6 +10,7 @@ import init, {
   read_metadata,
   rotate_pages,
   split_pdf,
+  stamp_image,
   write_metadata,
 } from "pdfrs";
 import { collectTransferables, type WorkerInitMessage, type WorkerRequest, type WorkerResponse } from "./worker-protocol";
@@ -29,6 +30,7 @@ const coreMethods = {
   read_metadata,
   rotate_pages,
   split_pdf,
+  stamp_image,
   write_metadata,
 } as const satisfies Record<string, (...args: never[]) => Promise<unknown>>;
 

@@ -51,6 +51,23 @@ export function compose_pdf(sources: Uint8Array[], layout: unknown): Promise<Uin
   return call("compose_pdf", [sources, layout]);
 }
 
+/**
+ * Draws an image onto one page. `pixels` is raw RGBA8 and is passed as a
+ * top-level argument on purpose: `collectTransferables` recurses into arrays
+ * but not into objects, so a buffer tucked inside an options object would be
+ * copied instead of transferred - and a signature is megabytes of pixels.
+ */
+export function stamp_image(
+  file: Uint8Array,
+  page: number,
+  pixels: Uint8Array,
+  width: number,
+  height: number,
+  placement: { x: number; y: number; width: number },
+): Promise<Uint8Array> {
+  return call("stamp_image", [file, page, pixels, width, height, placement]);
+}
+
 /** Reads the `/Info` metadata. Only the keys actually present come back, so a document without metadata reads as `{}`. */
 export function read_metadata(file: Uint8Array): Promise<Record<string, string>> {
   return call("read_metadata", [file]);

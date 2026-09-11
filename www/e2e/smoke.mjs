@@ -7,6 +7,7 @@
 import { chromium } from "playwright";
 import { spawn } from "node:child_process";
 import path from "node:path";
+import zlib from "node:zlib";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -37,6 +38,63 @@ const vite = spawn(viteBin, ["--port", String(port), "--strictPort"], {
   cwd: wwwRoot,
   stdio: "ignore",
 });
+
+
+/**
+ * Builds a tiny PNG with an alpha channel, in-process.
+ *
+ * Cheaper than carrying a binary fixture around, and it avoids enabling the
+ * `png` feature on the Rust side just to *generate* test data (the crate
+ * itself never decodes PNGs - the browser does).
+ */
+function makePngWithAlpha(width, height) {
+  const raw = Buffer.alloc(height * (1 + width * 4));
+  for (let y = 0; y < height; y++) {
+    const rowStart = y * (1 + width * 4);
+    raw[rowStart] = 0; // filter: none
+    for (let x = 0; x < width; x++) {
+      const px = rowStart + 1 + x * 4;
+      raw[px] = 255;
+      raw[px + 1] = 0;
+      raw[px + 2] = 0;
+      // Half the pixels transparent, so the image really exercises /SMask.
+      raw[px + 3] = x % 2 === 0 ? 255 : 0;
+    }
+  }
+
+  const chunk = (type, data) => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    const typeAndData = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(zlib.crc32 ? zlib.crc32(typeAndData) >>> 0 : crc32(typeAndData));
+    return Buffer.concat([length, typeAndData, crc]);
+  };
+
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 6; // colour type: RGBA
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", ihdr),
+    chunk("IDAT", zlib.deflateSync(raw)),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+/** Fallback for Node versions without zlib.crc32. */
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) {
+      crc = crc & 1 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1;
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
 
 async function main() {
   await waitForServer(baseUrl, 20_000);
@@ -136,6 +194,21 @@ async function main() {
   await page.fill("#rotate-rotations", "1:90");
   const [rotateDownload] = await Promise.all([page.waitForEvent("download"), page.click("#rotate-run")]);
   const rotateStatus = await waitForSettledStatus("#rotate-status");
+
+  // --- Firma: stamp a PNG (with alpha) onto page 1 of four_pages.pdf ---
+  await switchTab("panel-firma");
+  await page.setInputFiles("#firma-input", [path.join(fixtures, "four_pages.pdf")]);
+  const firmaPagesStatus = await waitForSettledStatus("#firma-status");
+  await page.setInputFiles("#firma-image-input", {
+    name: "firma.png",
+    mimeType: "image/png",
+    buffer: makePngWithAlpha(40, 20),
+  });
+  await waitForSettledStatus("#firma-status");
+  // The signature box only appears once both the page and the image are in.
+  const firmaBoxVisible = await page.isVisible("#firma-box");
+  const [firmaDownload] = await Promise.all([page.waitForEvent("download"), page.click("#firma-run")]);
+  const firmaStatus = await waitForSettledStatus("#firma-status");
 
   // --- Compose: interleave pages from two_pages.pdf and one_page.pdf ---
   await switchTab("panel-compose");
@@ -261,6 +334,10 @@ async function main() {
     "split downloads 2 files": splitDownloads.length === 2,
     "split status succeeds": splitStatus.startsWith("Fatto"),
     "rotate downloads rotated.pdf": rotateDownload.suggestedFilename() === "rotated.pdf",
+    "firma renders the page thumbnails": firmaPagesStatus.startsWith("Fatto"),
+    "firma shows the draggable signature box once an image is loaded": firmaBoxVisible,
+    "firma downloads the signed PDF": firmaDownload.suggestedFilename() === "four_pages-firmato.pdf",
+    "firma status succeeds": firmaStatus.startsWith("Fatto"),
     "rotate status succeeds": rotateStatus.startsWith("Fatto"),
     "compose downloads composed.pdf": composeDownload.suggestedFilename() === "composed.pdf",
     "compose status succeeds": composeStatus.startsWith("Fatto"),

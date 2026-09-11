@@ -136,6 +136,18 @@ Usa i PDF già presenti in `tests/fixtures/` (`one_page.pdf`, `two_pages.pdf`, `
 
 Se aggiungi un pannello o un'operazione, aggiungi anche il relativo scenario in `smoke.mjs` — non lasciarlo solo come verifica manuale. Dato che i pannelli inattivi sono `hidden`, ricordati di passare alla tab giusta prima di interagirci (`switchTab("panel-<nome>")` in cima allo scenario) — `page.click`/`page.fill` falliscono su un elemento nascosto (Playwright richiede visibilità), mentre `page.setInputFiles` funziona comunque anche se il pannello non è attivo.
 
+### Firma su una pagina (`src/operations/stamp.rs`, pannello "Firma")
+
+Tre cose non ovvie, tutte scoperte leggendo il sorgente di lopdf o misurando:
+
+**La decodifica del PNG sta nel browser, non in Rust.** La canvas ha già un decoder, e `getImageData` restituisce alpha **non premoltiplicato** — esattamente la forma che vuole una `/SMask` PDF. Facendola lì, `stamp_image` non dipende dal crate `image` e resta nella build **core** invece che nella "full" da 4,3MB. (Il pannello scarica comunque la full, perché mostra le anteprime: il vantaggio è per chi usa la libreria headless.) `www/src/image-io.ts` ridimensiona anche l'immagine a `maxSize` (default 1000px sul lato lungo, parametro della funzione): una firma non ha bisogno di più, e un PNG da 4000×3000 sarebbero 48MB di RGBA grezzo da trasferire e comprimere.
+
+**Il trabocchetto delle `/Resources` ereditate.** `Document::insert_image` di lopdf farebbe quasi tutto (registra l'XObject, accoda `q/cm/Do/Q`, gestisce `/Contents` sia stream sia array), ma passa da `get_or_create_resources`, che guarda **solo** se la pagina ha un `/Resources` proprio. Una pagina che le eredita dal nodo `/Pages` — caso legale e frequente — si ritrova un `/Resources` **vuoto** appiccicato sopra: smette di ereditare, e i font del suo contenuto spariscono. La pagina si aprirebbe senza testo. Quindi prima di stampare, se la pagina non ha un `/Resources` proprio, si risolve quello ereditato con `Document::get_page_resources` (che risale `/Parent` con protezione dai cicli) e lo si **clona** sulla pagina — clonare e non referenziare, perché quel dizionario è condiviso con le altre pagine e l'XObject della firma finirebbe anche sulle loro.
+
+**Il renderer applica `/Rotate`, lopdf lo ignora.** Misurato: la stessa pagina rende 595×842 senza rotazione e 842×595 con `/Rotate 90`; in lopdf la stringa `Rotate` non compare proprio. Quindi il riquadro che l'utente trascina vive nello spazio **visualizzato**, mentre la `cm` va scritta in quello della **pagina**: `stamp_matrix` compone due matrici (unità → rettangolo nello spazio visualizzato, poi visualizzato → pagina) e per 90/270 la rotazione entra nella matrice, il che è anche ciò che fa apparire la firma dritta invece che coricata. I test in `render_tests` (dietro la feature `preview`) renderizzano davvero la pagina firmata e controllano **dove finiscono i pixel**, per tutti e quattro i valori di `/Rotate` — è l'unico modo di accorgersi di un segno sbagliato; una verifica solo algebrica passerebbe lo stesso.
+
+Nota sulla compressione: `save()` non chiama `Document::compress()`, quindi i due stream (RGB e maschera) vengono compressi esplicitamente con `Stream::compress()`, altrimenti il PDF porterebbe megabyte di pixel grezzi. Non c'è rischio di doppia compressione: `compress()` è un no-op se `/Filter` è già presente.
+
 ### Modello logico del PDF: `PdfDocument` / `PdfEditor` (`src/pdf-model/`)
 
 Sopra le funzioni stateless viste finora c'è un livello di modello puro (nessun DOM, nessun riferimento a `window`/`document`), pensato per essere riusato da un front qualsiasi — anche il futuro front Vue in repo separata:

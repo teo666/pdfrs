@@ -46,6 +46,14 @@ fn js_string_object(fields: &[(&str, Option<&str>)]) -> JsValue {
     obj.into()
 }
 
+fn js_number_object(fields: &[(&str, f64)]) -> JsValue {
+    let obj = Object::new();
+    for (key, value) in fields {
+        Reflect::set(&obj, &JsValue::from_str(key), &JsValue::from_f64(*value)).unwrap();
+    }
+    obj.into()
+}
+
 fn js_field(value: &JsValue, key: &str) -> Option<String> {
     let field = Reflect::get(value, &JsValue::from_str(key)).unwrap();
     field.as_string()
@@ -268,4 +276,57 @@ async fn read_metadata_of_a_document_without_info_is_empty() {
 async fn write_metadata_rejects_an_unknown_field() {
     let result = pdfrs::write_metadata(bytes(ONE_PAGE), js_string_object(&[("bogus", Some("x"))])).await;
     assert!(result.is_err(), "an unknown metadata field should be rejected");
+}
+
+/// Counts the XObjects reachable from a page's own /Resources.
+fn page_xobject_count(pdf_bytes: &Uint8Array, page: u32) -> usize {
+    let doc = lopdf::Document::load_mem(&pdf_bytes.to_vec()).expect("saved PDF should be loadable");
+    let page_id = *doc.get_pages().get(&page).expect("page should exist");
+    let resources = doc
+        .get_dictionary(page_id)
+        .unwrap()
+        .get(b"Resources")
+        .expect("the stamped page should carry its own /Resources");
+    let resources = doc.dereference(resources).unwrap().1.as_dict().unwrap();
+    match resources.get(b"XObject") {
+        Ok(xobjects) => xobjects.as_dict().unwrap().len(),
+        Err(_) => 0,
+    }
+}
+
+#[wasm_bindgen_test]
+async fn stamps_an_image_onto_a_page() {
+    // 2x2 RGBA: two opaque pixels, two transparent.
+    let pixels = Uint8Array::from(
+        &[255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 0, 255, 255, 0, 0][..],
+    );
+    let placement = js_number_object(&[("x", 0.1), ("y", 0.7), ("width", 0.3)]);
+
+    let stamped = pdfrs::stamp_image(bytes(ONE_PAGE), 1, pixels, 2, 2, placement)
+        .await
+        .expect("stamp_image should succeed");
+
+    assert!(stamped.length() > 0);
+    assert_eq!(expected_page_count(&stamped), 1, "stamping must not change the page count");
+    // The image plus its /SMask companion is one entry in /Resources/XObject
+    // (the mask hangs off the image's own dict, not off the page).
+    assert_eq!(page_xobject_count(&stamped, 1), 1);
+}
+
+#[wasm_bindgen_test]
+async fn stamp_image_rejects_a_pixel_buffer_of_the_wrong_length() {
+    let pixels = Uint8Array::from(&[0u8, 0, 0, 0][..]); // 1 pixel, but 4x4 claimed
+    let placement = js_number_object(&[("x", 0.0), ("y", 0.0), ("width", 0.5)]);
+
+    let result = pdfrs::stamp_image(bytes(ONE_PAGE), 1, pixels, 4, 4, placement).await;
+    assert!(result.is_err(), "a mismatched pixel buffer should be rejected");
+}
+
+#[wasm_bindgen_test]
+async fn stamp_image_rejects_a_nonexistent_page() {
+    let pixels = Uint8Array::from(&[0u8, 0, 0, 255][..]);
+    let placement = js_number_object(&[("x", 0.0), ("y", 0.0), ("width", 0.5)]);
+
+    let result = pdfrs::stamp_image(bytes(ONE_PAGE), 99, pixels, 1, 1, placement).await;
+    assert!(result.is_err(), "stamping a page that doesn't exist should be rejected");
 }

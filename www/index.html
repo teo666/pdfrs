@@ -142,6 +142,57 @@
         display: block;
         border: 1px solid #8882;
       }
+      /* --- Firma --- */
+      .firma-pages { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
+      .firma-thumb {
+        width: 90px;
+        border: 2px solid transparent;
+        border-radius: 4px;
+        padding: 0.2rem;
+        cursor: pointer;
+        background: none;
+        font: inherit;
+        color: #666;
+        font-size: 0.7rem;
+      }
+      .firma-thumb img { width: 100%; display: block; border: 1px solid #8882; }
+      .firma-thumb.selected { border-color: #3b82f6; background: #3b82f611; }
+      /* The stage is sized to the preview image; the signature box is positioned
+         inside it in percentages, which is exactly what the wasm side expects. */
+      /* user-select off: without it, dragging the signature box selects the
+         page image underneath and paints it with the browser's blue
+         selection highlight. */
+      .firma-stage {
+        position: relative;
+        display: inline-block;
+        margin-top: 0.75rem;
+        line-height: 0;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      /* Capped so a full page fits on screen without scrolling: the signature
+         box is positioned in percentages, so shrinking the image here costs
+         nothing in accuracy. */
+      .firma-stage img.page { display: block; max-width: 100%; max-height: 60vh; width: auto; border: 1px solid #8884; }
+      .firma-box {
+        position: absolute;
+        border: 1px dashed #3b82f6;
+        background: #3b82f611;
+        cursor: move;
+        touch-action: none;
+      }
+      .firma-box img { width: 100%; height: 100%; display: block; pointer-events: none; }
+      .firma-handle {
+        position: absolute;
+        right: -6px;
+        bottom: -6px;
+        width: 12px;
+        height: 12px;
+        background: #3b82f6;
+        border-radius: 2px;
+        cursor: nwse-resize;
+        touch-action: none;
+      }
       .preview-card span {
         display: block;
         margin-top: 0.3rem;
@@ -179,6 +230,7 @@
         <button type="button" class="tab" data-target="panel-compose">Compose</button>
         <button type="button" class="tab" data-target="panel-encrypt">Encrypt</button>
         <button type="button" class="tab" data-target="panel-decrypt">Decrypt</button>
+        <button type="button" class="tab" data-target="panel-firma">Firma</button>
         <button type="button" class="tab" data-target="panel-editor">Editor</button>
       </nav>
 
@@ -274,6 +326,31 @@
           </div>
           <button id="decrypt-run" type="button">Esegui decrypt</button>
           <div class="status" id="decrypt-status"></div>
+        </section>
+
+        <section class="panel" id="panel-firma">
+          <h2>Firma</h2>
+          <div class="dropzone" id="firma-drop">Trascina un PDF qui, o clicca per scegliere</div>
+          <input type="file" id="firma-input" accept="application/pdf" hidden />
+          <div class="hint" id="firma-filename">Nessun file selezionato</div>
+          <div class="firma-pages" id="firma-pages"></div>
+
+          <div class="dropzone" id="firma-image-drop">Trascina qui il PNG della firma (con trasparenza), o clicca per sceglierlo</div>
+          <input type="file" id="firma-image-input" accept="image/png" hidden />
+          <div class="hint" id="firma-image-filename">Nessuna firma caricata</div>
+
+          <div class="firma-stage" id="firma-stage" hidden>
+            <img class="page" id="firma-page-img" alt="Pagina selezionata" />
+            <div class="firma-box" id="firma-box" hidden>
+              <img id="firma-box-img" alt="Anteprima della firma" />
+              <div class="firma-handle" id="firma-handle"></div>
+            </div>
+          </div>
+
+          <div class="row">
+            <button id="firma-run" type="button">Applica firma</button>
+          </div>
+          <div class="status" id="firma-status"></div>
         </section>
 
         <section class="panel" id="panel-editor">
