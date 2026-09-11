@@ -79,22 +79,40 @@ Ritorna il numero di pagine di un PDF. Utile per sapere quante anteprime richied
 const count = await page_count(bytes);
 ```
 
-## `stamp_image(file, page, pixels, width, height, placement): Promise<Uint8Array>`
+## `annotate_pdf(file, assets, assetsMeta, annotations): Promise<Uint8Array>`
 
-Disegna un'immagine su **una** pagina di un PDF esistente — tipicamente una firma. Ritorna il PDF modificato.
+Disegna immagini sulle pagine di un PDF esistente — firme, timbri — in **una sola passata**. Ritorna il PDF modificato.
 
-`pixels` è RGBA8 grezzo (`width * height * 4` byte), cioè **già decodificato**: la decodifica del PNG la fa il browser con la canvas (vedi `www/src/image-io.ts`), non il Rust. È la ragione per cui questa funzione non tira dentro nessuna libreria di decodifica immagini e resta nella build "core". Il canale alpha diventa una `/SMask`, quindi la trasparenza è preservata: una firma non copre il testo sotto.
+Il modello è a due livelli, ed è la chiave di tutto:
 
-`placement` è `{ x, y, width }` in **frazioni (0..1) della pagina come la si vede**, con origine in alto a sinistra — le stesse coordinate del riquadro che l'utente trascina sull'anteprima. L'altezza non è un parametro: deriva da `width` e dalle proporzioni dell'immagine, così la firma non può essere stirata.
+- un **asset** è un'immagine, caricata una volta;
+- un'**annotazione** è una sua comparsa su una pagina.
+
+La stessa firma su cinquanta pagine sono cinquanta annotazioni che puntano a un solo asset, e nel PDF risultante diventano **un solo XObject** referenziato da cinquanta pagine: la differenza fra un file da 1MB e uno da 50MB. Un asset a cui nessuna annotazione fa riferimento non finisce nemmeno nel file.
+
+I parametri:
+
+- **`assets`**: un array di `Uint8Array`, uno per immagine, con RGBA8 grezzo (`width * height * 4` byte) **già decodificato**. La decodifica del PNG la fa il browser con la canvas (vedi `www/src/image-io.ts`), non il Rust: è la ragione per cui questa funzione non tira dentro nessuna libreria di decodifica immagini e resta nella build "core". Il canale alpha diventa una `/SMask`, quindi la trasparenza è preservata e una firma non copre il testo sotto.
+- **`assetsMeta`**: `[{ width, height }]`, parallelo ad `assets`.
+- **`annotations`**: `[{ page, x, y, width, kind: "image", asset }]`, dove `asset` è l'indice dentro `assets`. `x`/`y`/`width` sono **frazioni (0..1) della pagina come la si vede**, con origine in alto a sinistra — le stesse coordinate del riquadro che l'utente trascina sull'anteprima. L'altezza non è un parametro: deriva da `width` e dalle proporzioni dell'immagine, così un'immagine non può essere stirata.
 
 Le pagine con `/Rotate` sono gestite: il content stream non sa nulla di quella rotazione (il visualizzatore la applica per conto suo), quindi la matrice viene convertita dallo spazio visualizzato a quello della pagina, e l'immagine ruotata di conseguenza per apparire dritta.
 
 ```ts
-const { pixels, width, height } = await imageToRgba(pngFile); // canvas, lato browser
-const signed = await stamp_image(bytes, 1, pixels, width, height, { x: 0.6, y: 0.8, width: 0.25 });
+const firma = await imageToRgba(pngFile); // canvas, lato browser
+const annotato = await annotate_pdf(
+  bytes,
+  [firma.pixels],
+  [{ width: firma.width, height: firma.height }],
+  // La stessa firma, in fondo a pagina 1 e a pagina 2.
+  [
+    { page: 1, x: 0.6, y: 0.8, width: 0.25, kind: "image", asset: 0 },
+    { page: 2, x: 0.6, y: 0.8, width: 0.25, kind: "image", asset: 0 },
+  ],
+);
 ```
 
-> Il buffer dei pixel va passato come argomento a sé e non dentro un oggetto: il worker trasferisce (senza copiare) solo gli `Uint8Array` che trova ai livelli superiori degli argomenti.
+> I buffer dei pixel vanno passati in un array a sé e non dentro oggetti: il worker trasferisce (senza copiare) solo gli `Uint8Array` che trova negli array degli argomenti, e trasferirli **svuota** quelli del chiamante — passa copie se ti servono ancora.
 
 ## `read_metadata(file: Uint8Array): Promise<PdfMetadata>`
 

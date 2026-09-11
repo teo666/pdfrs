@@ -106,30 +106,71 @@ pub async fn page_count(file: Uint8Array) -> std::result::Result<u32, JsValue> {
     Ok(doc.get_pages().len() as u32)
 }
 
-/// Draws an image onto one page of an existing PDF - a signature, typically.
+/// Draws images onto the pages of an existing PDF - signatures, typically -
+/// in one pass.
 ///
-/// `pixels` is raw RGBA8 (`width * height * 4` bytes), already decoded: the
-/// browser's canvas does the PNG decoding, which keeps this operation free of
-/// any image-decoding dependency and therefore in the "core" build.
+/// Two lists, deliberately kept apart:
 ///
-/// `placement` is `{ x, y, width }` as fractions (0..1) of the page **as
-/// displayed**, origin top-left - i.e. the coordinates of the preview the
-/// user positions the signature on. Pages with a `/Rotate` are handled here:
-/// the content stream knows nothing about that rotation, so the matrix is
-/// converted from displayed space to page space. The height follows from the
-/// image's aspect ratio.
+/// - `assets`: an `Array` of `Uint8Array`, one per image, holding raw RGBA8
+///   (`width * height * 4` bytes) that the browser's canvas already decoded.
+///   Keeping the decoding out of Rust is what frees this operation of any
+///   image-decoding dependency, so it ships in the "core" build. They're a
+///   top-level array rather than fields of objects so the worker can
+///   *transfer* them instead of copying megabytes per image.
+/// - `assets_meta`: `[{ width, height }]`, parallel to `assets`.
+/// - `annotations`: `[{ page, x, y, width, kind: "image", asset }]`, where
+///   `asset` indexes into `assets`. `x`/`y`/`width` are fractions (0..1) of
+///   the page **as displayed**, origin top-left - the coordinates of the
+///   preview the user drags the box on. The height follows from the image's
+///   aspect ratio.
+///
+/// The same asset used by several annotations becomes a **single** image
+/// stream in the output, referenced from each page that needs it. Pages with
+/// a `/Rotate` are handled: the content stream knows nothing about that
+/// rotation, so the matrix is converted from displayed space to page space.
 #[wasm_bindgen]
-pub async fn stamp_image(
+pub async fn annotate_pdf(
     file: Uint8Array,
-    page: u32,
-    pixels: Uint8Array,
-    width: u32,
-    height: u32,
-    placement: JsValue,
+    assets: Array,
+    assets_meta: JsValue,
+    annotations: JsValue,
 ) -> std::result::Result<Uint8Array, JsValue> {
+    #[derive(serde::Deserialize)]
+    struct AssetMeta {
+        width: u32,
+        height: u32,
+    }
+
+    let meta: Vec<AssetMeta> = parse_options(assets_meta)?;
+    if meta.len() != assets.length() as usize {
+        return Err(PdfrsError::InvalidArgument(format!(
+            "assets e assets_meta hanno lunghezze diverse: {} e {}",
+            assets.length(),
+            meta.len()
+        ))
+        .into());
+    }
+
+    // Held in a Vec so the borrowed slices below outlive the call.
+    let pixel_buffers: Vec<Vec<u8>> = assets
+        .iter()
+        .map(|value| Uint8Array::new(&value).to_vec())
+        .collect();
+
+    let assets: Vec<operations::stamp::ImageAsset> = pixel_buffers
+        .iter()
+        .zip(meta.iter())
+        .map(|(pixels, meta)| operations::stamp::ImageAsset {
+            pixels,
+            width: meta.width,
+            height: meta.height,
+        })
+        .collect();
+
+    let annotations: Vec<operations::stamp::Annotation> = parse_options(annotations)?;
+
     let mut doc = load(&file.to_vec())?;
-    let placement: operations::stamp::StampPlacement = parse_options(placement)?;
-    operations::stamp::stamp_image(&mut doc, page, &pixels.to_vec(), width, height, placement)?;
+    operations::stamp::annotate(&mut doc, &assets, &annotations)?;
     Ok(save(&mut doc)?)
 }
 

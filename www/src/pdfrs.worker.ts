@@ -2,6 +2,7 @@
 // merging, rasterizing...) happens here, so the page's UI never freezes while
 // it's in progress - see pdfrs-worker-client.ts for the main-thread side.
 import init, {
+  annotate_pdf,
   compose_pdf,
   decrypt_pdf,
   encrypt_pdf,
@@ -10,7 +11,6 @@ import init, {
   read_metadata,
   rotate_pages,
   split_pdf,
-  stamp_image,
   write_metadata,
 } from "pdfrs";
 import { collectTransferables, type WorkerInitMessage, type WorkerRequest, type WorkerResponse } from "./worker-protocol";
@@ -22,6 +22,7 @@ import { collectTransferables, type WorkerInitMessage, type WorkerRequest, type 
 // time one of those two is actually requested - see docs/development.md for
 // the core/full wasm-pack build split this enables.
 const coreMethods = {
+  annotate_pdf,
   compose_pdf,
   decrypt_pdf,
   encrypt_pdf,
@@ -30,7 +31,6 @@ const coreMethods = {
   read_metadata,
   rotate_pages,
   split_pdf,
-  stamp_image,
   write_metadata,
 } as const satisfies Record<string, (...args: never[]) => Promise<unknown>>;
 

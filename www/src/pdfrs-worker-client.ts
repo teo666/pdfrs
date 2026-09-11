@@ -51,21 +51,35 @@ export function compose_pdf(sources: Uint8Array[], layout: unknown): Promise<Uin
   return call("compose_pdf", [sources, layout]);
 }
 
+/** One thing drawn on one page; `asset` indexes into the `assets` array passed alongside. */
+export interface Annotation {
+  page: number;
+  /** Fractions (0..1) of the page as displayed, origin top-left. */
+  x: number;
+  y: number;
+  width: number;
+  kind: "image";
+  asset: number;
+}
+
 /**
- * Draws an image onto one page. `pixels` is raw RGBA8 and is passed as a
- * top-level argument on purpose: `collectTransferables` recurses into arrays
- * but not into objects, so a buffer tucked inside an options object would be
- * copied instead of transferred - and a signature is megabytes of pixels.
+ * Draws images onto pages, all in one pass.
+ *
+ * The pixel buffers travel as a top-level array of `Uint8Array` rather than
+ * inside objects on purpose: `collectTransferables` recurses into arrays but
+ * not into objects, so buffers nested in an options object would be copied
+ * instead of transferred - a copy per image, of megabytes each.
+ *
+ * Note that transferring **neuters** the caller's buffers, so pass copies if
+ * you intend to keep using them.
  */
-export function stamp_image(
+export function annotate_pdf(
   file: Uint8Array,
-  page: number,
-  pixels: Uint8Array,
-  width: number,
-  height: number,
-  placement: { x: number; y: number; width: number },
+  assets: Uint8Array[],
+  assetsMeta: { width: number; height: number }[],
+  annotations: Annotation[],
 ): Promise<Uint8Array> {
-  return call("stamp_image", [file, page, pixels, width, height, placement]);
+  return call("annotate_pdf", [file, assets, assetsMeta, annotations]);
 }
 
 /** Reads the `/Info` metadata. Only the keys actually present come back, so a document without metadata reads as `{}`. */
