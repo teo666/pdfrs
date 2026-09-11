@@ -95,6 +95,18 @@ pub fn annotate(doc: &mut Document, assets: &[ImageAsset], annotations: &[Annota
 
         let mut content = doc.get_and_decode_page_content(page_id)?;
 
+        // Wrap whatever was already on the page in its own q/Q before adding
+        // anything. A page's content stream is not required to leave the
+        // graphics state as it found it, and plenty of real PDFs end with a
+        // transform still in effect - `1 0 0 -1 0 H cm`, the flip that lets a
+        // generator work with y growing downwards, is the common one. Without
+        // this, our matrix composes with that leftover and the image comes out
+        // mirrored, rotated or somewhere else entirely. Our own q/Q around
+        // each annotation isn't enough: it restores the state to whatever was
+        // current when we started, not to the identity.
+        content.operations.insert(0, Operation::new("q", vec![]));
+        content.operations.push(Operation::new("Q", vec![]));
+
         for annotation in grouped {
             let AnnotationKind::Image { asset } = annotation.kind;
             let image = assets[asset];
@@ -742,7 +754,9 @@ mod tests {
         .unwrap();
 
         let after = doc.get_and_decode_page_content(page_id).unwrap().operations.len();
-        assert_eq!(after, before + 12, "q/cm/Do/Q for each of the three annotations");
+        // q/cm/Do/Q for each of the three annotations, plus the q/Q that
+        // brackets the page's original content.
+        assert_eq!(after, before + 14);
         // One stream, not three: /Contents stayed a single reference.
         assert_eq!(doc.get_page_contents(page_id).len(), 1);
     }
@@ -756,8 +770,8 @@ mod tests {
         stamp(&mut doc, 1).unwrap();
 
         let after = doc.get_and_decode_page_content(page_id).unwrap().operations.len();
-        // q + cm + Do + Q on top of whatever was there.
-        assert_eq!(after, before + 4);
+        // q + cm + Do + Q for the stamp, plus the q/Q bracketing the original.
+        assert_eq!(after, before + 6);
     }
 }
 
@@ -921,6 +935,134 @@ mod render_tests {
 
         assert!(x > 0.6, "expected the stamp on the right, centroid x was {}", x);
         assert!(y > 0.6, "expected the stamp near the bottom, centroid y was {}", y);
+    }
+
+    /// An unmistakably asymmetric image: a red band across the TOP and a blue
+    /// band down the LEFT, transparent elsewhere. A solid square can't tell a
+    /// correctly drawn stamp from a flipped or mirrored one - which is how an
+    /// orientation bug would slip through.
+    fn marker_image() -> Vec<u8> {
+        let (width, height) = (40usize, 40usize);
+        let mut pixels = Vec::with_capacity(width * height * 4);
+        for y in 0..height {
+            for x in 0..width {
+                if y < height / 4 {
+                    pixels.extend_from_slice(&[220, 30, 30, 255]); // rosso in alto
+                } else if x < width / 4 {
+                    pixels.extend_from_slice(&[30, 60, 220, 255]); // blu a sinistra
+                } else {
+                    pixels.extend_from_slice(&[0, 0, 0, 0]);
+                }
+            }
+        }
+        pixels
+    }
+
+    /// Renders the marker at `placement` on a page rotated by `rotation`, and
+    /// reports where the red and blue bands ended up, as fractions of the
+    /// displayed page.
+    fn marker_bands(rotation: i64, placement: Annotation) -> ((f64, f64), (f64, f64)) {
+        let mut doc = multi_page_document(1);
+        if rotation != 0 {
+            let page_id = *doc.get_pages().get(&1).unwrap();
+            doc.get_object_mut(page_id)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Rotate", rotation);
+        }
+
+        let pixels = marker_image();
+        annotate(&mut doc, &[ImageAsset { pixels: &pixels, width: 40, height: 40 }], &[placement]).unwrap();
+
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        let png = render_page_preview(&bytes, 1, 0.5).unwrap();
+
+        let red = colour_centroid(&png, |r, g, b| r > 150 && g < 90 && b < 90);
+        let blue = colour_centroid(&png, |r, g, b| b > 150 && r < 90 && g < 120);
+        (red, blue)
+    }
+
+    /// The bands must keep their arrangement - red above blue, blue left of
+    /// red - whatever the page's /Rotate, because the stamp is placed in the
+    /// coordinates the user sees.
+    #[test]
+    fn the_image_is_not_flipped_or_mirrored_on_any_rotation() {
+        for rotation in [0, 90, 180, 270] {
+            let ((red_x, red_y), (blue_x, blue_y)) = marker_bands(rotation, at(1, 0.2, 0.2, 0.4, 0));
+
+            assert!(
+                red_y < blue_y,
+                "/Rotate {}: the red band should sit above the blue one (red y={}, blue y={})",
+                rotation,
+                red_y,
+                blue_y
+            );
+            assert!(
+                blue_x < red_x,
+                "/Rotate {}: the blue band should sit left of the red one's centre (blue x={}, red x={})",
+                rotation,
+                blue_x,
+                red_x
+            );
+        }
+    }
+
+    /// A page whose content stream ends with the graphics state still
+    /// transformed - the `1 0 0 -1 0 H cm` flip that many generators use to
+    /// work with y growing downwards, left unbalanced. The annotation must
+    /// come out the same as on a clean page.
+    #[test]
+    fn survives_a_page_that_leaves_a_transform_in_effect() {
+        fn with_dirty_state(dirty: bool) -> ((f64, f64), (f64, f64)) {
+            let mut doc = multi_page_document(1);
+
+            if dirty {
+                let page_id = *doc.get_pages().get(&1).unwrap();
+                let mut content = doc.get_and_decode_page_content(page_id).unwrap();
+                // Flip vertically and never restore it.
+                content.operations.push(Operation::new(
+                    "cm",
+                    vec![1.into(), 0.into(), 0.into(), (-1).into(), 0.into(), 842.into()],
+                ));
+                let encoded = content.encode().unwrap();
+                doc.change_page_content(page_id, encoded).unwrap();
+            }
+
+            let pixels = marker_image();
+            annotate(
+                &mut doc,
+                &[ImageAsset { pixels: &pixels, width: 40, height: 40 }],
+                &[at(1, 0.2, 0.2, 0.4, 0)],
+            )
+            .unwrap();
+
+            let mut bytes = Vec::new();
+            doc.save_to(&mut bytes).unwrap();
+            let png = render_page_preview(&bytes, 1, 0.5).unwrap();
+            (
+                colour_centroid(&png, |r, g, b| r > 150 && g < 90 && b < 90),
+                colour_centroid(&png, |r, g, b| b > 150 && r < 90 && g < 120),
+            )
+        }
+
+        let clean = with_dirty_state(false);
+        let dirty = with_dirty_state(true);
+
+        // Same place, same way up, whatever the page left behind.
+        assert!(
+            (clean.0.0 - dirty.0.0).abs() < 0.01 && (clean.0.1 - dirty.0.1).abs() < 0.01,
+            "red band moved: clean {:?} vs dirty {:?}",
+            clean.0,
+            dirty.0
+        );
+        assert!(
+            (clean.1.0 - dirty.1.0).abs() < 0.01 && (clean.1.1 - dirty.1.1).abs() < 0.01,
+            "blue band moved: clean {:?} vs dirty {:?}",
+            clean.1,
+            dirty.1
+        );
     }
 
     #[test]

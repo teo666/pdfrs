@@ -401,6 +401,18 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
     }
   }
 
+  /** Positions one existing box from its placement, without rebuilding it. */
+  function styleBox(box: HTMLElement, placement: Placement): void {
+    const stageWidth = pageImg.clientWidth;
+    const stageHeight = pageImg.clientHeight;
+    if (stageWidth === 0 || stageHeight === 0) return;
+    const widthPx = placement.width * stageWidth;
+    box.style.left = `${placement.x * 100}%`;
+    box.style.top = `${placement.y * 100}%`;
+    box.style.width = `${placement.width * 100}%`;
+    box.style.height = `${((widthPx * aspectRatio(placement.assetId)) / stageHeight) * 100}%`;
+  }
+
   /** Rebuilds the boxes for the current page. Cheap enough to redo wholesale on every change. */
   function renderPlacements(): void {
     for (const box of Array.from(stage.querySelectorAll(".annota-box"))) box.remove();
@@ -421,11 +433,7 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
       // Keeps the browser's native drag (used by the palette) from starting here.
       box.draggable = false;
 
-      const widthPx = placement.width * stageWidth;
-      box.style.left = `${placement.x * 100}%`;
-      box.style.top = `${placement.y * 100}%`;
-      box.style.width = `${placement.width * 100}%`;
-      box.style.height = `${((widthPx * aspectRatio(placement.assetId)) / stageHeight) * 100}%`;
+      styleBox(box, placement);
 
       const img = document.createElement("img");
       img.src = asset.objectUrl;
@@ -447,14 +455,35 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
     syncToolbar();
   }
 
+  /**
+   * Same as `select`, but only flips the CSS classes instead of rebuilding
+   * the boxes. Used when a gesture is starting: rebuilding would detach the
+   * very element the pointer was captured on, and the drag would never get
+   * going.
+   */
+  function selectInPlace(id: number | null): void {
+    selectedId = id;
+    for (const box of Array.from(stage.querySelectorAll<HTMLElement>(".annota-box"))) {
+      box.classList.toggle("selected", Number(box.dataset.id) === id);
+    }
+    syncToolbar();
+  }
+
   /** One pointer gesture at a time: moving a box, or resizing it from its corner. */
   function startGesture(event: PointerEvent, placementId: number, mode: "move" | "resize"): void {
     event.preventDefault();
     event.stopPropagation();
-    select(placementId);
+    selectInPlace(placementId);
 
     const placement = placements.find((item) => item.id === placementId);
     if (!placement) return;
+
+    const target = event.currentTarget as HTMLElement;
+    // The box being dragged, which must stay in the DOM for the whole
+    // gesture: re-rendering the boxes mid-drag would detach the very element
+    // holding the pointer capture, so the drag would die after a few pixels
+    // (and the next setPointerCapture would throw InvalidStateError).
+    const box = target.closest(".annota-box") as HTMLElement | null;
 
     const stageWidth = pageImg.clientWidth;
     const stageHeight = pageImg.clientHeight;
@@ -462,7 +491,6 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
     const startY = event.clientY;
     const start = { ...placement };
     const ratio = aspectRatio(placement.assetId);
-    const target = event.currentTarget as HTMLElement;
     target.setPointerCapture(event.pointerId);
 
     const onMove = (move: PointerEvent) => {
@@ -479,17 +507,25 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
         // Don't let the corner drag push the box off the bottom edge.
         if (start.y + heightFraction <= 1) placement.width = width;
       }
-      renderPlacements();
+      // Restyle in place - see the comment on `box` above.
+      if (box) styleBox(box, placement);
     };
 
     const onUp = () => {
-      target.releasePointerCapture(event.pointerId);
+      // The capture may already be gone if the element was replaced anyway.
+      try {
+        target.releasePointerCapture(event.pointerId);
+      } catch {
+        // nothing to release
+      }
       target.removeEventListener("pointermove", onMove);
       target.removeEventListener("pointerup", onUp);
+      target.removeEventListener("pointercancel", onUp);
     };
 
     target.addEventListener("pointermove", onMove);
     target.addEventListener("pointerup", onUp);
+    target.addEventListener("pointercancel", onUp);
   }
 
   /**
