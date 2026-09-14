@@ -18,6 +18,15 @@ wasm-pack build --target web --out-dir pkg-full
 
 Vedi docs/architecture.md ("Build \"core\" e \"full\"") per il perché dello split: entrambe le feature `preview`/`image-import` sono nel `default`, quindi vanno esplicitamente disattivate per ottenere il binario piccolo - un `wasm-pack build --target web` senza flag produce comunque il binario "full" completo.
 
+Per compilare entrambe le varianti, aggiornare i pacchetti locali e avviare subito la demo con Vite basta un solo comando:
+
+```bash
+cd www
+pnpm run demo
+```
+
+Il comando si ferma immediatamente se una build o `pnpm install` fallisce; `pnpm dev` viene eseguito soltanto al termine delle fasi precedenti.
+
 `wasm-pack test --headless --firefox` (o `--chrome`) esegue i test in `tests/web.rs` in un vero browser, ma richiede `geckodriver`/`chromedriver` installati — non presenti in tutti gli ambienti di sviluppo. (Nota: la funzione di start del crate si chiama `start`, non `main`, proprio perché wasm-bindgen rifiuta di linkare l'harness di test quando entrambi esportano un `main` — "the name `main` is exported by multiple crates in this build".) Se disponibili, è il modo per validare i binding `#[wasm_bindgen]` end-to-end lato Rust; altrimenti la pagina di test in `www/` (sotto) copre lo stesso confine JS↔wasm.
 
 ### Fixture PDF (e JPEG)
@@ -107,7 +116,7 @@ Failed to execute 'postMessage' on 'Worker': An ArrayBuffer is detached and coul
 
 Se in futuro serve ottimizzare per PDF di ingresso molto grandi, la via corretta **non** è tornare al transfer diretto degli argomenti, ma clonare il buffer lato chiamante prima di trasferirlo quando sai che ti servirà ancora (`bytes.slice()` crea una copia indipendente da passare in transfer, lasciando l'originale intatto) — così si guadagna la velocità dello zero-copy senza il rischio del detach a sorpresa.
 
-**Importante**: dopo ogni `wasm-pack build`, rilancia anche `pnpm install` dentro `www/`. A differenza di npm, **pnpm non fa un vero symlink live** per le dipendenze `file:` — ne clona un contenuto in `node_modules/.pnpm/` al momento dell'`install`, e quel contenuto non si aggiorna da solo quando `pkg/` cambia sul disco. Se te ne dimentichi, il frontend continua a chiamare funzioni vecchie/mancanti (es. `wasm.page_count is not a function`) o serializza opzioni in un formato che l'API attuale non si aspetta più, con errori che sembrano bug nel codice Rust ma sono solo un pacchetto stantio.
+**Importante**: dopo ogni `wasm-pack build`, rilancia anche `pnpm install` dentro `www/`. A differenza di npm, **pnpm non fa un vero symlink live** per le dipendenze `file:` — ne clona un contenuto in `node_modules/.pnpm/` al momento dell'`install`, e quel contenuto non si aggiorna da solo quando `pkg/` cambia sul disco. Se te ne dimentichi, il frontend continua a chiamare funzioni vecchie/mancanti (es. `wasm.page_count is not a function`) o serializza opzioni in un formato che l'API attuale non si aspetta più. Il frontend risolve sia il wrapper JS sia il relativo `.wasm` dalla stessa copia installata, quindi rimangono compatibili anche quando quella copia è stantia; `pnpm install` resta comunque necessario perché l'app veda l'API appena compilata.
 
 ```bash
 cd www

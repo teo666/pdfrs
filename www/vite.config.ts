@@ -2,7 +2,11 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   optimizeDeps: {
-    exclude: ["pdfrs"],
+    // These local wasm-pack packages must stay paired with their respective
+    // .wasm assets. A cached optimized copy of the generated JS glue can be
+    // incompatible with a freshly rebuilt binary because wasm-bindgen hashes
+    // its import names.
+    exclude: ["pdfrs", "pdfrs-full"],
   },
   server: {
     // The "pdfrs" package resolves to ../pkg (see package.json), outside this
