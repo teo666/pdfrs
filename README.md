@@ -24,8 +24,10 @@ cargo test
 
 # pagina di test TypeScript per provare le API a mano nel browser
 cd www
-pnpm install
-pnpm dev          # http://localhost:5173
+pnpm run demo     # build core + full, pnpm install, avvio su http://localhost:5173
+
+# oppure, se le build WASM e le dipendenze sono già aggiornate
+pnpm dev
 pnpm test:e2e     # smoke test end-to-end automatico (Playwright)
 pnpm test:model   # test del modello logico PdfDocument/PdfEditor (src/pdf-model/)
 pnpm test:editor  # test dell'editor visivo Web Components (tab "Editor", src/webcomponents/)

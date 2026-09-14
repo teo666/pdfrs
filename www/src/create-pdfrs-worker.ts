@@ -4,12 +4,16 @@
 // from compiling the (multi-MB) wasm binary exactly once instead of each
 // doing its own fetch + compile.
 import type { WorkerInitMessage } from "./worker-protocol";
+import wasmUrl from "pdfrs/pdfrs_bg.wasm?url";
 
-// Wasm-bindgen's own `init()` would resolve to this same URL internally if
-// left to fetch the binary itself - this couples us to the `<crate name>_bg.wasm`
-// naming convention, but that name comes directly from our own Cargo.toml,
-// so it's a coupling we control.
-const WASM_URL = new URL("../../pkg/pdfrs_bg.wasm", import.meta.url);
+// Resolve the binary through the same installed package as the generated JS
+// glue imported by `pdfrs.worker.ts`. Pointing straight at ../../pkg is
+// unsafe with pnpm's `file:` dependencies: after a wasm-pack rebuild, pkg/
+// can contain a new binary while node_modules still contains the old glue.
+// Wasm-bindgen import names include hashes, so mixing those two generations
+// fails at instantiation with errors such as
+// "import object field '__wbg_instanceof_Map_...' is not a Function".
+const WASM_URL = new URL(wasmUrl, import.meta.url);
 
 let compiledModule: Promise<WebAssembly.Module> | null = null;
 
