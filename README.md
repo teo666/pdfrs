@@ -19,6 +19,10 @@ wasm-pack build --target web --out-dir pkg --no-default-features --features cons
 # build "full" (tutto, incluse preview/import immagini, ~4.3MB, in pkg-full/)
 wasm-pack build --target web --out-dir pkg-full
 
+# assembla il pacchetto npm unico (pkg-npm/), con "pdfrs/core" e "pdfrs/full"
+# come subpath export separati - vedi docs/development.md
+./scripts/build-npm-package.sh
+
 # test Rust nativi (funzioni pure, senza wasm)
 cargo test
 

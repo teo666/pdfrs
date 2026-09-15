@@ -3,6 +3,9 @@ name = "pdfrs"
 version = "0.1.0"
 authors = ["Teo Basili <teo.basili@movesolutions.it>"]
 edition = "2018"
+description = "Motore di manipolazione PDF in Rust/WebAssembly: merge, split, rotazione, composizione, cifratura AES-256 e preview delle pagine."
+repository = "https://github.com/teo666/pdfrs"
+license = "MIT OR Apache-2.0"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
