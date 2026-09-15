@@ -92,7 +92,7 @@ try {
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
 
-    const { chromium } = await import("../../../www/node_modules/playwright/index.mjs");
+    const { chromium } = await import("playwright");
     const browser = await chromium.launch();
     try {
       const page = await browser.newPage();

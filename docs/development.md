@@ -40,6 +40,29 @@ pnpm run pack:check    # mostra esattamente i file destinati a npm
 
 Il pacchetto npm è unico (`pdfrs`) e contiene la build WASM completa. Lo split core/full resta un'ottimizzazione specifica della demo e non fa parte del contratto pubblico della libreria.
 
+### Release npm
+
+La prima release è intenzionalmente manuale: dopo il merge della PR di packaging, pubblica `0.1.0` e crea il tag che semantic-release userà come baseline:
+
+```bash
+cd packages/pdfrs
+npm publish
+cd ../..
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Dopo che `pdfrs@0.1.0` esiste, nelle impostazioni del pacchetto su npm configura un **Trusted Publisher → GitHub Actions** con:
+
+- organization/user: `teo666`
+- repository: `pdfrs`
+- workflow filename: `release.yml`
+- allowed action: `npm publish`
+
+Da quel momento `.github/workflows/release.yml` esegue semantic-release a ogni push su `main`, autenticandosi tramite OIDC senza `NPM_TOKEN` e generando automaticamente la provenance npm. La pipeline resta innocua prima del bootstrap: se non trova alcun tag release, termina senza pubblicare.
+
+Le versioni derivano dai Conventional Commits: `fix:` pubblica una patch, `feat:` una minor e `BREAKING CHANGE:` (o `feat!:`/`fix!:`) una major; commit `docs:`, `test:`, `ci:` e `chore:` da soli non producono una release. Se si usa squash merge, il titolo della PR deve quindi essere conventional.
+
 `wasm-pack test --headless --firefox` (o `--chrome`) esegue i test in `tests/web.rs` in un vero browser, ma richiede `geckodriver`/`chromedriver` installati — non presenti in tutti gli ambienti di sviluppo. (Nota: la funzione di start del crate si chiama `start`, non `main`, proprio perché wasm-bindgen rifiuta di linkare l'harness di test quando entrambi esportano un `main` — "the name `main` is exported by multiple crates in this build".) Se disponibili, è il modo per validare i binding `#[wasm_bindgen]` end-to-end lato Rust; altrimenti la pagina di test in `www/` (sotto) copre lo stesso confine JS↔wasm.
 
 ### Fixture PDF (e JPEG)
