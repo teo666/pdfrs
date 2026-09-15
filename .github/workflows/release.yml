@@ -1,0 +1,79 @@
+name: Release npm package
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: npm-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  release:
+    if: github.repository == 'teo666/pdfrs'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the complete history
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check whether the initial release exists
+        id: bootstrap
+        shell: bash
+        run: |
+          if git tag --list 'v[0-9]*' | grep -q .; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No release tag exists yet; publish and tag v0.1.0 manually first."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Node.js
+        if: steps.bootstrap.outputs.ready == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Set up pnpm
+        if: steps.bootstrap.outputs.ready == 'true'
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.33.2
+
+      - name: Set up Rust and WebAssembly target
+        if: steps.bootstrap.outputs.ready == 'true'
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        if: steps.bootstrap.outputs.ready == 'true'
+        run: cargo install wasm-pack --locked --version 0.15.0
+
+      - name: Build the private WASM input
+        if: steps.bootstrap.outputs.ready == 'true'
+        run: wasm-pack build --target web --out-dir pkg-full
+
+      - name: Install release dependencies
+        if: steps.bootstrap.outputs.ready == 'true'
+        working-directory: packages/pdfrs
+        run: pnpm install --frozen-lockfile
+
+      - name: Use an npm CLI with Trusted Publishing support
+        if: steps.bootstrap.outputs.ready == 'true'
+        run: npm install --global npm@11
+
+      - name: Release
+        if: steps.bootstrap.outputs.ready == 'true'
+        working-directory: packages/pdfrs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm exec semantic-release

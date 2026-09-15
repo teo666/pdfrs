@@ -13,7 +13,7 @@ import init, {
   split_pdf,
   write_metadata,
 } from "pdfrs";
-import { collectTransferables, type WorkerInitMessage, type WorkerRequest, type WorkerResponse } from "./worker-protocol";
+import { collectTransferables, type WorkerInitMessage, type WorkerRequest, type WorkerResponse } from "./worker-protocol.js";
 
 // Only the "core" build's functions - merge/split/rotate/compose/encrypt/
 // decrypt/page_count - are imported statically from "pdfrs". The "full"

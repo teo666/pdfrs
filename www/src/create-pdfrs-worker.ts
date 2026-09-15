@@ -3,7 +3,7 @@
 // preview-worker-pool.ts - is created through here, so all of them benefit
 // from compiling the (multi-MB) wasm binary exactly once instead of each
 // doing its own fetch + compile.
-import type { WorkerInitMessage } from "./worker-protocol";
+import type { WorkerInitMessage } from "./worker-protocol.js";
 import wasmUrl from "pdfrs/pdfrs_bg.wasm?url";
 
 // Resolve the binary through the same installed package as the generated JS

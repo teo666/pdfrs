@@ -4,6 +4,16 @@ Motore di manipolazione PDF scritto in Rust, compilato in WebAssembly, pensato p
 
 Operazioni disponibili: **merge**, **split**, **rotazione pagine**, **composizione** (riordino/interleaving di pagine tra più documenti), **cifratura/decifratura** (AES-256), **preview** (rendering di una pagina in PNG, per mostrare una thumbnail per pagina nel frontend).
 
+## Libreria TypeScript
+
+Il pacchetto browser pubblicabile vive in `packages/pdfrs/` ed espone `PdfDocument`, `PdfEditor`, i tipi pubblici e le operazioni PDF in camelCase. La demo in `www/` è un consumatore separato e non viene inclusa nel pacchetto npm.
+
+```bash
+cd packages/pdfrs
+pnpm run build
+pnpm run test:package
+```
+
 Documentazione completa in [`docs/`](docs/):
 
 - [`docs/architecture.md`](docs/architecture.md) — perché `lopdf` e `hayro`, struttura del progetto, scelte tecniche per wasm
@@ -41,6 +51,7 @@ tests/          # test wasm-bindgen-test + fixture PDF condivise
 examples/       # gen_fixtures.rs rigenera i PDF di test in tests/fixtures/
 pkg/            # build "core" (generato, non versionato - vedi docs/architecture.md)
 pkg-full/       # build "full" (generato, non versionato - vedi docs/architecture.md)
+packages/pdfrs/ # libreria TypeScript pubblicabile su npm
 www/            # pagina di test TypeScript puro per le API esposte (vedi docs/development.md)
 docs/           # documentazione del progetto
 ```

@@ -2,16 +2,16 @@
 // signatures as the "pdfrs" wasm package, but every call is a postMessage
 // round-trip to the worker instead of a direct call, wrapped back into a
 // Promise so call sites don't need to know a worker is involved at all.
-import { createPdfrsWorker } from "./create-pdfrs-worker";
-import type { ImagePageOptions } from "./pdf-model/types";
-import type { WorkerRequest, WorkerResponse } from "./worker-protocol";
+import { createPdfrsWorker } from "./create-pdfrs-worker.js";
+import type { ImagePageOptions } from "./pdf-model/types.js";
+import type { WorkerRequest, WorkerResponse } from "./worker-protocol.js";
 
-const worker = createPdfrsWorker();
+let worker: Worker | null = null;
 
 let nextId = 1;
 const pending = new Map<number, { resolve: (value: unknown) => void; reject: (err: Error) => void }>();
 
-worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+function handleMessage(event: MessageEvent<WorkerResponse>): void {
   const response = event.data;
   const entry = pending.get(response.id);
   if (!entry) return; // stale/unknown response id, ignore
@@ -19,7 +19,15 @@ worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
 
   if (response.ok) entry.resolve(response.result);
   else entry.reject(new Error(response.error));
-};
+}
+
+function getWorker(): Worker {
+  if (!worker) {
+    worker = createPdfrsWorker();
+    worker.onmessage = handleMessage;
+  }
+  return worker;
+}
 
 function call<T>(method: string, args: unknown[]): Promise<T> {
   const id = nextId++;
@@ -31,7 +39,7 @@ function call<T>(method: string, args: unknown[]): Promise<T> {
     // (e.g. the Preview panel calls page_count then render_page_preview once
     // per page, all with the same bytes) - transferring would detach it
     // after the first call and break every call after that.
-    worker.postMessage(request);
+    getWorker().postMessage(request);
   });
 }
 

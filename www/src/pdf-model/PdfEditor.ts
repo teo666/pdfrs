@@ -1,6 +1,6 @@
-import { merge_pdfs, split_pdf } from "../pdfrs-worker-client";
-import { PdfDocument } from "./PdfDocument";
-import type { DocumentId, ImagePageOptions } from "./types";
+import { merge_pdfs, split_pdf } from "../pdfrs-worker-client.js";
+import { PdfDocument } from "./PdfDocument.js";
+import type { DocumentId, ImagePageOptions } from "./types.js";
 
 /**
  * Manages a collection of `PdfDocument`s and the operations that span more
