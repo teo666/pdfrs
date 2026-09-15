@@ -27,6 +27,19 @@ pnpm run demo
 
 Il comando si ferma immediatamente se una build o `pnpm install` fallisce; `pnpm dev` viene eseguito soltanto al termine delle fasi precedenti.
 
+## Pacchetto TypeScript per npm
+
+`packages/pdfrs/` è il pacchetto pubblico; `www/` resta esclusivamente una demo e una suite end-to-end. La build del pacchetto genera la variante WASM completa, incorpora il codice TypeScript e il Worker, produce le dichiarazioni `.d.ts` e copia le due licenze dentro `dist/`:
+
+```bash
+cd packages/pdfrs
+pnpm run build
+pnpm run test:package  # installa il tarball in un consumer temporaneo e lo compila
+pnpm run pack:check    # mostra esattamente i file destinati a npm
+```
+
+Il pacchetto npm è unico (`pdfrs`) e contiene la build WASM completa. Lo split core/full resta un'ottimizzazione specifica della demo e non fa parte del contratto pubblico della libreria.
+
 `wasm-pack test --headless --firefox` (o `--chrome`) esegue i test in `tests/web.rs` in un vero browser, ma richiede `geckodriver`/`chromedriver` installati — non presenti in tutti gli ambienti di sviluppo. (Nota: la funzione di start del crate si chiama `start`, non `main`, proprio perché wasm-bindgen rifiuta di linkare l'harness di test quando entrambi esportano un `main` — "the name `main` is exported by multiple crates in this build".) Se disponibili, è il modo per validare i binding `#[wasm_bindgen]` end-to-end lato Rust; altrimenti la pagina di test in `www/` (sotto) copre lo stesso confine JS↔wasm.
 
 ### Fixture PDF (e JPEG)

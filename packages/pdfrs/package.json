@@ -1,0 +1,50 @@
+{
+  "name": "pdfrs",
+  "version": "0.1.0",
+  "description": "Browser-first TypeScript library for editing, composing, encrypting and rendering PDFs with WebAssembly.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/types/library.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/library.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "pack:check": "npm pack --dry-run",
+    "test:package": "node scripts/test-package.mjs",
+    "prepack": "node scripts/build.mjs"
+  },
+  "keywords": [
+    "pdf",
+    "typescript",
+    "webassembly",
+    "wasm",
+    "browser"
+  ],
+  "author": "Teo Basili <teo.basili@movesolutions.it>",
+  "license": "(MIT OR Apache-2.0)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/teo666/pdfrs.git"
+  },
+  "homepage": "https://github.com/teo666/pdfrs#readme",
+  "bugs": {
+    "url": "https://github.com/teo666/pdfrs/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": true,
+  "devDependencies": {
+    "pdfrs-wasm": "file:../../pkg-full",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2"
+  }
+}

@@ -8,8 +8,8 @@
 // second call pays no worker/wasm startup cost if the pool is already warm -
 // unlike an earlier version of this file, which spun up and `terminate()`d a
 // fresh set of workers on every single call.
-import { createPdfrsWorker } from "./create-pdfrs-worker";
-import type { WorkerRequest, WorkerResponse } from "./worker-protocol";
+import { createPdfrsWorker } from "./create-pdfrs-worker.js";
+import type { WorkerRequest, WorkerResponse } from "./worker-protocol.js";
 
 declare global {
   interface Window {

@@ -8,8 +8,8 @@ import {
   render_page_preview,
   rotate_pages,
   write_metadata,
-} from "../pdfrs-worker-client";
-import { renderPagesInParallel } from "../preview-worker-pool";
+} from "../pdfrs-worker-client.js";
+import { renderPagesInParallel } from "../preview-worker-pool.js";
 import type {
   HistoryEntry,
   ImagePageOptions,
@@ -20,7 +20,7 @@ import type {
   PagePreview,
   PageRange,
   PdfMetadata,
-} from "./types";
+} from "./types.js";
 
 export interface GetPreviewsOptions {
   /** 1-indexed, inclusive window over the current *display order* (positions, not original page ids). Defaults to the whole document - set it to render only a window of a large document. */
