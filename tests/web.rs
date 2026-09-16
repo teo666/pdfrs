@@ -511,3 +511,45 @@ async fn annotate_pdf_rejects_a_rotation_that_is_not_a_number() {
     .await;
     assert!(result.is_err(), "a NaN rotation should be rejected");
 }
+
+#[wasm_bindgen_test]
+async fn nup_pdf_2up_produces_two_pages_from_four() {
+    let options = Object::new();
+    Reflect::set(&options, &JsValue::from_str("layout"), &JsValue::from(2u32)).unwrap();
+    Reflect::set(&options, &JsValue::from_str("pageSize"), &JsValue::from_str("a4")).unwrap();
+
+    let result = pdfrs::nup_pdf(bytes(FOUR_PAGES), options.into())
+        .await
+        .expect("nup_pdf should succeed");
+
+    assert_eq!(expected_page_count(&result), 2);
+}
+
+#[wasm_bindgen_test]
+async fn nup_pdf_4up_produces_one_page_from_four() {
+    let options = Object::new();
+    Reflect::set(&options, &JsValue::from_str("layout"), &JsValue::from(4u32)).unwrap();
+    Reflect::set(&options, &JsValue::from_str("pageSize"), &JsValue::from_str("a4")).unwrap();
+    Reflect::set(&options, &JsValue::from_str("drawBorders"), &JsValue::from(true)).unwrap();
+
+    let result = pdfrs::nup_pdf(bytes(FOUR_PAGES), options.into())
+        .await
+        .expect("nup_pdf 4-up should succeed");
+
+    assert_eq!(expected_page_count(&result), 1);
+}
+
+#[wasm_bindgen_test]
+async fn booklet_pdf_creates_booklet_faces() {
+    let options = Object::new();
+    Reflect::set(&options, &JsValue::from_str("pageSize"), &JsValue::from_str("a4")).unwrap();
+    Reflect::set(&options, &JsValue::from_str("binding"), &JsValue::from_str("left")).unwrap();
+
+    let result = pdfrs::booklet_pdf(bytes(FOUR_PAGES), options.into())
+        .await
+        .expect("booklet_pdf should succeed");
+
+    // 4 pages booklet produces 1 physical sheet = 2 faces (front, back)
+    assert_eq!(expected_page_count(&result), 2);
+}
+

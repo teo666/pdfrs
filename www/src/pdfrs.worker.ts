@@ -3,10 +3,12 @@
 // it's in progress - see pdfrs-worker-client.ts for the main-thread side.
 import init, {
   annotate_pdf,
+  booklet_pdf,
   compose_pdf,
   decrypt_pdf,
   encrypt_pdf,
   merge_pdfs,
+  nup_pdf,
   page_count,
   read_metadata,
   rotate_pages,
@@ -16,17 +18,19 @@ import init, {
 import { collectTransferables, type WorkerInitMessage, type WorkerRequest, type WorkerResponse } from "./worker-protocol";
 
 // Only the "core" build's functions - merge/split/rotate/compose/encrypt/
-// decrypt/page_count - are imported statically from "pdfrs". The "full"
+// decrypt/page_count/nup/booklet - are imported statically from "pdfrs". The "full"
 // build (`render_page_preview`, `image_to_pdf` - the two functions that pull
 // in `hayro`/`image`, ~4MB extra) is loaded lazily below, only the first
 // time one of those two is actually requested - see docs/development.md for
 // the core/full wasm-pack build split this enables.
 const coreMethods = {
   annotate_pdf,
+  booklet_pdf,
   compose_pdf,
   decrypt_pdf,
   encrypt_pdf,
   merge_pdfs,
+  nup_pdf,
   page_count,
   read_metadata,
   rotate_pages,

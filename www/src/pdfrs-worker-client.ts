@@ -113,3 +113,41 @@ export function render_page_preview(file: Uint8Array, page: number, scale: numbe
 export function image_to_pdf(file: Uint8Array, options: ImagePageOptions = {}): Promise<Uint8Array> {
   return call("image_to_pdf", [file, options]);
 }
+
+export type PageSize = "a3" | "a4" | "a5" | "letter" | "legal" | "native";
+export type Orientation = "portrait" | "landscape" | "auto";
+export type FlowDirection = "horizontal" | "vertical";
+
+export interface NUpOptions {
+  pageSize?: PageSize;
+  orientation?: Orientation;
+  layout?: 1 | 2 | 4 | 6 | 8 | 9 | 16 | { rows: number; cols: number };
+  direction?: FlowDirection;
+  margin?: number;
+  spacing?: number;
+  drawBorders?: boolean;
+  autoRotate?: boolean;
+}
+
+export function nup_pdf(file: Uint8Array, options: NUpOptions = {}): Promise<Uint8Array> {
+  return call("nup_pdf", [file, options]);
+}
+
+export type BindingEdge = "left" | "right";
+export type DuplexMode = "bothSides" | "frontOnly" | "backOnly";
+
+export interface BookletOptions {
+  pageSize?: PageSize;
+  orientation?: Orientation;
+  binding?: BindingEdge;
+  duplex?: DuplexMode;
+  margin?: number;
+  gutter?: number;
+  drawBorders?: boolean;
+  drawFoldLine?: boolean;
+  autoRotate?: boolean;
+}
+
+export function booklet_pdf(file: Uint8Array, options: BookletOptions = {}): Promise<Uint8Array> {
+  return call("booklet_pdf", [file, options]);
+}
