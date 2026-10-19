@@ -201,6 +201,36 @@ pub async fn write_metadata(file: Uint8Array, patch: JsValue) -> std::result::Re
     Ok(save(&mut doc)?)
 }
 
+/// Rearranges the pages of a PDF into an N-up layout on newly generated sheets.
+/// `options` is a JS object `{ pageSize?: "a3"|"a4"|"a5"|"letter"|"legal"|"native", orientation?: "portrait"|"landscape"|"auto", layout?: 1|2|4|6|8|9|16|{ rows: number, cols: number }, direction?: "horizontal"|"vertical", margin?: number, spacing?: number, drawBorders?: boolean, autoRotate?: boolean }`
+/// (all fields optional).
+#[wasm_bindgen]
+pub async fn nup_pdf(file: Uint8Array, options: JsValue) -> std::result::Result<Uint8Array, JsValue> {
+    let doc = load(&file.to_vec())?;
+    let options: operations::nup::NUpOptions = if options.is_undefined() || options.is_null() {
+        Default::default()
+    } else {
+        parse_options(options)?
+    };
+    let mut transformed = operations::nup::nup(&doc, options)?;
+    Ok(save(&mut transformed)?)
+}
+
+/// Imposes pages into a saddle-stitched folded booklet (libretto rilegato).
+/// `options` is a JS object `{ pageSize?: "a3"|"a4"|"a5"|"letter"|"legal"|"native", orientation?: "portrait"|"landscape"|"auto", binding?: "left"|"right", duplex?: "bothSides"|"frontOnly"|"backOnly", margin?: number, gutter?: number, drawBorders?: boolean, drawFoldLine?: boolean, autoRotate?: boolean }`
+/// (all fields optional).
+#[wasm_bindgen]
+pub async fn booklet_pdf(file: Uint8Array, options: JsValue) -> std::result::Result<Uint8Array, JsValue> {
+    let doc = load(&file.to_vec())?;
+    let options: operations::booklet::BookletOptions = if options.is_undefined() || options.is_null() {
+        Default::default()
+    } else {
+        parse_options(options)?
+    };
+    let mut transformed = operations::booklet::booklet(&doc, options)?;
+    Ok(save(&mut transformed)?)
+}
+
 /// Renders `page` (1-indexed) of a PDF file to a PNG image, for use as a
 /// browser preview thumbnail. `scale` multiplies the page's native size (e.g.
 /// `1.5` for a sharper-than-1:1 preview). Expects already-decrypted bytes.

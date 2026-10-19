@@ -7,7 +7,7 @@ Prima di chiamarle va inizializzato il modulo wasm una sola volta:
 ```ts
 import init, {
   merge_pdfs, split_pdf, rotate_pages, compose_pdf, encrypt_pdf, decrypt_pdf,
-  page_count, render_page_preview, image_to_pdf,
+  page_count, nup_pdf, booklet_pdf, render_page_preview, image_to_pdf,
 } from "pdfrs";
 
 await init();
@@ -183,6 +183,66 @@ const onA4 = await image_to_pdf(jpegBytes, { pageSize: "a4" });
 
 // combinarla con un PDF vero è già tutto qui, nessuna API nuova
 const combined = await merge_pdfs([imagePdf, otherPdfBytes]);
+```
+
+## `nup_pdf(file: Uint8Array, options?): Promise<Uint8Array>`
+
+Riorganizza le pagine di un documento posizionando più pagine su un singolo foglio (**N-up layout** / *imposizione multipagina*). L'elaborazione è **100% vettoriale** e basata su Form XObjects: il testo rimane selezionabile, la grafica nitida e il peso del file invariato.
+
+`options` (tutti i campi opzionali):
+
+```ts
+interface NUpOptions {
+  pageSize?: "a3" | "a4" | "a5" | "letter" | "legal" | "native"; // default "a4"
+  orientation?: "portrait" | "landscape" | "auto"; // default "auto"
+  layout?: 1 | 2 | 4 | 6 | 8 | 9 | 16 | { rows: number; cols: number }; // default 2 (2-up)
+  direction?: "horizontal" | "vertical"; // default "horizontal" (1 2 / 3 4)
+  margin?: number; // margine esterno in punti PDF (default: 15.0)
+  spacing?: number; // spaziatura tra celle in punti PDF (default: 10.0)
+  drawBorders?: boolean; // disegna bordo sottile attorno a ciascuna miniatura (default: false)
+  autoRotate?: boolean; // auto-ruota a 90° se ottimizza l'area utile (default: true)
+}
+```
+
+```ts
+// 4 pagine per foglio su A4 Portrait con bordi
+const nupPdf = await nup_pdf(bytes, {
+  layout: 4,
+  pageSize: "a4",
+  orientation: "portrait",
+  drawBorders: true,
+});
+```
+
+## `booklet_pdf(file: Uint8Array, options?): Promise<Uint8Array>`
+
+Esegue l'imposizione per la creazione di **libretti rilegati / fascicoli pieghevoli al centro** (*saddle-stitch booklet*).
+Calcola automaticamente la sequenza fascicolata a 2 pagine per facciata (es. per 4 pagine: foglio 1 fronte $[4, 1]$, retro $[2, 3]$) e gestisce il padding a multipli di 4 con pagine bianche.
+
+`options` (tutti i campi opzionali):
+
+```ts
+interface BookletOptions {
+  pageSize?: "a3" | "a4" | "a5" | "letter" | "legal" | "native"; // default "a4" (crea libretto A5)
+  orientation?: "portrait" | "landscape" | "auto"; // default "landscape" (per piega verticale)
+  binding?: "left" | "right"; // default "left" (sinistra->destra occidentale; "right" per manga/RTL)
+  duplex?: "bothSides" | "frontOnly" | "backOnly"; // default "bothSides"
+  margin?: number; // margine esterno in punti PDF (default: 15.0)
+  gutter?: number; // margine centrale di piega in punti PDF (default: 10.0)
+  drawBorders?: boolean; // disegna bordi sottili attorno a ciascuna pagina (default: false)
+  drawFoldLine?: boolean; // disegna linea tratteggiata sulla piega centrale (default: false)
+  autoRotate?: boolean; // default: true
+}
+```
+
+```ts
+// Genera un libretto A5 stampabile su fogli A4 orizzontali fronte/retro
+const bookletPdf = await booklet_pdf(bytes, {
+  pageSize: "a4",
+  orientation: "landscape",
+  binding: "left",
+  drawFoldLine: true,
+});
 ```
 
 ## Gestione errori

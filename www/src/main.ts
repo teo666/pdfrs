@@ -3,16 +3,25 @@
 // work happens off this thread, so the UI never freezes while it runs. The
 // heartbeat counter further down is the visible proof of that.
 import {
+  annotate_pdf,
+  booklet_pdf,
   compose_pdf,
   decrypt_pdf,
   encrypt_pdf,
   merge_pdfs,
+  nup_pdf,
   page_count,
   render_page_preview,
-  annotate_pdf,
   rotate_pages,
   split_pdf,
   type Annotation,
+  type BookletOptions,
+  type NUpOptions,
+  type PageSize,
+  type Orientation,
+  type FlowDirection,
+  type BindingEdge,
+  type DuplexMode,
 } from "./pdfrs-worker-client";
 import { bytesToObjectUrl, downloadBytes, fileToUint8Array, setupFileInput } from "./pdf-io";
 import { parseLayout, parseRanges, parseRotations } from "./parsers";
@@ -314,6 +323,158 @@ function setupSingleFilePanel(prefix: string): { getFile: () => File | null } {
       const decrypted = await decrypt_pdf(bytes, passwordInput.value);
       downloadBytes(decrypted, "decrypted.pdf");
       setStatus(status, "Fatto: decrypted.pdf", "ok");
+    }),
+  );
+}
+
+async function renderResultPreviews(
+  pdfBytes: Uint8Array,
+  gridEl: HTMLElement,
+  progressEl: HTMLProgressElement,
+  _statusEl: HTMLElement,
+  labelPrefix: string,
+) {
+  gridEl.innerHTML = "";
+  const count = await page_count(pdfBytes);
+  const cardImages = new Map<number, HTMLImageElement>();
+  for (let page = 1; page <= count; page++) {
+    const card = document.createElement("div");
+    card.className = "preview-card";
+
+    const img = document.createElement("img");
+    img.alt = `${labelPrefix} ${page}`;
+
+    const label = document.createElement("span");
+    label.textContent = `${labelPrefix} ${page}`;
+
+    card.append(img, label);
+    gridEl.appendChild(card);
+    cardImages.set(page, img);
+  }
+
+  let done = 0;
+  progressEl.value = 0;
+  progressEl.max = count;
+  progressEl.hidden = false;
+
+  const fillCard = (page: number, png: Uint8Array) => {
+    const img = cardImages.get(page);
+    if (img) img.src = bytesToObjectUrl(png, "image/png");
+    done += 1;
+    progressEl.value = done;
+  };
+
+  try {
+    if (count > PARALLEL_PREVIEW_THRESHOLD) {
+      const allPages = Array.from({ length: count }, (_, index) => index + 1);
+      await renderPagesInParallel(pdfBytes, allPages, 0.4, fillCard);
+    } else {
+      for (let page = 1; page <= count; page++) {
+        fillCard(page, await render_page_preview(pdfBytes, page, 0.4));
+      }
+    }
+  } finally {
+    progressEl.hidden = true;
+  }
+}
+
+// --- Multipagina (N-up) ---
+{
+  const status = byId<HTMLElement>("nup-status");
+  const progress = byId<HTMLProgressElement>("nup-progress");
+  const grid = byId<HTMLElement>("nup-preview-grid");
+  const { getFile } = setupSingleFilePanel("nup");
+
+  const layoutSelect = byId<HTMLSelectElement>("nup-layout");
+  const customGrid = byId<HTMLElement>("nup-custom-grid");
+  const colsInput = byId<HTMLInputElement>("nup-cols");
+  const rowsInput = byId<HTMLInputElement>("nup-rows");
+  const pageSizeSelect = byId<HTMLSelectElement>("nup-pagesize");
+  const orientationSelect = byId<HTMLSelectElement>("nup-orientation");
+  const directionSelect = byId<HTMLSelectElement>("nup-direction");
+  const marginInput = byId<HTMLInputElement>("nup-margin");
+  const spacingInput = byId<HTMLInputElement>("nup-spacing");
+  const bordersCheckbox = byId<HTMLInputElement>("nup-borders");
+  const autorotateCheckbox = byId<HTMLInputElement>("nup-autorotate");
+
+  layoutSelect.addEventListener("change", () => {
+    customGrid.hidden = layoutSelect.value !== "custom";
+  });
+
+  byId<HTMLButtonElement>("nup-run").addEventListener("click", () =>
+    runWithStatus(status, async () => {
+      const file = getFile();
+      if (!file) throw new Error("seleziona un PDF");
+
+      const layoutVal = layoutSelect.value;
+      const layout =
+        layoutVal === "custom"
+          ? { rows: Number(rowsInput.value) || 2, cols: Number(colsInput.value) || 2 }
+          : (Number(layoutVal) as 1 | 2 | 4 | 6 | 8 | 9 | 16);
+
+      const options: NUpOptions = {
+        pageSize: pageSizeSelect.value as PageSize,
+        orientation: orientationSelect.value as Orientation,
+        layout,
+        direction: directionSelect.value as FlowDirection,
+        margin: Number(marginInput.value) || 0,
+        spacing: Number(spacingInput.value) || 0,
+        drawBorders: bordersCheckbox.checked,
+        autoRotate: autorotateCheckbox.checked,
+      };
+
+      const bytes = await fileToUint8Array(file);
+      const transformed = await nup_pdf(bytes, options);
+      downloadBytes(transformed, "multipagina.pdf");
+
+      setStatus(status, "Fatto: multipagina.pdf scaricato. Rendering anteprime…", "ok");
+      await renderResultPreviews(transformed, grid, progress, status, "Foglio");
+      setStatus(status, "Fatto: multipagina.pdf generato con successo!", "ok");
+    }),
+  );
+}
+
+// --- Fascicolazione Libretto (Booklet) ---
+{
+  const status = byId<HTMLElement>("booklet-status");
+  const progress = byId<HTMLProgressElement>("booklet-progress");
+  const grid = byId<HTMLElement>("booklet-preview-grid");
+  const { getFile } = setupSingleFilePanel("booklet");
+
+  const pageSizeSelect = byId<HTMLSelectElement>("booklet-pagesize");
+  const orientationSelect = byId<HTMLSelectElement>("booklet-orientation");
+  const bindingSelect = byId<HTMLSelectElement>("booklet-binding");
+  const duplexSelect = byId<HTMLSelectElement>("booklet-duplex");
+  const marginInput = byId<HTMLInputElement>("booklet-margin");
+  const gutterInput = byId<HTMLInputElement>("booklet-gutter");
+  const foldlineCheckbox = byId<HTMLInputElement>("booklet-foldline");
+  const bordersCheckbox = byId<HTMLInputElement>("booklet-borders");
+  const autorotateCheckbox = byId<HTMLInputElement>("booklet-autorotate");
+
+  byId<HTMLButtonElement>("booklet-run").addEventListener("click", () =>
+    runWithStatus(status, async () => {
+      const file = getFile();
+      if (!file) throw new Error("seleziona un PDF");
+
+      const options: BookletOptions = {
+        pageSize: pageSizeSelect.value as PageSize,
+        orientation: orientationSelect.value as Orientation,
+        binding: bindingSelect.value as BindingEdge,
+        duplex: duplexSelect.value as DuplexMode,
+        margin: Number(marginInput.value) || 0,
+        gutter: Number(gutterInput.value) || 0,
+        drawFoldLine: foldlineCheckbox.checked,
+        drawBorders: bordersCheckbox.checked,
+        autoRotate: autorotateCheckbox.checked,
+      };
+
+      const bytes = await fileToUint8Array(file);
+      const transformed = await booklet_pdf(bytes, options);
+      downloadBytes(transformed, "libretto.pdf");
+
+      setStatus(status, "Fatto: libretto.pdf scaricato. Rendering anteprime facciate…", "ok");
+      await renderResultPreviews(transformed, grid, progress, status, "Facciata");
+      setStatus(status, "Fatto: libretto.pdf generato con successo!", "ok");
     }),
   );
 }

@@ -1,9 +1,11 @@
+pub mod booklet;
 pub mod compose;
 pub mod crypto;
 #[cfg(feature = "image-import")]
 pub mod image;
 pub mod merge;
 pub mod metadata;
+pub mod nup;
 #[cfg(feature = "preview")]
 pub mod preview;
 pub mod rotate;
