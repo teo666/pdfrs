@@ -87,4 +87,6 @@ export interface PageAnnotation {
   x: number;
   y: number;
   width: number;
+  /** Degrees, clockwise as the page is seen (in the same frame as x/y), about the box's own centre. 0 = upright. */
+  rotation: number;
 }

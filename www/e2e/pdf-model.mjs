@@ -1011,6 +1011,29 @@ async function main() {
     fourPagesBytes,
   );
 
+  results["a rotated annotation is drawn turned about its centre"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    // A wide red bar (5:1) across the middle of page 1.
+    const pixels = new Uint8Array(40 * 8 * 4);
+    for (let i = 0; i < pixels.length; i += 4) pixels.set([220, 0, 0, 255], i);
+    const asset = doc.addAsset({ pixels, width: 40, height: 8 });
+    const id = doc.addAnnotation({ page: 1, asset, x: 0.3, y: 0.5, width: 0.4 });
+    const defaultsUpright = doc.annotations()[0].rotation === 0;
+    doc.updateAnnotation(id, { rotation: 450 }); // normalised to 90
+    const label = doc.history().at(-1).label;
+    const normalised = doc.annotations()[0].rotation === 90;
+    doc.updateAnnotation(id, { rotation: 90 }); // same angle: no step
+    const steps = doc.history().length;
+
+    await doc.commit();
+    const png = (await doc.getPreview(1, 0.3)).png;
+    // Standing upright now: red above the centre, not at the bar's old left end.
+    const above = window.__isRed(await window.__pixelAt(png, 0.5, 0.45));
+    const oldEnd = window.__isRed(await window.__pixelAt(png, 0.33, 0.52));
+    return defaultsUpright && label === "Ruota firma a pagina 1" && normalised && steps === 3 && above && !oldEnd;
+  }, fourPagesBytes);
+
   results["no console/page errors"] = consoleErrors.length === 0;
 
   await browser.close();

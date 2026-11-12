@@ -95,10 +95,16 @@ function cacheKey(id: PageId, scale: number): string {
   return `${id}:${scale}`;
 }
 
-function assertBox(box: { x: number; y: number; width: number }): void {
-  if (![box.x, box.y, box.width].every(Number.isFinite) || box.width <= 0) {
-    throw new Error(`posizione non valida: x=${box.x}, y=${box.y}, larghezza=${box.width}`);
+function assertBox(box: { x: number; y: number; width: number; rotation: number }): void {
+  if (![box.x, box.y, box.width, box.rotation].every(Number.isFinite) || box.width <= 0) {
+    throw new Error(`posizione non valida: x=${box.x}, y=${box.y}, larghezza=${box.width}, rotazione=${box.rotation}`);
   }
+}
+
+/** An angle in degrees brought into (-180, 180], so equal turns compare equal. */
+function normalizeAngle(degrees: number): number {
+  const turned = ((degrees % 360) + 360) % 360;
+  return turned > 180 ? turned - 360 : turned;
 }
 
 function identityOrder(pageCount: number): PageId[] {
@@ -541,25 +547,38 @@ export class PdfDocument {
     return new Set([...this.annotationsById.values()].map((annotation) => annotation.page));
   }
 
-  /** Places an image on a page, as a pending edit (one undo step). */
-  addAnnotation(annotation: Omit<PageAnnotation, "id">): AnnotationId {
+  /** Places an image on a page, as a pending edit (one undo step). `rotation` defaults to 0. */
+  addAnnotation(annotation: Omit<PageAnnotation, "id" | "rotation"> & { rotation?: number }): AnnotationId {
     this.assertValidPage(annotation.page);
     if (!this.assets.has(annotation.asset)) throw new Error(`immagine ${annotation.asset} non registrata`);
-    assertBox(annotation);
+    const placed = { ...annotation, rotation: normalizeAngle(annotation.rotation ?? 0) };
+    assertBox(placed);
     const id = this.nextAnnotationId++;
     this.pushUndo(`Aggiungi firma a pagina ${annotation.page}`);
-    this.annotationsById.set(id, { ...annotation, id });
+    this.annotationsById.set(id, { ...placed, id });
     return id;
   }
 
-  /** Moves and/or resizes an annotation (one undo step; nothing if nothing changes). */
-  updateAnnotation(id: AnnotationId, patch: Partial<Pick<PageAnnotation, "x" | "y" | "width">>): void {
+  /** Moves, resizes and/or turns an annotation (one undo step; nothing if nothing changes). */
+  updateAnnotation(
+    id: AnnotationId,
+    patch: Partial<Pick<PageAnnotation, "x" | "y" | "width" | "rotation">>,
+  ): void {
     const current = this.annotationsById.get(id);
     if (!current) throw new Error(`firma ${id} inesistente`);
     const next = { ...current, ...patch };
+    next.rotation = normalizeAngle(next.rotation);
     assertBox(next);
-    if (next.x === current.x && next.y === current.y && next.width === current.width) return;
-    const verb = next.width !== current.width ? "Ridimensiona" : "Sposta";
+    if (
+      next.x === current.x &&
+      next.y === current.y &&
+      next.width === current.width &&
+      next.rotation === current.rotation
+    ) {
+      return;
+    }
+    const verb =
+      next.rotation !== current.rotation ? "Ruota" : next.width !== current.width ? "Ridimensiona" : "Sposta";
     this.pushUndo(`${verb} firma a pagina ${current.page}`);
     this.annotationsById.set(id, next);
   }
@@ -589,11 +608,12 @@ export class PdfDocument {
       this.bytes,
       images.map((image) => image.pixels),
       images.map(({ width, height }) => ({ width, height })),
-      annotations.map(({ page, x, y, width, asset }) => ({
+      annotations.map(({ page, x, y, width, rotation, asset }) => ({
         page,
         x,
         y,
         width,
+        rotation,
         kind: "image" as const,
         asset: index.get(asset) as number,
       })),
