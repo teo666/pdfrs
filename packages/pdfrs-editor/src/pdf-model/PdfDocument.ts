@@ -3,6 +3,7 @@ import {
   decrypt_pdf,
   encrypt_pdf,
   image_to_pdf,
+  merge_pdfs,
   page_count,
   read_metadata,
   render_page_preview,
@@ -434,6 +435,33 @@ export class PdfDocument {
     if (next.every((id, index) => id === this.order[index])) return;
     this.pushUndo(`Sposta ${block.length} pagine in posizione ${at + 1}`);
     this.order = next;
+  }
+
+  /**
+   * Adds the pages of another PDF to this document, placed at `at` in the
+   * display order (0 = in front, default: at the end). They join the
+   * baseline - like a commit, it's one undo step that undo puts back
+   * exactly - while the pending edits on the existing pages are kept: those
+   * pages keep their ids, and so do their cached previews. The new pages get
+   * the ids after the last one. Returns those ids, in order.
+   */
+  async insertPages(bytes: Uint8Array, at?: number, label?: string): Promise<PageId[]> {
+    const before = this.snapshot(this.currentLabel);
+    const added = await page_count(bytes);
+    if (added === 0) return [];
+    // merge_pdfs only carries /Root over: the document's own /Info would be
+    // lost, so it's written back onto the merged result.
+    const metadata = await this.ensureBaselineMetadata();
+    let merged = await merge_pdfs([this.bytes, bytes]);
+    if (Object.keys(metadata).length > 0) merged = await write_metadata(merged, { ...metadata });
+
+    const ids = Array.from({ length: added }, (_, index) => this.pageCount + index + 1);
+    const index = Math.max(0, Math.min(at ?? this.order.length, this.order.length));
+    this.bytes = merged;
+    this.pageCount += added;
+    this.order.splice(index, 0, ...ids);
+    this.recordSnapshot(before, label ?? `Inserisci ${added === 1 ? "1 pagina" : `${added} pagine`}`);
+    return ids;
   }
 
   /**

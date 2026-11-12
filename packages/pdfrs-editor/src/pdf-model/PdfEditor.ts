@@ -54,8 +54,10 @@ export class PdfEditor {
    * a page that was already previewed doesn't need rendering again just
    * because it now lives in a different document.
    */
-  async mergeDocuments(ids: DocumentId[]): Promise<DocumentId> {
+  async mergeDocuments(ids: DocumentId[], options: { applyPending?: boolean } = {}): Promise<DocumentId> {
     const sources = ids.map((id) => this.getDocument(id));
+    if (options.applyPending) return this.mergeAsShown(sources);
+
     const merged = await merge_pdfs(sources.map((doc) => doc.getBytes()));
     const mergedId = await this.addDocument(merged);
     const mergedDoc = this.getDocument(mergedId);
@@ -71,6 +73,63 @@ export class PdfEditor {
     }
 
     return mergedId;
+  }
+
+  /**
+   * `mergeDocuments` with `applyPending`: each source as it currently looks
+   * (`exportBytes()`: order, rotations and deletions applied). Previews carry
+   * over for the pages that come out unchanged - same picture, no rotation.
+   */
+  private async mergeAsShown(sources: PdfDocument[]): Promise<DocumentId> {
+    const merged = await merge_pdfs(await Promise.all(sources.map((doc) => doc.exportBytes())));
+    const mergedId = await this.addDocument(merged);
+    const mergedDoc = this.getDocument(mergedId);
+
+    let position = 0;
+    for (const source of sources) {
+      for (const page of source.pages()) {
+        if (page.markedForDeletion) continue;
+        position += 1;
+        if (page.pendingRotation !== 0) continue;
+        for (const [scale, png] of source.cachedEntriesForPage(page.id)) {
+          mergedDoc.primeCache(position, scale, png);
+        }
+      }
+    }
+
+    return mergedId;
+  }
+
+  /**
+   * Copies pages from one document into another (see
+   * `PdfDocument.insertPages`), as they look in the source: in the order
+   * given, pending rotations applied. With `move`, they're then marked for
+   * deletion in the source - an ordinary pending edit there, undoable on its
+   * own. Previews of unrotated pages travel along.
+   */
+  async transferPages(
+    fromId: DocumentId,
+    pageIds: PageId[],
+    toId: DocumentId,
+    options: { at?: number; move?: boolean } = {},
+  ): Promise<PageId[]> {
+    if (fromId === toId) throw new Error("origine e destinazione sono lo stesso documento");
+    const source = this.getDocument(fromId);
+    const target = this.getDocument(toId);
+    const pages = [...new Set(pageIds)];
+    const bytes = await source.exportPages(pages);
+    const count = pages.length === 1 ? "1 pagina" : `${pages.length} pagine`;
+    const inserted = await target.insertPages(bytes, options.at, `Inserisci ${count} da un altro documento`);
+
+    const rotated = new Set(source.pages().filter((p) => p.pendingRotation !== 0).map((p) => p.id));
+    pages.forEach((page, index) => {
+      const newId = inserted[index];
+      if (newId === undefined || rotated.has(page)) return;
+      for (const [scale, png] of source.cachedEntriesForPage(page)) target.primeCache(newId, scale, png);
+    });
+
+    if (options.move) source.deletePages(pages);
+    return inserted;
   }
 
   /**

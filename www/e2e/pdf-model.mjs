@@ -799,6 +799,105 @@ async function main() {
     tenPagesBytes,
   );
 
+  // --- Moving pages between documents ---
+  results["insertPages adds pages to the baseline, keeping pending edits and previews"] = await page.evaluate(
+    async ([fourBytes, twoBytes]) => {
+      const { PdfDocument } = window.__pdfModel;
+      const doc = await PdfDocument.open(new Uint8Array(fourBytes));
+      await doc.setMetadata({ title: "Contratto" });
+      await doc.commit(); // the title is now in the baseline
+      const preview1 = await doc.getPreview(1, 0.2);
+      doc.rotatePage(2, 90);
+
+      const ids = await doc.insertPages(new Uint8Array(twoBytes), 1);
+      const order = doc.pages().map((p) => p.id).join(",");
+      const rotationKept = doc.pages().find((p) => p.id === 2).pendingRotation === 90;
+      const cacheKept = (await doc.getPreview(1, 0.2)).png === preview1.png;
+      const label = doc.history().at(-1).label;
+      const titleKept = (await doc.getMetadata()).title === "Contratto";
+
+      doc.undo();
+      const undone = doc.getPageCount() === 4 && doc.pages().map((p) => p.id).join(",") === "1,2,3,4";
+      const rotationSurvivesUndo = doc.pages()[1].pendingRotation === 90;
+      doc.redo();
+      await doc.commit();
+
+      return (
+        ids.join(",") === "5,6" &&
+        order === "1,5,6,2,3,4" &&
+        rotationKept &&
+        cacheKept &&
+        label === "Inserisci 2 pagine" &&
+        titleKept &&
+        undone &&
+        rotationSurvivesUndo &&
+        doc.getPageCount() === 6 &&
+        (await doc.getMetadata()).title === "Contratto"
+      );
+    },
+    [fourPagesBytes, twoPagesBytes],
+  );
+
+  results["transferPages copies or moves pages into another document"] = await page.evaluate(
+    async ([tenBytes, fourBytes]) => {
+      const { PdfEditor } = window.__pdfModel;
+      const editor = new PdfEditor();
+      const a = await editor.addDocument(new Uint8Array(tenBytes));
+      const b = await editor.addDocument(new Uint8Array(fourBytes));
+      const source = editor.getDocument(a);
+      const target = editor.getDocument(b);
+      const preview5 = await source.getPreview(5, 0.3);
+      await source.getPreview(3, 0.3);
+      source.rotatePage(3, 90);
+
+      const moved = await editor.transferPages(a, [5, 3], b, { move: true });
+      const targetOk =
+        target.getPageCount() === 6 &&
+        moved.join(",") === "5,6" &&
+        target.pages().map((p) => p.id).join(",") === "1,2,3,4,5,6" &&
+        target.history().at(-1).label === "Inserisci 2 pagine da un altro documento";
+      const previewCarried = target.cachedEntriesForPage(5).some(([, png]) => png === preview5.png);
+      const rotatedNotCarried = target.cachedEntriesForPage(6).length === 0;
+      const sourceMarked = source
+        .pages()
+        .filter((p) => p.markedForDeletion)
+        .map((p) => p.id)
+        .join(",") === "3,5";
+
+      // A copy at the front leaves the source alone.
+      await editor.transferPages(a, [1], b, { at: 0 });
+      const copied = target.pages()[0].id === 7 && !source.pages()[0].markedForDeletion;
+
+      let rejectsSame = false;
+      try {
+        await editor.transferPages(a, [1], a);
+      } catch {
+        rejectsSame = true;
+      }
+      return targetOk && previewCarried && rotatedNotCarried && sourceMarked && copied && rejectsSame;
+    },
+    [tenPagesBytes, fourPagesBytes],
+  );
+
+  results["mergeDocuments with applyPending merges what each document looks like now"] = await page.evaluate(
+    async ([fourBytes, twoBytes]) => {
+      const { PdfEditor } = window.__pdfModel;
+      const editor = new PdfEditor();
+      const a = await editor.addDocument(new Uint8Array(fourBytes));
+      const b = await editor.addDocument(new Uint8Array(twoBytes));
+      const docA = editor.getDocument(a);
+      const preview3 = await docA.getPreview(3, 0.3);
+      docA.deletePage(2);
+      docA.movePage(4, 0); // shown: 4, 1, 3
+      const mergedId = await editor.mergeDocuments([a, b], { applyPending: true });
+      const merged = editor.getDocument(mergedId);
+      // Page 3 of A is the third page shown, so the third of the result.
+      const carried = merged.cachedEntriesForPage(3).some(([, png]) => png === preview3.png);
+      return merged.getPageCount() === 5 && carried && docA.getPageCount() === 4;
+    },
+    [fourPagesBytes, twoPagesBytes],
+  );
+
   results["no console/page errors"] = consoleErrors.length === 0;
 
   await browser.close();
