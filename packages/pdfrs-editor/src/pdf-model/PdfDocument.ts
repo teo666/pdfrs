@@ -531,8 +531,8 @@ export class PdfDocument {
   /** Registers an image for `addAnnotation`. The pixels are kept as they are: don't mutate them afterwards. */
   /**
    * Registers an image for `addAnnotation`. `noun` is how the history names
-   * what's placed with it ("Aggiungi immagine a pagina 2"): a feminine
-   * Italian noun, "firma" by default. The pixels are kept as they are: don't
+   * what's placed with it ("Aggiungi immagine a pagina 2"): an Italian noun
+   * without article, "firma" by default. The pixels are kept as they are: don't
    * mutate them afterwards.
    */
   addAsset(asset: ImageAsset, noun = "firma"): AssetId {
@@ -612,7 +612,7 @@ export class PdfDocument {
     const { x, y, width, rotation, height } = reference;
     this.pushUndo(
       relinking
-        ? `${capitalize(this.nounOf(source))} di nuovo uguale alle altre a pagina ${source.page}`
+        ? `${capitalize(this.nounOf(source))} di nuovo come le altre copie a pagina ${source.page}`
         : `${capitalize(this.nounOf(source))} su tutte le pagine (${covered.size + targets.length})`,
     );
     const linked = { ...source, x, y, width, rotation, height, group, linked: true };
