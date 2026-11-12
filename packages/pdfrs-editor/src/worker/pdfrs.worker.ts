@@ -58,7 +58,17 @@ function loadFull(): Promise<Record<string, (...args: unknown[]) => Promise<unkn
   return fullModule;
 }
 
+// Documents held for the preview pool (see preview-worker-pool.ts), by the
+// key the pool gave them: sent once, then named in every page request.
+const heldDocuments = new Map<number, Uint8Array>();
+
 async function callMethod(method: string, args: unknown[]): Promise<unknown> {
+  if (method === "render_held_page") {
+    const [key, page, scale] = args as [number, number, number];
+    const bytes = heldDocuments.get(key);
+    if (!bytes) throw new Error(`pdfrs worker: document ${key} not held`);
+    return callMethod("render_page_preview", [bytes, page, scale]);
+  }
   const table = FULL_METHODS.has(method)
     ? (await loadFull())
     : (coreMethods as Record<string, (...a: unknown[]) => Promise<unknown>>);
@@ -85,7 +95,9 @@ self.onmessage = async (event: MessageEvent<WorkerInitMessage | WorkerRequest>) 
   const data = event.data;
 
   if ("type" in data) {
-    if (data.type === "wasm-module") {
+    if (data.type === "release") {
+      for (const key of data.keys) heldDocuments.delete(key);
+    } else if (data.type === "wasm-module") {
       precompiledFull = data.fullModule;
       readyResolve(init({ module_or_path: data.module }));
     } else {
@@ -95,6 +107,9 @@ self.onmessage = async (event: MessageEvent<WorkerInitMessage | WorkerRequest>) 
   }
 
   const { id, method, args } = data;
+  // Before anything else: the request may be about the document it carries.
+  for (const key of data.release ?? []) heldDocuments.delete(key);
+  if (data.hold) heldDocuments.set(data.hold.key, data.hold.bytes);
 
   try {
     await ready;

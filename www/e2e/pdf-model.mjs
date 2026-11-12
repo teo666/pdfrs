@@ -129,6 +129,42 @@ async function main() {
     return previews.length === 10 && previews.every((p, index) => p.id === index + 1 && p.png.length > 0);
   }, tenPagesBytes);
 
+  // --- The pool's workers hold the document: its bytes go to each worker at
+  // most once, not with every page - not even at a new scale, or for a
+  // single page. And what they render from what they hold is the right
+  // document: the same pixels as a fresh copy of its bytes.
+  results["pool workers are sent a document once each, not once per page"] = await page.evaluate(
+    async ([ten, photo]) => {
+      const { PdfDocument } = window.__pdfModel;
+      const sent = () => window.__pdfrsPreviewBytesSent ?? 0;
+      const doc = await PdfDocument.open(new Uint8Array(ten));
+      const before = sent();
+      await doc.getPreviews(0.35);
+      await doc.getPreviews(0.45);
+      const afterTwenty = sent() - before;
+      await doc.getPreview(7, 0.55);
+      const afterOne = sent() - before - afterTwenty;
+      const pool = window.__pdfrsLastPreviewPoolSize ?? 0;
+
+      // Two documents in turn, then each checked against a fresh copy.
+      const other = await PdfDocument.fromImage(new Uint8Array(photo));
+      const mixed = [await other.getPreview(1, 0.33), await doc.getPreview(1, 0.33)];
+      const fresh = [
+        await (await PdfDocument.fromImage(new Uint8Array(photo))).getPreview(1, 0.33),
+        await (await PdfDocument.open(new Uint8Array(ten))).getPreview(1, 0.33),
+      ];
+      const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+      return (
+        afterTwenty >= 1 &&
+        afterTwenty <= pool &&
+        afterOne === 0 &&
+        mixed.every((preview, i) => same(preview.png, fresh[i].png)) &&
+        !same(mixed[0].png, mixed[1].png)
+      );
+    },
+    [tenPagesBytes, photoJpgBytes],
+  );
+
   // --- Preview cache: same (page, scale) on an unchanged baseline returns
   // the identical PNG reference the second time - proof no re-render
   // happened, not just that the bytes look the same. ---

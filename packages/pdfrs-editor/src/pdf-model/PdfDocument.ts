@@ -7,11 +7,10 @@ import {
   merge_pdfs,
   page_count,
   read_metadata,
-  render_page_preview,
   rotate_pages,
   write_metadata,
 } from "../worker/pdfrs-worker-client";
-import { renderPagesInParallel } from "../worker/preview-worker-pool";
+import { renderPageOnPool, renderPagesInParallel } from "../worker/preview-worker-pool";
 import type { TextContent } from "../text/layout";
 import type {
   AnnotationId,
@@ -37,9 +36,6 @@ export interface GetPreviewsOptions {
   /** Fires with each page's preview as soon as it's available (cache hits first, then renders in completion order), so a UI can show thumbnails progressively instead of waiting for the whole batch. */
   onPreview?: (preview: PagePreview) => void;
 }
-
-/** Above this many pages, getPreviews() spreads rendering across a worker pool instead of the single shared worker. */
-const PARALLEL_PREVIEW_THRESHOLD = 6;
 
 /** How many undo steps are kept. Snapshots are cheap (see `DocumentSnapshot`) but each one pins a baseline `bytes` buffer, so the stack is bounded rather than unlimited. */
 const MAX_HISTORY = 50;
@@ -853,7 +849,7 @@ export class PdfDocument {
     const key = cacheKey(id, scale);
     let png = this.previewCache.get(key);
     if (!png) {
-      png = await render_page_preview(this.bytes, id, scale);
+      png = await renderPageOnPool(this.bytes, id, scale);
       this.previewCache.set(key, png);
     }
     return { ...this.pageInfo(id), png };
@@ -864,10 +860,10 @@ export class PdfDocument {
    * document), reusing cached PNGs and only fetching the ones actually
    * missing - e.g. after a `rotatePage`/`deletePage` (which never invalidate
    * the cache, see above) a second call renders nothing new. Spreads
-   * whatever *is* missing across a worker pool once there's enough of it to
-   * be worth it. `options.onProgress`, if given, fires after each page
-   * finishes (in whichever order they complete on the pool path, not
-   * necessarily page order).
+   * whatever *is* missing across the worker pool, which holds the document
+   * (see preview-worker-pool.ts) so pages after the first don't resend it.
+   * `options.onProgress`, if given, fires after each page finishes (in
+   * whichever order the workers complete them, not necessarily page order).
    */
   async getPreviews(scale = 0.4, options: GetPreviewsOptions = {}): Promise<PagePreview[]> {
     const ids = options.range ? this.pageIdsInRange(options.range) : this.allPageIds();
@@ -903,13 +899,9 @@ export class PdfDocument {
       reportProgress();
     };
 
-    if (missing.length > PARALLEL_PREVIEW_THRESHOLD) {
-      await renderPagesInParallel(this.bytes, missing, scale, store);
-    } else {
-      for (const id of missing) {
-        store(id, await render_page_preview(this.bytes, id, scale));
-      }
-    }
+    // Always on the pool, even for a page or two: its workers hold the
+    // document, so a render doesn't send the whole file again.
+    await renderPagesInParallel(this.bytes, missing, scale, store);
 
     return previews;
   }

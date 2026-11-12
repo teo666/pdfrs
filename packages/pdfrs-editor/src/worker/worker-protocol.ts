@@ -5,6 +5,14 @@ export interface WorkerRequest {
   id: number;
   method: string;
   args: unknown[];
+  /**
+   * Pool workers only (see preview-worker-pool.ts): a document to keep from
+   * now on, under `key` - for `render_held_page`, which names its document
+   * by key instead of carrying its bytes.
+   */
+  hold?: { key: number; bytes: Uint8Array };
+  /** Pool workers only: documents to let go of, by key. */
+  release?: number[];
 }
 
 export type WorkerResponse = { id: number; ok: true; result: unknown } | { id: number; ok: false; error: string };
@@ -23,7 +31,9 @@ export type WorkerInitMessage =
       /** The precompiled "full" binary, only for workers created with `withFull` (the preview pool). */
       fullModule?: WebAssembly.Module;
     }
-  | { type: "wasm-init-fallback" };
+  | { type: "wasm-init-fallback" }
+  /** Pool workers only: let go of these held documents (the pool has been idle a while). */
+  | { type: "release"; keys: number[] };
 
 /**
  * Collects the underlying ArrayBuffers of any Uint8Array found in `value`
