@@ -1,3 +1,5 @@
+import type { TextContent } from "../text/layout";
+
 /** 1-indexed page number, stable until the next PdfDocument.commit(). */
 export type PageId = number;
 
@@ -83,7 +85,10 @@ export interface ImageAsset {
 export interface PageAnnotation {
   id: AnnotationId;
   page: PageId;
-  asset: AssetId;
+  /** The image placed, for an image annotation; `null` for text. */
+  asset: AssetId | null;
+  /** The text placed, for a text annotation (real text, in a standard font); `null` for an image. */
+  text: TextContent | null;
   x: number;
   y: number;
   width: number;

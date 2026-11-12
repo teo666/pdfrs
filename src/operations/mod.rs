@@ -11,6 +11,8 @@ pub mod preview;
 pub mod rotate;
 pub mod split;
 pub mod stamp;
+pub mod text;
+mod text_metrics;
 
 #[cfg(test)]
 pub mod test_support {

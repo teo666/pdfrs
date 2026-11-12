@@ -21,3 +21,18 @@ export type {
   PageSize,
 } from "./worker/pdfrs-worker-client";
 export { renderPagesInParallel } from "./worker/preview-worker-pool";
+
+// Text annotations: the engine's layout, mirrored, so a UI can draw the box.
+export {
+  CSS_FONT,
+  isWinAnsi,
+  layoutText,
+  lineOrigin,
+  LINE_HEIGHT,
+  PAD,
+  type StandardFont,
+  type TextAlign,
+  type TextContent,
+  type TextLayout,
+  type TextStyle,
+} from "./text/layout";

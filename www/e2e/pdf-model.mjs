@@ -917,6 +917,21 @@ async function main() {
       return Array.from(context.getImageData(x, y, 1, 1).data);
     };
     window.__isRed = ([r, g, b]) => r > 180 && g < 60 && b < 60;
+    // Share of red pixels in a rectangle given in fractions of the page.
+    window.__redShare = async (png, x0, y0, x1, y1) => {
+      const bitmap = await createImageBitmap(new Blob([png], { type: "image/png" }));
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const context = canvas.getContext("2d");
+      context.drawImage(bitmap, 0, 0);
+      const left = Math.floor(x0 * bitmap.width);
+      const top = Math.floor(y0 * bitmap.height);
+      const width = Math.max(1, Math.floor((x1 - x0) * bitmap.width));
+      const height = Math.max(1, Math.floor((y1 - y0) * bitmap.height));
+      const { data } = context.getImageData(left, top, width, height);
+      let red = 0;
+      for (let i = 0; i < data.length; i += 4) if (window.__isRed([data[i], data[i + 1], data[i + 2]])) red += 1;
+      return red / (width * height);
+    };
   });
 
   results["annotations are pending, undoable edits with readable history labels"] = await page.evaluate(
@@ -1137,6 +1152,51 @@ async function main() {
     const belowBar = window.__isRed(await window.__pixelAt(png, 0.5, 0.45)); // red if it were square
     return natural && label === "Ridimensiona firma a pagina 1" && rejects && inBar && !belowBar;
   }, fourPagesBytes);
+
+  results["text annotations are real text in a standard font, drawn in their box"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfDocument } = window.__pdfModel;
+      const doc = await PdfDocument.open(new Uint8Array(bytes));
+      const style = { font: "helvetica", bold: true, italic: false, color: "#dc0000", align: "left" };
+      const id = doc.addTextAnnotation({ page: 1, x: 0.1, y: 0.6, width: 0.5, text: { text: "MMMMMM", ...style } });
+      doc.applyAnnotationToAllPages(id);
+      doc.updateAnnotation(id, { text: { text: "MMMMMMMM", ...style } }); // every linked copy follows
+      const labels = doc.history().slice(1).map((h) => h.label);
+      const allEdited = doc.annotations().every((a) => a.text.text === "MMMMMMMM");
+      let rejectsBlank = false;
+      try {
+        doc.addTextAnnotation({ page: 1, x: 0, y: 0, width: 0.2, text: { text: "  ", ...style } });
+      } catch {
+        rejectsBlank = true;
+      }
+
+      const exported = await doc.exportBytes();
+      const raw = new TextDecoder("latin1").decode(exported);
+      const standardFont = /\/BaseFont\s*\/Helvetica-Bold/.test(raw) && !/FontFile/.test(raw);
+
+      await doc.commit();
+      const png = (await doc.getPreview(3, 0.3)).png;
+      // Inside the box (x 0.1..0.6, starting at y 0.6): plenty of red ink.
+      // Right of it and above it: none.
+      const inside = (await window.__redShare(png, 0.1, 0.6, 0.6, 0.66)) > 0.15;
+      const right = (await window.__redShare(png, 0.62, 0.58, 0.9, 0.7)) > 0;
+      const above = (await window.__redShare(png, 0.05, 0.5, 0.65, 0.595)) > 0;
+      const checks = {
+        labels:
+          labels.join(" | ") === "Aggiungi testo a pagina 1 | Testo su tutte le pagine (4) | Modifica testo su 4 pagine",
+        allEdited,
+        rejectsBlank,
+        standardFont,
+        inside,
+        notRight: !right,
+        notAbove: !above,
+      };
+      const failed = Object.entries(checks).filter(([, ok]) => !ok).map(([name]) => name);
+      if (failed.length) console.error("text annotation checks failed:", failed.join(", "), labels.join(" | "));
+      return failed.length === 0;
+    },
+    fourPagesBytes,
+  );
 
   results["no console/page errors"] = consoleErrors.length === 0;
 

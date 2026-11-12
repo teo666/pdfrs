@@ -4,6 +4,7 @@
 // Promise so call sites don't need to know a worker is involved at all.
 import { createPdfrsWorker } from "./create-pdfrs-worker";
 import type { ImagePageOptions } from "../pdf-model/types";
+import type { TextStyle } from "../text/layout";
 import type { WorkerRequest, WorkerResponse } from "./worker-protocol";
 
 const worker = createPdfrsWorker();
@@ -52,7 +53,7 @@ export function compose_pdf(sources: Uint8Array[], layout: unknown): Promise<Uin
 }
 
 /** One thing drawn on one page; `asset` indexes into the `assets` array passed alongside. */
-export interface Annotation {
+export type Annotation = {
   page: number;
   /** Fractions (0..1) of the page as displayed, origin top-left. */
   x: number;
@@ -60,11 +61,12 @@ export interface Annotation {
   width: number;
   /** Degrees, clockwise as the reader sees the page, about the image's own centre. Optional: absent means upright. */
   rotation?: number;
-  /** Fraction of the displayed page's height. Absent: from `width` and the image's proportions. */
+  /** Fraction of the displayed page's height. Absent: from `width` and the image's (or text's) proportions. */
   height?: number;
-  kind: "image";
-  asset: number;
-}
+} & (
+  | { kind: "image"; asset: number }
+  | ({ kind: "text" } & Partial<TextStyle> & { text: string })
+);
 
 /**
  * Draws images onto pages, all in one pass.

@@ -12,6 +12,7 @@ import {
   write_metadata,
 } from "../worker/pdfrs-worker-client";
 import { renderPagesInParallel } from "../worker/preview-worker-pool";
+import type { TextContent } from "../text/layout";
 import type {
   AnnotationId,
   AssetId,
@@ -93,6 +94,11 @@ const METADATA_FIELDS = Object.keys(METADATA_LABELS) as MetadataField[];
 
 function cacheKey(id: PageId, scale: number): string {
   return `${id}:${scale}`;
+}
+
+function assertText(text: TextContent): void {
+  if (!text.text.trim()) throw new Error("il testo è vuoto");
+  if (!["helvetica", "times", "courier"].includes(text.font)) throw new Error(`font sconosciuto: ${text.font}`);
 }
 
 function assertBox(box: { x: number; y: number; width: number; rotation: number; height?: number | null }): void {
@@ -551,9 +557,10 @@ export class PdfDocument {
     return id;
   }
 
-  /** What the history calls an annotation's image. */
+  /** What the history calls an annotation: "testo", or its image's noun. */
   private nounOf(annotation: PageAnnotation): string {
-    return this.assetNouns.get(annotation.asset) ?? "firma";
+    if (annotation.text) return "testo";
+    return (annotation.asset !== null && this.assetNouns.get(annotation.asset)) || "firma";
   }
 
   /** The pending annotations, in the order they were added. */
@@ -568,14 +575,40 @@ export class PdfDocument {
 
   /** Places an image on a page, as a pending edit (one undo step). `rotation` defaults to 0. */
   addAnnotation(
+    annotation: Omit<PageAnnotation, "id" | "rotation" | "height" | "group" | "linked" | "text" | "asset"> & {
+      asset: AssetId;
+      rotation?: number;
+      height?: number | null;
+    },
+  ): AnnotationId {
+    if (!this.assets.has(annotation.asset)) throw new Error(`immagine ${annotation.asset} non registrata`);
+    return this.place({ ...annotation, text: null });
+  }
+
+  /**
+   * Places real text on a page, as a pending edit (one undo step). Its box
+   * works like an image's: `width` decides how big the text comes out (the
+   * height follows from the laid out text unless `height` stretches it).
+   */
+  addTextAnnotation(
+    annotation: Omit<PageAnnotation, "id" | "rotation" | "height" | "group" | "linked" | "asset" | "text"> & {
+      text: TextContent;
+      rotation?: number;
+      height?: number | null;
+    },
+  ): AnnotationId {
+    assertText(annotation.text);
+    return this.place({ ...annotation, text: { ...annotation.text }, asset: null });
+  }
+
+  private place(
     annotation: Omit<PageAnnotation, "id" | "rotation" | "height" | "group" | "linked"> & {
       rotation?: number;
       height?: number | null;
     },
   ): AnnotationId {
     this.assertValidPage(annotation.page);
-    if (!this.assets.has(annotation.asset)) throw new Error(`immagine ${annotation.asset} non registrata`);
-    const placed = {
+    const placed: Omit<PageAnnotation, "id"> = {
       ...annotation,
       rotation: normalizeAngle(annotation.rotation ?? 0),
       height: annotation.height ?? null,
@@ -584,7 +617,7 @@ export class PdfDocument {
     };
     assertBox(placed);
     const id = this.nextAnnotationId++;
-    this.pushUndo(`Aggiungi ${this.assetNouns.get(annotation.asset) ?? "firma"} a pagina ${annotation.page}`);
+    this.pushUndo(`Aggiungi ${this.nounOf({ ...placed, id })} a pagina ${annotation.page}`);
     this.annotationsById.set(id, { ...placed, id });
     return id;
   }
@@ -647,24 +680,30 @@ export class PdfDocument {
    */
   updateAnnotation(
     id: AnnotationId,
-    patch: Partial<Pick<PageAnnotation, "x" | "y" | "width" | "rotation" | "height">>,
+    patch: Partial<Pick<PageAnnotation, "x" | "y" | "width" | "rotation" | "height" | "text">>,
   ): void {
     const current = this.annotationsById.get(id);
     if (!current) throw new Error(`firma ${id} inesistente`);
+    if (patch.text !== undefined && current.text === null) throw new Error("solo un testo può cambiare testo");
     const next = { ...current, ...patch };
+    if (patch.text) next.text = { ...patch.text };
     next.rotation = normalizeAngle(next.rotation);
     assertBox(next);
+    if (next.text) assertText(next.text);
+    const textChanged = JSON.stringify(next.text) !== JSON.stringify(current.text);
     if (
       next.x === current.x &&
       next.y === current.y &&
       next.width === current.width &&
       next.rotation === current.rotation &&
-      next.height === current.height
+      next.height === current.height &&
+      !textChanged
     ) {
       return;
     }
-    const verb =
-      next.rotation !== current.rotation
+    const verb = textChanged
+      ? "Modifica"
+      : next.rotation !== current.rotation
         ? "Ruota"
         : next.width !== current.width || next.height !== current.height
           ? "Ridimensiona"
@@ -675,9 +714,9 @@ export class PdfDocument {
         ? `${verb} ${this.nounOf(current)} su ${members.length} pagine`
         : `${verb} ${this.nounOf(current)} a pagina ${current.page}`,
     );
-    const { x, y, width, rotation, height } = next;
+    const { x, y, width, rotation, height, text } = next;
     for (const member of members) {
-      this.annotationsById.set(member.id, { ...member, x, y, width, rotation, height });
+      this.annotationsById.set(member.id, { ...member, x, y, width, rotation, height, text });
     }
   }
 
@@ -705,22 +744,21 @@ export class PdfDocument {
     if (annotations.length === 0) return this.bytes;
 
     // Each asset once, however many annotations use it.
-    const used = [...new Set(annotations.map((annotation) => annotation.asset))];
+    const used = [...new Set(annotations.flatMap((annotation) => (annotation.asset === null ? [] : [annotation.asset])))];
     const index = new Map(used.map((asset, position) => [asset, position]));
     const images = used.map((asset) => this.assets.get(asset) as ImageAsset);
     return annotate_pdf(
       this.bytes,
       images.map((image) => image.pixels),
       images.map(({ width, height }) => ({ width, height })),
-      annotations.map(({ page, x, y, width, rotation, height, asset }) => ({
+      annotations.map(({ page, x, y, width, rotation, height, asset, text }) => ({
         page,
         x,
         y,
         width,
         rotation,
         ...(height === null ? {} : { height }),
-        kind: "image" as const,
-        asset: index.get(asset) as number,
+        ...(text ? { kind: "text" as const, ...text } : { kind: "image" as const, asset: index.get(asset as AssetId) as number }),
       })),
     );
   }
