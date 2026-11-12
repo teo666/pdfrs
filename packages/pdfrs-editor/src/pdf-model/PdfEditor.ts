@@ -1,6 +1,6 @@
 import { merge_pdfs, split_pdf } from "../worker/pdfrs-worker-client";
 import { PdfDocument } from "./PdfDocument";
-import type { DocumentId, ImagePageOptions } from "./types";
+import type { DocumentId, ImagePageOptions, PageId } from "./types";
 
 /**
  * Manages a collection of `PdfDocument`s and the operations that span more
@@ -71,6 +71,30 @@ export class PdfEditor {
     }
 
     return mergedId;
+  }
+
+  /**
+   * Copies some pages of a document, in the order given and with their
+   * pending rotations applied, into a new managed document (see
+   * `PdfDocument.exportPages`). The source document is not modified.
+   *
+   * Previews already rendered for pages that come out unchanged (no pending
+   * rotation) are carried over, like `mergeDocuments` does.
+   */
+  async extractPages(id: DocumentId, pageIds: PageId[]): Promise<DocumentId> {
+    const source = this.getDocument(id);
+    const extractedId = await this.addDocument(await source.exportPages(pageIds));
+    const extracted = this.getDocument(extractedId);
+
+    const rotated = new Set(source.pages().filter((p) => p.pendingRotation !== 0).map((p) => p.id));
+    [...new Set(pageIds)].forEach((page, index) => {
+      if (rotated.has(page)) return;
+      for (const [scale, png] of source.cachedEntriesForPage(page)) {
+        extracted.primeCache(index + 1, scale, png);
+      }
+    });
+
+    return extractedId;
   }
 
   /**

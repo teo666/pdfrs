@@ -379,6 +379,86 @@ export class PdfDocument {
   }
 
   /**
+   * Group versions of the page edits above, for a multi-page selection: each
+   * call is *one* undo step whatever the number of pages ("Ruota 12 pagine"),
+   * not one per page. With a single page they behave exactly like the
+   * single-page method (same history label). Duplicate ids are ignored.
+   */
+  rotatePages(ids: PageId[], degrees: number): void {
+    const targets = this.distinctPages(ids);
+    if (degrees % 90 !== 0) {
+      throw new Error(`la rotazione deve essere un multiplo di 90, ricevuto ${degrees}`);
+    }
+    if (targets.length === 1) return this.rotatePage(targets[0] as PageId, degrees);
+    if (targets.length === 0 || degrees % 360 === 0) return;
+    this.pushUndo(`Ruota ${targets.length} pagine di ${degrees > 0 ? "+" : ""}${degrees}\u00b0`);
+    for (const id of targets) {
+      const next = (((this.rotations.get(id) ?? 0) + degrees) % 360 + 360) % 360;
+      if (next === 0) this.rotations.delete(id);
+      else this.rotations.set(id, next);
+    }
+  }
+
+  /** See `rotatePages`. Pages already marked are skipped; nothing left to mark means no history step. */
+  deletePages(ids: PageId[]): void {
+    const targets = this.distinctPages(ids).filter((id) => !this.deletions.has(id));
+    if (targets.length === 1) return this.deletePage(targets[0] as PageId);
+    if (targets.length === 0) return;
+    this.pushUndo(`Elimina ${targets.length} pagine`);
+    for (const id of targets) this.deletions.add(id);
+  }
+
+  /** See `rotatePages`. Pages not marked for deletion are skipped. */
+  restorePages(ids: PageId[]): void {
+    const targets = this.distinctPages(ids).filter((id) => this.deletions.has(id));
+    if (targets.length === 1) return this.restorePage(targets[0] as PageId);
+    if (targets.length === 0) return;
+    this.pushUndo(`Ripristina ${targets.length} pagine`);
+    for (const id of targets) this.deletions.delete(id);
+  }
+
+  /**
+   * Moves several pages as one block: they keep their relative display
+   * order and land together at `toIndex`, an index into the order *without*
+   * them (0 = in front of everything, the number of other pages = at the
+   * end; clamped). The pages don't need to be contiguous beforehand.
+   */
+  movePages(ids: PageId[], toIndex: number): void {
+    const moving = new Set(this.distinctPages(ids));
+    if (moving.size === 0) return;
+    const block = this.order.filter((id) => moving.has(id));
+    const rest = this.order.filter((id) => !moving.has(id));
+    const at = Math.max(0, Math.min(toIndex, rest.length));
+    if (block.length === 1) return this.movePage(block[0] as PageId, at);
+    const next = [...rest.slice(0, at), ...block, ...rest.slice(at)];
+    if (next.every((id, index) => id === this.order[index])) return;
+    this.pushUndo(`Sposta ${block.length} pagine in posizione ${at + 1}`);
+    this.order = next;
+  }
+
+  /**
+   * A new PDF made of just these pages, in the order given, each with its
+   * pending rotation applied - what "extract these pages" should produce.
+   * Pending deletions and the document's metadata are not involved, and this
+   * document is left untouched.
+   */
+  async exportPages(ids: PageId[]): Promise<Uint8Array> {
+    const pages = this.distinctPages(ids);
+    if (pages.length === 0) throw new Error("nessuna pagina da esportare");
+    let bytes = await compose_pdf(
+      [this.bytes],
+      pages.map((id) => ({ source: 0, page: id })),
+    );
+    const rotations: PendingRotation[] = [];
+    pages.forEach((id, index) => {
+      const degrees = this.rotations.get(id) ?? 0;
+      if (degrees !== 0) rotations.push({ page: index + 1, degrees });
+    });
+    if (rotations.length > 0) bytes = await rotate_pages(bytes, rotations);
+    return bytes;
+  }
+
+  /**
    * The metadata as it would be after a commit: what the baseline holds, with
    * any pending edits laid over it (a field pending as `null` is reported as
    * absent, since that's what committing it would do).
@@ -670,6 +750,12 @@ export class PdfDocument {
       throw new Error(`range non valido: start (${range.start}) è maggiore di end (${range.end})`);
     }
     return this.order.slice(range.start - 1, range.end);
+  }
+
+  /** Validates every id and drops repeats, keeping the first occurrence's place. */
+  private distinctPages(ids: PageId[]): PageId[] {
+    ids.forEach((id) => this.assertValidPage(id));
+    return [...new Set(ids)];
   }
 
   private assertValidPage(id: PageId): void {

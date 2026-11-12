@@ -683,6 +683,122 @@ async function main() {
     return doc.getPageCount() === 3 && (await doc.getMetadata()).title === "Relazione";
   }, fourPagesBytes);
 
+  // --- Group edits: one undo step for many pages ---
+  results["rotatePages/deletePages/restorePages are one history step each"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.rotatePages([1, 3, 3], 90); // the repeated id counts once
+    doc.deletePages([2, 4]);
+    doc.deletePages([2, 4]); // already marked: no new step
+    const labels = doc.history().map((h) => h.label);
+    const pages = doc.pages();
+    const edited =
+      pages[0].pendingRotation === 90 &&
+      pages[2].pendingRotation === 90 &&
+      pages[1].pendingRotation === 0 &&
+      pages[1].markedForDeletion &&
+      pages[3].markedForDeletion;
+    doc.restorePages([1, 2, 4]); // page 1 isn't marked: skipped
+    const restored = doc.pages().every((p) => !p.markedForDeletion);
+    doc.undo(); // back to both marked
+    const undoneRestore = doc.pages()[1].markedForDeletion && doc.pages()[3].markedForDeletion;
+    doc.undo(); // undoes both deletions at once
+    const undoneDelete = doc.pages().every((p) => !p.markedForDeletion);
+    return (
+      edited &&
+      restored &&
+      undoneRestore &&
+      undoneDelete &&
+      labels.length === 3 &&
+      labels[1] === "Ruota 2 pagine di +90\u00b0" &&
+      labels[2] === "Elimina 2 pagine"
+    );
+  }, tenPagesBytes);
+
+  results["a group edit on a single page reads like the single-page edit"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.rotatePages([2], -90);
+    doc.deletePages([3]);
+    doc.movePages([4], 0);
+    const labels = doc.history().map((h) => h.label);
+    return (
+      labels[1] === "Ruota pagina 2 di -90\u00b0" &&
+      labels[2] === "Elimina pagina 3" &&
+      labels[3] === "Sposta pagina 4 in posizione 1"
+    );
+  }, fourPagesBytes);
+
+  results["movePages moves a non-contiguous selection as one block"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    // 3 and 1 (given out of order) keep their display order 1, 3; the other
+    // pages are [2, 4, 5, 6, 7, 8, 9, 10]; index 4 is in front of 6.
+    doc.movePages([3, 1], 4);
+    const moved = doc.pages().map((p) => p.id).join(",") === "2,4,5,6,1,3,7,8,9,10";
+    doc.movePages([1, 3], 4); // already there: no step
+    const steps = doc.history().length;
+    doc.movePages([9, 10], 999); // clamped to the end: already there too
+    doc.movePages([1, 3], 0);
+    const front = doc.pages().map((p) => p.id).slice(0, 3).join(",") === "1,3,2";
+    doc.undo();
+    const undone = doc.pages().map((p) => p.id).join(",") === "2,4,5,6,1,3,7,8,9,10";
+    return moved && steps === 2 && front && undone;
+  }, tenPagesBytes);
+
+  results["exportPages builds a PDF of those pages, in that order, rotations applied"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfDocument } = window.__pdfModel;
+      const doc = await PdfDocument.open(new Uint8Array(bytes));
+      doc.rotatePage(3, 90);
+      doc.deletePage(4); // deletions don't matter to an export
+      const exported = await PdfDocument.open(await doc.exportPages([3, 1, 4]));
+      // The source is untouched.
+      const sourceIntact = doc.getPageCount() === 4 && doc.pages()[2].pendingRotation === 90;
+      // Page 1 of the export is the old page 3, rotated: rendered landscape.
+      const first = await exported.getPreview(1, 0.2);
+      const second = await exported.getPreview(2, 0.2);
+      const size = async (png) => {
+        const bitmap = await createImageBitmap(new Blob([png], { type: "image/png" }));
+        return { w: bitmap.width, h: bitmap.height };
+      };
+      const a = await size(first.png);
+      const b = await size(second.png);
+      let rejectsEmpty = false;
+      try {
+        await doc.exportPages([]);
+      } catch {
+        rejectsEmpty = true;
+      }
+      return exported.getPageCount() === 3 && sourceIntact && a.w > a.h && b.h > b.w && rejectsEmpty;
+    },
+    fourPagesBytes,
+  );
+
+  results["PdfEditor.extractPages adds a new document and carries over unrotated previews"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfEditor } = window.__pdfModel;
+      const editor = new PdfEditor();
+      const id = await editor.addDocument(new Uint8Array(bytes));
+      const source = editor.getDocument(id);
+      const preview5 = await source.getPreview(5, 0.3);
+      await source.getPreview(2, 0.3);
+      source.rotatePage(2, 180);
+      const extractedId = await editor.extractPages(id, [5, 2, 7]);
+      const extracted = editor.getDocument(extractedId);
+      const carried = extracted.cachedEntriesForPage(1).some(([, png]) => png === preview5.png);
+      const notCarried = extracted.cachedEntriesForPage(2).length === 0; // page 2 was rotated
+      return (
+        extracted.getPageCount() === 3 &&
+        editor.listDocuments().length === 2 &&
+        source.getPageCount() === 10 &&
+        carried &&
+        notCarried
+      );
+    },
+    tenPagesBytes,
+  );
+
   results["no console/page errors"] = consoleErrors.length === 0;
 
   await browser.close();
