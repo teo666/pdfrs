@@ -8,12 +8,9 @@ importers:
 
   .:
     dependencies:
-      pdfrs:
-        specifier: file:../pkg
-        version: file:../pkg
-      pdfrs-full:
-        specifier: file:../pkg-full
-        version: pdfrs@file:../pkg-full
+      pdfrs-editor:
+        specifier: link:../packages/pdfrs-editor
+        version: link:../packages/pdfrs-editor
     devDependencies:
       playwright:
         specifier: ^1.62.1
@@ -351,12 +348,6 @@ packages:
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
     hasBin: true
 
-  pdfrs@file:../pkg:
-    resolution: {directory: ../pkg, type: directory}
-
-  pdfrs@file:../pkg-full:
-    resolution: {directory: ../pkg-full, type: directory}
-
   picocolors@1.1.1:
     resolution: {integrity: sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==}
 
@@ -612,10 +603,6 @@ snapshots:
       lightningcss-win32-x64-msvc: 1.33.0
 
   nanoid@3.3.18: {}
-
-  pdfrs@file:../pkg: {}
-
-  pdfrs@file:../pkg-full: {}
 
   picocolors@1.1.1: {}
 

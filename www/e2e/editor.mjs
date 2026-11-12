@@ -253,25 +253,29 @@ async function main() {
     return app?.shadowRoot?.querySelectorAll('[data-el="doclist"] li').length === 4;
   });
   // The new document isn't auto-selected (an active one is already set), so pick it explicitly.
+  // Every width the fill goes through is recorded by a MutationObserver
+  // instead of being polled: with the preview pool's workers receiving the
+  // wasm already compiled, ten small pages can finish within a single
+  // animation frame, so a rAF-polled check could miss the partial states.
   await page.evaluate(() => {
     const app = document.querySelector("pdf-editor-app");
+    window.__pillWidths = [];
+    const record = () => {
+      const items = Array.from(app.shadowRoot.querySelectorAll('[data-el="doclist"] li'));
+      const pill = items.find((li) => li.querySelector("button")?.textContent?.includes("ten_pages.pdf"));
+      const width = pill?.querySelector(".fill")?.style.width;
+      if (width) window.__pillWidths.push(parseFloat(width));
+    };
+    new MutationObserver(record).observe(app.shadowRoot, { subtree: true, childList: true, attributes: true, attributeFilter: ["style"] });
     const items = Array.from(app.shadowRoot.querySelectorAll('[data-el="doclist"] li button'));
     items.find((b) => b.textContent.includes("ten_pages.pdf")).click();
   });
-  const pillFillGrewDuringRender = await page
-    .waitForFunction(() => {
-      const app = document.querySelector("pdf-editor-app");
-      const items = Array.from(app.shadowRoot.querySelectorAll('[data-el="doclist"] li'));
-      const pill = items.find((li) => li.querySelector("button")?.textContent?.includes("ten_pages.pdf"));
-      const width = pill ? parseFloat(pill.querySelector(".fill").style.width) : 0;
-      return width > 0 && width < 100;
-    })
-    .then(() => true)
-    .catch(() => false);
   await page.waitForFunction(() => {
     const view = document.querySelector("pdf-editor-app")?.shadowRoot?.querySelector("pdf-document-view");
     return view?.shadowRoot?.querySelectorAll("pdf-page-card").length === 10;
   });
+  const pillWidths = await page.evaluate(() => window.__pillWidths);
+  const pillFillGrewDuringRender = pillWidths.some((width) => width > 0 && width < 100);
   const pillDoneWhenFinished = await page.evaluate(() => {
     const app = document.querySelector("pdf-editor-app");
     const items = Array.from(app.shadowRoot.querySelectorAll('[data-el="doclist"] li'));

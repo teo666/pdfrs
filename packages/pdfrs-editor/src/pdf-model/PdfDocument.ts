@@ -27,6 +27,8 @@ export interface GetPreviewsOptions {
   range?: PageRange;
   /** Fires after each page finishes (cache hits count as instantly "done" too), so callers can show real progress. */
   onProgress?: (done: number, total: number) => void;
+  /** Fires with each page's preview as soon as it's available (cache hits first, then renders in completion order), so a UI can show thumbnails progressively instead of waiting for the whole batch. */
+  onPreview?: (preview: PagePreview) => void;
 }
 
 /** Above this many pages, getPreviews() spreads rendering across a worker pool instead of the single shared worker. */
@@ -495,7 +497,9 @@ export class PdfDocument {
     for (const id of ids) {
       const cached = this.previewCache.get(cacheKey(id, scale));
       if (cached) {
-        previews[indexOf.get(id) as number] = { ...this.pageInfo(id), png: cached };
+        const preview = { ...this.pageInfo(id), png: cached };
+        previews[indexOf.get(id) as number] = preview;
+        options.onPreview?.(preview);
         done += 1;
         reportProgress();
       } else {
@@ -507,7 +511,9 @@ export class PdfDocument {
 
     const store = (page: number, png: Uint8Array) => {
       this.previewCache.set(cacheKey(page, scale), png);
-      previews[indexOf.get(page) as number] = { ...this.pageInfo(page), png };
+      const preview = { ...this.pageInfo(page), png };
+      previews[indexOf.get(page) as number] = preview;
+      options.onPreview?.(preview);
       done += 1;
       reportProgress();
     };

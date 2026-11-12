@@ -1,6 +1,5 @@
 import { downloadBytes } from "../pdf-io";
-import type { PdfDocument } from "../pdf-model/PdfDocument";
-import type { MetadataField, MetadataPatch } from "../pdf-model/types";
+import type { MetadataField, MetadataPatch, PdfDocument } from "pdfrs-editor";
 import type { CardData, PageActionDetail, PageDragOverDetail, PdfPageCard } from "./pdf-page-card";
 
 export interface PreviewProgressDetail {

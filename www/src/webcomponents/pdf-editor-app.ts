@@ -1,6 +1,5 @@
 import { fileToUint8Array, isJpeg, isPdf, setupFileInput } from "../pdf-io";
-import { PdfEditor } from "../pdf-model/PdfEditor";
-import type { DocumentId } from "../pdf-model/types";
+import { PdfEditor, type DocumentId } from "pdfrs-editor";
 import { VIRTUAL_SCROLL_THRESHOLD, type PdfDocumentView, type PreviewProgressDetail } from "./pdf-document-view";
 
 /**

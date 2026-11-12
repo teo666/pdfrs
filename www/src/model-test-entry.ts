@@ -3,8 +3,7 @@
 // `page.evaluate`. Not part of the demo UI (index.html) - PdfDocument/PdfEditor
 // don't touch the DOM themselves, this file is the only DOM-adjacent bit,
 // and only for test wiring.
-import { PdfDocument } from "./pdf-model/PdfDocument";
-import { PdfEditor } from "./pdf-model/PdfEditor";
+import { PdfDocument, PdfEditor } from "pdfrs-editor";
 
 declare global {
   interface Window {

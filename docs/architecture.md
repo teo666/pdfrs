@@ -95,4 +95,4 @@ A questo punto il documento è già decriptato (l'entry `/Encrypt` viene rimossa
 
 ## wasm-pack e il pacchetto npm
 
-`wasm-pack build --target web` genera `pkg/` (non versionato, in `.gitignore`) con `pdfrs.js`, `pdfrs_bg.wasm` e i tipi TypeScript (`pdfrs.d.ts`), pronti per essere importati come modulo ES: `import init, { merge_pdfs, ... } from "pdfrs"; await init();`. Il frontend di test in `www/` consuma questo pacchetto localmente via `"pdfrs": "file:../pkg"` (vedi [`development.md`](development.md)).
+`wasm-pack build --target web` genera `pkg/` (non versionato, in `.gitignore`) con `pdfrs.js`, `pdfrs_bg.wasm` e i tipi TypeScript (`pdfrs.d.ts`), pronti per essere importati come modulo ES: `import init, { merge_pdfs, ... } from "pdfrs"; await init();`. I frontend non lo importano direttamente: passano da `packages/pdfrs-editor`, che usa il pacchetto npm assemblato in `pkg-npm/` (`pdfrs.js/core`, `pdfrs.js/full`). Vedi [`development.md`](development.md).

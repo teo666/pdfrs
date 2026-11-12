@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Assembles a single npm-publishable package (pkg-npm/) with two subpath
-# exports, "pdfrs/core" and "pdfrs/full", from the two wasm-pack builds.
+# Assembles a single npm-publishable package (pkg-npm/, published as
+# "pdfrs.js") with two subpath exports, "pdfrs.js/core" and "pdfrs.js/full",
+# from the two wasm-pack builds. The .wasm binaries are exported too, so a
+# consumer can resolve them from the same package as the JS glue (see
+# packages/pdfrs-editor/src/worker/create-pdfrs-worker.ts).
 # See docs/development.md ("Build 'core' e 'full'") for why the split exists.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -21,7 +24,7 @@ done
 
 cat > pkg-npm/package.json <<EOF
 {
-  "name": "pdfrs",
+  "name": "pdfrs.js",
   "type": "module",
   "version": "$PKG_VERSION",
   "collaborators": [
@@ -32,8 +35,16 @@ cat > pkg-npm/package.json <<EOF
     "full"
   ],
   "exports": {
-    "./core": "./core/pdfrs.js",
-    "./full": "./full/pdfrs.js"
+    "./core": {
+      "types": "./core/pdfrs.d.ts",
+      "default": "./core/pdfrs.js"
+    },
+    "./full": {
+      "types": "./full/pdfrs.d.ts",
+      "default": "./full/pdfrs.js"
+    },
+    "./core/pdfrs_bg.wasm": "./core/pdfrs_bg.wasm",
+    "./full/pdfrs_bg.wasm": "./full/pdfrs_bg.wasm"
   },
   "sideEffects": [
     "./core/snippets/*",

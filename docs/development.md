@@ -40,7 +40,31 @@ cargo run --example render_preview [percorso/al/file.pdf]   # default: tests/fix
 
 ## Pagina di test TypeScript (`www/`)
 
-Piccolo progetto Vite + TypeScript puro (nessun framework), con un pannello per ciascuna operazione esposta dal wasm. Consuma **due** pacchetti locali: `"pdfrs": "file:../pkg"` (core) e `"pdfrs-full": "file:../pkg-full"` (full) in `www/package.json` — vanno quindi rigenerati (entrambi i comandi `wasm-pack build` sopra) ogni volta che cambia l'API Rust, seguiti da `pnpm install` (vedi sotto per il perché).
+Piccolo progetto Vite + TypeScript puro (nessun framework), con un pannello per ciascuna operazione esposta dal wasm. Non dipende direttamente dal wasm, ma da **`pdfrs-editor`** (`"pdfrs-editor": "link:../packages/pdfrs-editor"`), lo stesso pacchetto usato dall'app Vue (repo `pdfrs-app`). Vedi "Pacchetto `pdfrs-editor`" più sotto.
+
+## Pacchetto `pdfrs-editor` (`packages/pdfrs-editor/`)
+
+Il codice TypeScript indipendente dal framework sta tutto qui, così `www/` e `pdfrs-app` ne usano una sola copia:
+
+- il modello `PdfDocument` / `PdfEditor` (`src/pdf-model/`);
+- il worker e il suo client (`src/worker/`);
+- il pool di worker per le anteprime.
+
+Il pacchetto viene distribuito come sorgente TypeScript, senza un passo di build: `exports` punta ai `.ts` e il bundler del consumatore (Vite) li compila. Ha due punti d'ingresso:
+
+- `pdfrs-editor`: modello, tipi, `renderPagesInParallel`;
+- `pdfrs-editor/operations`: le operazioni di basso livello (`merge_pdfs`, `nup_pdf`, ...), sempre eseguite nel worker.
+
+Il pacchetto usa il wasm tramite `"pdfrs.js": "link:../../pkg-npm"`, cioè la cartella prodotta da `./scripts/build-npm-package.sh`, con i sottopercorsi `pdfrs.js/core` e `pdfrs.js/full`. Il ciclo di sviluppo diventa:
+
+```bash
+./scripts/build-npm-package.sh          # dopo ogni modifica al Rust: rigenera pkg/, pkg-full/ e pkg-npm/
+(cd packages/pdfrs-editor && pnpm install)   # solo la prima volta
+```
+
+Tutti i collegamenti usano `link:`, cioè symlink veri: pnpm non copia nulla in `node_modules/.pnpm/`. In più Vite serve come sorgente i pacchetti collegati che stanno fuori da `node_modules`, senza pre-bundling. Quindi dopo una nuova build del wasm **non serve `pnpm install`**: basta ricaricare la pagina.
+
+Anche i `.wasm` vengono letti dallo stesso pacchetto della glue JS: `pkg-npm/package.json` esporta `./core/pdfrs_bg.wasm` e `./full/pdfrs_bg.wasm`, e `create-pdfrs-worker.ts` li importa con `?url`. Glue e binario arrivano così sempre dalla stessa build. Se fossero di due build diverse, l'avvio fallirebbe con "import object field … is not a Function", perché wasm-bindgen mette un hash nei nomi degli import.
 
 ### Il modulo wasm gira in un Web Worker, non sul thread principale
 
@@ -48,22 +72,24 @@ Le funzioni `async`/`Promise` di per sé **non bastano** a evitare che la UI si 
 
 Per questo `www/src/main.ts` non importa mai `"pdfrs"` direttamente. La catena è:
 
-- `src/pdfrs.worker.ts` — gira **dentro un Web Worker**, importa il pacchetto wasm vero (`"pdfrs"`), inizializza il modulo (vedi sotto) e risponde ai messaggi `{ id, method, args }` eseguendo la funzione corrispondente.
-- `src/pdfrs-worker-client.ts` — lato thread principale, espone le stesse firme (`merge_pdfs`, `split_pdf`, ...) ma ogni chiamata è in realtà un giro di `postMessage` verso il worker, incapsulato in una `Promise` tramite una mappa `id -> {resolve, reject}`. I call site (`main.ts`) non sanno che c'è un worker di mezzo.
-- `src/worker-protocol.ts` — le forme dei messaggi (`WorkerRequest`/`WorkerResponse`/`WorkerInitMessage`) condivise tra le parti, così non possono disallinearsi.
-- `src/create-pdfrs-worker.ts` — punto unico di creazione per **ogni** istanza di `pdfrs.worker.ts` nell'app (sia il worker singolo condiviso di `pdfrs-worker-client.ts`, sia ciascuno del pool descritto sotto). Vedi "Modulo wasm compilato una volta" più sotto.
+- `packages/pdfrs-editor/src/worker/pdfrs.worker.ts` — gira **dentro un Web Worker**, importa il pacchetto wasm vero (`"pdfrs"`), inizializza il modulo (vedi sotto) e risponde ai messaggi `{ id, method, args }` eseguendo la funzione corrispondente.
+- `packages/pdfrs-editor/src/worker/pdfrs-worker-client.ts` — lato thread principale, espone le stesse firme (`merge_pdfs`, `split_pdf`, ...) ma ogni chiamata è in realtà un giro di `postMessage` verso il worker, incapsulato in una `Promise` tramite una mappa `id -> {resolve, reject}`. I call site (`main.ts`) non sanno che c'è un worker di mezzo.
+- `packages/pdfrs-editor/src/worker/worker-protocol.ts` — le forme dei messaggi (`WorkerRequest`/`WorkerResponse`/`WorkerInitMessage`) condivise tra le parti, così non possono disallinearsi.
+- `packages/pdfrs-editor/src/worker/create-pdfrs-worker.ts` — punto unico di creazione per **ogni** istanza di `pdfrs.worker.ts` nell'app (sia il worker singolo condiviso di `pdfrs-worker-client.ts`, sia ciascuno del pool descritto sotto). Vedi "Modulo wasm compilato una volta" più sotto.
 
 **Prova visibile che funziona**: in cima alla pagina c'è un contatore ("UI thread libero — tick: N") che incrementa a ogni `requestAnimationFrame`. Se il thread principale fosse bloccato da una chiamata wasm, si fermerebbe; nello smoke test (`www/e2e/smoke.mjs`) questo è verificato esplicitamente confrontando il valore del contatore prima e dopo un'operazione.
 
 ### Modulo wasm compilato una volta, condiviso tra tutti i worker
 
-Ogni worker (singolo o del pool) userebbe, se lasciato al comportamento di default di wasm-bindgen, il proprio `fetch` + `WebAssembly.compile` del binario — ripetuto per ogni worker creato. `create-pdfrs-worker.ts` centralizza questo: la prima volta che un worker viene creato, compila il binario una sola volta (`WebAssembly.compileStreaming`, con fallback a `fetch` + `WebAssembly.compile` se lo streaming non è disponibile) e tiene il risultato come una `Promise<WebAssembly.Module>` a livello di modulo. Ogni worker successivo riceve lo stesso `WebAssembly.Module` già compilato via `postMessage` (i moduli wasm sono clonabili in structured clone), e deve solo instanziarlo (`init(module)`), non ricompilarlo da zero.
+Ogni worker (singolo o del pool) userebbe, se lasciato al comportamento di default di wasm-bindgen, il proprio `fetch` + `WebAssembly.compile` del binario — ripetuto per ogni worker creato. `create-pdfrs-worker.ts` centralizza questo: la prima volta che un worker viene creato, compila il binario una sola volta (`WebAssembly.compileStreaming`, con fallback a `fetch` + `WebAssembly.compile` se lo streaming non è disponibile) e tiene il risultato come una `Promise<WebAssembly.Module>` a livello di modulo. Ogni worker successivo riceve lo stesso `WebAssembly.Module` già compilato via `postMessage` (i moduli wasm sono clonabili in structured clone), e deve solo instanziarlo (`init({ module_or_path: module })`), non ricompilarlo da zero.
+
+Lo stesso vale per la build "full" (~4,6MB) nei worker del pool delle anteprime. Questi la useranno di sicuro, quindi vengono creati con `createPdfrsWorker({ withFull: true })` e ricevono nello stesso messaggio di init anche il binario full già compilato (`fullModule`). Il worker condiviso, che le anteprime le fa solo di rado, la carica invece da solo la prima volta che gli serve. Prima, ogni worker del pool scaricava e compilava per conto suo una copia della build full.
 
 Lato worker (`pdfrs.worker.ts`), l'inizializzazione non parte più eagerly a livello di modulo: il worker aspetta il primo `WorkerInitMessage` (`{type: "wasm-module", module}` nel percorso normale, `{type: "wasm-init-fallback"}` se la compilazione condivisa fallisce per qualche motivo, nel qual caso il worker si auto-inizializza con `init()` come prima) prima di processare qualunque `WorkerRequest`.
 
 ### Preview su documenti grandi: pool di worker persistente con coda dinamica
 
-Un solo worker rende le pagine una alla volta — non blocca la UI, ma per un documento con molte pagine il rendering totale resta comunque lento in wall-clock, perché una sola pagina alla volta gira su un solo core. `src/preview-worker-pool.ts` risolve questo caso specifico: sopra `PARALLEL_PREVIEW_THRESHOLD` pagine (6, in `main.ts`), il rendering si distribuisce su un piccolo pool di worker (dimensione tipica `Math.min(navigator.hardwareConcurrency, pageCount, 8)`, tutti creati tramite `createPdfrsWorker()` e quindi tutti a condividere lo stesso modulo wasm già compilato) e le pagine vengono assegnate da una **coda condivisa**: ogni worker libero prende la pagina successiva, invece di ricevere in anticipo un blocco fisso di pagine. Questo evita che un worker resti bloccato su un blocco di pagine pesanti mentre un altro, con pagine leggere, ha già finito ed è inattivo — il bilanciamento del carico è automatico.
+Un solo worker rende le pagine una alla volta — non blocca la UI, ma per un documento con molte pagine il rendering totale resta comunque lento in wall-clock, perché una sola pagina alla volta gira su un solo core. `packages/pdfrs-editor/src/worker/preview-worker-pool.ts` risolve questo caso specifico: sopra `PARALLEL_PREVIEW_THRESHOLD` pagine (6, in `PdfDocument.ts`), il rendering si distribuisce su un piccolo pool di worker (dimensione tipica `Math.min(navigator.hardwareConcurrency, pageCount, 8)`, tutti creati tramite `createPdfrsWorker()` e quindi tutti a condividere lo stesso modulo wasm già compilato) e le pagine vengono assegnate da una **coda condivisa**: ogni worker libero prende la pagina successiva, invece di ricevere in anticipo un blocco fisso di pagine. Questo evita che un worker resti bloccato su un blocco di pagine pesanti mentre un altro, con pagine leggere, ha già finito ed è inattivo — il bilanciamento del carico è automatico.
 
 Conseguenze pratiche di questo design:
 
@@ -107,11 +133,11 @@ Failed to execute 'postMessage' on 'Worker': An ArrayBuffer is detached and coul
 
 Se in futuro serve ottimizzare per PDF di ingresso molto grandi, la via corretta **non** è tornare al transfer diretto degli argomenti, ma clonare il buffer lato chiamante prima di trasferirlo quando sai che ti servirà ancora (`bytes.slice()` crea una copia indipendente da passare in transfer, lasciando l'originale intatto) — così si guadagna la velocità dello zero-copy senza il rischio del detach a sorpresa.
 
-**Importante**: dopo ogni `wasm-pack build`, rilancia anche `pnpm install` dentro `www/`. A differenza di npm, **pnpm non fa un vero symlink live** per le dipendenze `file:` — ne clona un contenuto in `node_modules/.pnpm/` al momento dell'`install`, e quel contenuto non si aggiorna da solo quando `pkg/` cambia sul disco. Se te ne dimentichi, il frontend continua a chiamare funzioni vecchie/mancanti (es. `wasm.page_count is not a function`) o serializza opzioni in un formato che l'API attuale non si aspetta più, con errori che sembrano bug nel codice Rust ma sono solo un pacchetto stantio.
+Dopo una nuova build del wasm (`./scripts/build-npm-package.sh`) non serve `pnpm install`: il motivo è spiegato in "Pacchetto `pdfrs-editor`" qui sopra.
 
 ```bash
 cd www
-pnpm install
+pnpm install        # solo la prima volta
 pnpm dev            # http://localhost:5173, pagina interattiva
 pnpm run build      # build di produzione (verifica tipi + bundle Vite)
 pnpm test:e2e       # smoke test end-to-end automatico
@@ -165,7 +191,7 @@ Nota sulla compressione: `save()` non chiama `Document::compress()`, quindi i du
 
 **Nel pannello**, un'immagine si porta sulla pagina trascinandola dalla palette, oppure cliccandola (la mette al centro, ed è il percorso raggiungibile da tastiera). Il drag usa il DnD nativo HTML5, sicuro qui perché questo pannello non ha il riordino delle pagine con cui collide nell'editor; come nell'editor, però, l'id dell'elemento trascinato è tenuto in una variabile e **non** letto dal `dataTransfer`, che il browser riempie con la propria rappresentazione dell'immagine trascinata. Lo smoke test non pilota il drag con il mouse — `dragTo` di Playwright sposta il puntatore sul bersaglio *prima* che il drag inizi, così la sorgente diventa l'immagine della pagina, e i mouse event sintetici non generano affatto eventi drag — ma dispatcha `DragEvent` sintetici, che esercitano comunque la logica di drop del pannello.
 
-### Modello logico del PDF: `PdfDocument` / `PdfEditor` (`src/pdf-model/`)
+### Modello logico del PDF: `PdfDocument` / `PdfEditor` (`packages/pdfrs-editor/src/pdf-model/`)
 
 Sopra le funzioni stateless viste finora c'è un livello di modello puro (nessun DOM, nessun riferimento a `window`/`document`), pensato per essere riusato da un front qualsiasi — anche il futuro front Vue in repo separata:
 
@@ -257,10 +283,10 @@ Registrati una sola volta con un side-effect import (`import "./webcomponents"` 
 
 **Verifica** (`www/e2e/editor.mjs`, `pnpm test:editor`): stesso pattern delle altre suite, ma attraversa gli shadow root reali (`el.shadowRoot.querySelector(...)`) invece del DOM normale. Copre il flusso completo: apertura di due documenti, drag & drop reale tramite `locator.dragTo()` di Playwright (non un evento sintetico — un vero `DataTransfer`), rotazione + eliminazione (verificate come stato locale, non come chiamate), commit (il conteggio pagine scende), merge dei due documenti — con la rotazione committata sulla prima pagina ancora visibile nel documento unito finale, prova che sopravvive all'intera pipeline (rotate pendente → commit → merge) — l'import di un JPEG unito a un PDF vero (una pagina in più nella griglia, renderizzata correttamente) — e infine la barra di avanzamento sulla pill: apre `ten_pages.pdf` e verifica che il riempimento della pill cresca durante il rendering (`0% < width < 100%`) e che finisca marcata "done" (riempimento al 100% + `.render-done`) una volta completato. Il test del riordino a livello di modello (rimappatura della rotazione sulla pagina spostata dopo `commit()`) vive invece in `pdf-model.mjs`, più mirato e senza bisogno di un vero drag.
 
-### Nota su Vite e `pkg/`/`pkg-full/`
+### Nota su Vite e i pacchetti collegati
 
-`www/vite.config.ts` imposta `server.fs.allow: [".."]`: senza questa opzione Vite risponde `403` quando la pagina prova a caricare `../pkg/pdfrs_bg.wasm` o `../pkg-full/pdfrs_bg.wasm`, perché quei file stanno fuori dalla root del progetto `www/`.
+`www/vite.config.ts` imposta `server.fs.allow: [".."]`. Senza questa opzione, Vite risponde `403` quando la pagina prova a caricare i sorgenti di `../packages/pdfrs-editor` o i file di `../pkg-npm`, perché stanno fuori dalla root del progetto `www/`.
 
 ## Package manager
 
-Il progetto usa **pnpm** per `www/` (non npm/yarn): `pnpm install`, `pnpm add -D <pacchetto>@latest` per aggiornare le dipendenze. Il lockfile è `www/pnpm-lock.yaml`.
+Il progetto usa **pnpm** (non npm né yarn), sia per `www/` sia per `packages/pdfrs-editor/`: `pnpm install` per installare, `pnpm add -D <pacchetto>@latest` per aggiornare. Ogni cartella ha il suo lockfile.

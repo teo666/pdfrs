@@ -1,5 +1,5 @@
 import { bytesToObjectUrl } from "../pdf-io";
-import type { PageInfo, PagePreview } from "../pdf-model/types";
+import type { PageInfo, PagePreview } from "pdfrs-editor";
 
 export interface PageActionDetail {
   id: number;
