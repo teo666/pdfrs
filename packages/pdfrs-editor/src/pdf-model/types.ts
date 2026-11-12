@@ -59,3 +59,32 @@ export interface ImagePageOptions {
   /** Ignored for pageSize "native" (always matches the image's own aspect ratio). Default "auto": matches the image's aspect ratio. */
   orientation?: "portrait" | "landscape" | "auto";
 }
+
+/** An image registered with a document for annotations (`PdfDocument.addAsset`). */
+export type AssetId = number;
+
+/** Assigned by `PdfDocument.addAnnotation`, never reused within a document. */
+export type AnnotationId = number;
+
+/** A decoded image, as `annotate_pdf` wants it: RGBA8, row-major, `width * height * 4` bytes, un-premultiplied alpha. */
+export interface ImageAsset {
+  pixels: Uint8Array;
+  width: number;
+  height: number;
+}
+
+/**
+ * An image placed on a page and not applied yet - a pending edit, like a
+ * rotation. Coordinates are fractions (0..1) of the page as it is in the
+ * baseline (its `/Rotate` applied, pending rotations *not*): the box stays
+ * attached to the content when the page is rotated. `x`/`y` are the box's
+ * top-left corner; its height follows from `width` and the image's aspect.
+ */
+export interface PageAnnotation {
+  id: AnnotationId;
+  page: PageId;
+  asset: AssetId;
+  x: number;
+  y: number;
+  width: number;
+}

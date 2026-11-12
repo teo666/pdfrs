@@ -1,4 +1,5 @@
 import {
+  annotate_pdf,
   compose_pdf,
   decrypt_pdf,
   encrypt_pdf,
@@ -12,7 +13,11 @@ import {
 } from "../worker/pdfrs-worker-client";
 import { renderPagesInParallel } from "../worker/preview-worker-pool";
 import type {
+  AnnotationId,
+  AssetId,
   HistoryEntry,
+  ImageAsset,
+  PageAnnotation,
   ImagePageOptions,
   MetadataField,
   MetadataPatch,
@@ -69,6 +74,7 @@ interface DocumentSnapshot {
   previewCache: Map<string, Uint8Array>;
   pendingMetadata: Map<MetadataField, string | null>;
   baselineMetadata: PdfMetadata | null;
+  annotations: Map<AnnotationId, PageAnnotation>;
 }
 
 /** Italian labels for the history entries, so a step reads "Modifica metadati (titolo)". */
@@ -87,6 +93,12 @@ const METADATA_FIELDS = Object.keys(METADATA_LABELS) as MetadataField[];
 
 function cacheKey(id: PageId, scale: number): string {
   return `${id}:${scale}`;
+}
+
+function assertBox(box: { x: number; y: number; width: number }): void {
+  if (![box.x, box.y, box.width].every(Number.isFinite) || box.width <= 0) {
+    throw new Error(`posizione non valida: x=${box.x}, y=${box.y}, larghezza=${box.width}`);
+  }
 }
 
 function identityOrder(pageCount: number): PageId[] {
@@ -126,6 +138,15 @@ export class PdfDocument {
   // Pending metadata edits, same idea as `rotations`/`deletions`: a field
   // present here overrides the baseline, `null` means "delete this key".
   private readonly pendingMetadata = new Map<MetadataField, string | null>();
+  // Images placed on pages and not applied yet (see PageAnnotation), part of
+  // the undoable state. The images themselves live in `assets`, which only
+  // ever grows: an asset is immutable, so snapshots can share it, and one no
+  // annotation refers to is simply never written into the file.
+  private readonly annotationsById = new Map<AnnotationId, PageAnnotation>();
+  private readonly assets = new Map<AssetId, ImageAsset>();
+  private nextAssetId = 1;
+  // Not restored by undo, so an id is never handed out twice.
+  private nextAnnotationId = 1;
   // What the baseline's /Info holds, read lazily on the first getMetadata()
   // call and cached like the previews are - `null` means "not read yet".
   // Invalidated wherever `previewCache` is, since it depends on exactly the
@@ -180,6 +201,7 @@ export class PdfDocument {
       this.rotations.size > 0 ||
       this.deletions.size > 0 ||
       this.pendingMetadata.size > 0 ||
+      this.annotationsById.size > 0 ||
       this.hasPendingReorder()
     );
   }
@@ -275,6 +297,7 @@ export class PdfDocument {
       previewCache: new Map(this.previewCache),
       pendingMetadata: new Map(this.pendingMetadata),
       baselineMetadata: this.baselineMetadata,
+      annotations: new Map(this.annotationsById),
     };
   }
 
@@ -297,6 +320,9 @@ export class PdfDocument {
     this.pendingMetadata.clear();
     for (const [field, value] of snapshot.pendingMetadata) this.pendingMetadata.set(field, value);
     this.baselineMetadata = snapshot.baselineMetadata;
+
+    this.annotationsById.clear();
+    for (const [id, annotation] of snapshot.annotations) this.annotationsById.set(id, annotation);
   }
 
   /**
@@ -466,7 +492,8 @@ export class PdfDocument {
 
   /**
    * A new PDF made of just these pages, in the order given, each with its
-   * pending rotation applied - what "extract these pages" should produce.
+   * pending rotation and annotations applied - what "extract these pages"
+   * should produce.
    * Pending deletions and the document's metadata are not involved, and this
    * document is left untouched.
    */
@@ -474,7 +501,7 @@ export class PdfDocument {
     const pages = this.distinctPages(ids);
     if (pages.length === 0) throw new Error("nessuna pagina da esportare");
     let bytes = await compose_pdf(
-      [this.bytes],
+      [await this.annotatedBaseline(new Set(pages))],
       pages.map((id) => ({ source: 0, page: id })),
     );
     const rotations: PendingRotation[] = [];
@@ -484,6 +511,93 @@ export class PdfDocument {
     });
     if (rotations.length > 0) bytes = await rotate_pages(bytes, rotations);
     return bytes;
+  }
+
+  // --- Annotations: images placed on pages ----------------------------------
+
+  /** Registers an image for `addAnnotation`. The pixels are kept as they are: don't mutate them afterwards. */
+  addAsset(asset: ImageAsset): AssetId {
+    if (
+      !Number.isInteger(asset.width) ||
+      !Number.isInteger(asset.height) ||
+      asset.width <= 0 ||
+      asset.height <= 0 ||
+      asset.pixels.length !== asset.width * asset.height * 4
+    ) {
+      throw new Error(`immagine non valida: ${asset.width}x${asset.height} con ${asset.pixels.length} byte`);
+    }
+    const id = this.nextAssetId++;
+    this.assets.set(id, asset);
+    return id;
+  }
+
+  /** The pending annotations, in the order they were added. */
+  annotations(): PageAnnotation[] {
+    return [...this.annotationsById.values()].map((annotation) => ({ ...annotation }));
+  }
+
+  /** Pages carrying at least one pending annotation. */
+  pagesWithAnnotations(): Set<PageId> {
+    return new Set([...this.annotationsById.values()].map((annotation) => annotation.page));
+  }
+
+  /** Places an image on a page, as a pending edit (one undo step). */
+  addAnnotation(annotation: Omit<PageAnnotation, "id">): AnnotationId {
+    this.assertValidPage(annotation.page);
+    if (!this.assets.has(annotation.asset)) throw new Error(`immagine ${annotation.asset} non registrata`);
+    assertBox(annotation);
+    const id = this.nextAnnotationId++;
+    this.pushUndo(`Aggiungi firma a pagina ${annotation.page}`);
+    this.annotationsById.set(id, { ...annotation, id });
+    return id;
+  }
+
+  /** Moves and/or resizes an annotation (one undo step; nothing if nothing changes). */
+  updateAnnotation(id: AnnotationId, patch: Partial<Pick<PageAnnotation, "x" | "y" | "width">>): void {
+    const current = this.annotationsById.get(id);
+    if (!current) throw new Error(`firma ${id} inesistente`);
+    const next = { ...current, ...patch };
+    assertBox(next);
+    if (next.x === current.x && next.y === current.y && next.width === current.width) return;
+    const verb = next.width !== current.width ? "Ridimensiona" : "Sposta";
+    this.pushUndo(`${verb} firma a pagina ${current.page}`);
+    this.annotationsById.set(id, next);
+  }
+
+  removeAnnotation(id: AnnotationId): void {
+    const current = this.annotationsById.get(id);
+    if (!current) return;
+    this.pushUndo(`Rimuovi firma da pagina ${current.page}`);
+    this.annotationsById.delete(id);
+  }
+
+  /**
+   * The baseline with the pending annotations drawn in (only those on
+   * `pages`, if given). Without any, the baseline itself - no wasm call.
+   */
+  private async annotatedBaseline(pages?: Set<PageId>): Promise<Uint8Array> {
+    const annotations = [...this.annotationsById.values()].filter(
+      (annotation) => !pages || pages.has(annotation.page),
+    );
+    if (annotations.length === 0) return this.bytes;
+
+    // Each asset once, however many annotations use it.
+    const used = [...new Set(annotations.map((annotation) => annotation.asset))];
+    const index = new Map(used.map((asset, position) => [asset, position]));
+    const images = used.map((asset) => this.assets.get(asset) as ImageAsset);
+    return annotate_pdf(
+      this.bytes,
+      images.map((image) => image.pixels),
+      images.map(({ width, height }) => ({ width, height })),
+      annotations.map(({ page, x, y, width, asset }) => ({
+        page,
+        x,
+        y,
+        width,
+        kind: "image" as const,
+        asset: index.get(asset) as number,
+      })),
+    );
   }
 
   /**
@@ -668,6 +782,7 @@ export class PdfDocument {
     this.rotations.clear();
     this.deletions.clear();
     this.pendingMetadata.clear();
+    this.annotationsById.clear();
     this.previewCache.clear();
     this.baselineMetadata = null;
     this.order = identityOrder(this.pageCount);
@@ -708,7 +823,9 @@ export class PdfDocument {
       throw new Error("il documento risulterebbe vuoto: annulla almeno un'eliminazione prima di confermare");
     }
 
-    let bytes = this.bytes;
+    // Annotations first, on the baseline their page ids and coordinates
+    // refer to; the page-level steps below then carry them along.
+    let bytes = await this.annotatedBaseline();
 
     // Skip compose_pdf entirely if nothing actually changed the page
     // sequence - no deletions *and* no reordering (surviving ids still run
@@ -716,7 +833,7 @@ export class PdfDocument {
     const isUnchangedOrder = survivingIds.every((id, index) => id === index + 1);
     if (!isUnchangedOrder) {
       const layout = survivingIds.map((id) => ({ source: 0, page: id }));
-      bytes = await compose_pdf([this.bytes], layout);
+      bytes = await compose_pdf([bytes], layout);
     }
 
     // Rotations are keyed by the *new* position, not the original id: deleting

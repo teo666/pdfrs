@@ -87,10 +87,11 @@ export class PdfEditor {
 
     let position = 0;
     for (const source of sources) {
+      const changed = changedPages(source);
       for (const page of source.pages()) {
         if (page.markedForDeletion) continue;
         position += 1;
-        if (page.pendingRotation !== 0) continue;
+        if (changed.has(page.id)) continue;
         for (const [scale, png] of source.cachedEntriesForPage(page.id)) {
           mergedDoc.primeCache(position, scale, png);
         }
@@ -121,10 +122,10 @@ export class PdfEditor {
     const count = pages.length === 1 ? "1 pagina" : `${pages.length} pagine`;
     const inserted = await target.insertPages(bytes, options.at, `Inserisci ${count} da un altro documento`);
 
-    const rotated = new Set(source.pages().filter((p) => p.pendingRotation !== 0).map((p) => p.id));
+    const changed = changedPages(source);
     pages.forEach((page, index) => {
       const newId = inserted[index];
-      if (newId === undefined || rotated.has(page)) return;
+      if (newId === undefined || changed.has(page)) return;
       for (const [scale, png] of source.cachedEntriesForPage(page)) target.primeCache(newId, scale, png);
     });
 
@@ -145,9 +146,9 @@ export class PdfEditor {
     const extractedId = await this.addDocument(await source.exportPages(pageIds));
     const extracted = this.getDocument(extractedId);
 
-    const rotated = new Set(source.pages().filter((p) => p.pendingRotation !== 0).map((p) => p.id));
+    const changed = changedPages(source);
     [...new Set(pageIds)].forEach((page, index) => {
-      if (rotated.has(page)) return;
+      if (changed.has(page)) return;
       for (const [scale, png] of source.cachedEntriesForPage(page)) {
         extracted.primeCache(index + 1, scale, png);
       }
@@ -170,4 +171,11 @@ export class PdfEditor {
     }
     return ids;
   }
+}
+
+/** Pages whose exported picture differs from their cached preview: rotated or annotated. */
+function changedPages(doc: PdfDocument): Set<PageId> {
+  const changed = doc.pagesWithAnnotations();
+  for (const page of doc.pages()) if (page.pendingRotation !== 0) changed.add(page.id);
+  return changed;
 }

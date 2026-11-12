@@ -898,6 +898,119 @@ async function main() {
     [fourPagesBytes, twoPagesBytes],
   );
 
+  // --- Annotations (signatures): pending, undoable, applied on export ---
+  // Helpers shared by the annotation tests, defined once in the page.
+  await page.evaluate(() => {
+    window.__redSquare = (size = 8) => {
+      const pixels = new Uint8Array(size * size * 4);
+      for (let i = 0; i < pixels.length; i += 4) pixels.set([220, 0, 0, 255], i);
+      return { pixels, width: size, height: size };
+    };
+    // RGBA of the pixel at (fx, fy) - fractions of the page - in a rendered PNG.
+    window.__pixelAt = async (png, fx, fy) => {
+      const bitmap = await createImageBitmap(new Blob([png], { type: "image/png" }));
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const context = canvas.getContext("2d");
+      context.drawImage(bitmap, 0, 0);
+      const x = Math.floor(fx * bitmap.width);
+      const y = Math.floor(fy * bitmap.height);
+      return Array.from(context.getImageData(x, y, 1, 1).data);
+    };
+    window.__isRed = ([r, g, b]) => r > 180 && g < 60 && b < 60;
+  });
+
+  results["annotations are pending, undoable edits with readable history labels"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfDocument } = window.__pdfModel;
+      const doc = await PdfDocument.open(new Uint8Array(bytes));
+      const asset = doc.addAsset(window.__redSquare());
+      const id = doc.addAnnotation({ page: 2, asset, x: 0.1, y: 0.1, width: 0.3 });
+      const pending = doc.hasPendingChanges() && doc.pagesWithAnnotations().has(2);
+      doc.updateAnnotation(id, { x: 0.2 });
+      doc.updateAnnotation(id, { width: 0.4 });
+      doc.updateAnnotation(id, { width: 0.4 }); // unchanged: no step
+      const labels = doc.history().map((h) => h.label).slice(1);
+      doc.undo();
+      const undone = doc.annotations()[0].width === 0.3;
+      doc.removeAnnotation(id);
+      const removed = doc.annotations().length === 0 && !doc.hasPendingChanges();
+      doc.undo();
+      const back = doc.annotations().length === 1;
+
+      let rejects = 0;
+      for (const bad of [
+        () => doc.addAnnotation({ page: 9, asset, x: 0, y: 0, width: 0.2 }),
+        () => doc.addAnnotation({ page: 1, asset: 42, x: 0, y: 0, width: 0.2 }),
+        () => doc.addAnnotation({ page: 1, asset, x: 0, y: 0, width: 0 }),
+        () => doc.addAsset({ pixels: new Uint8Array(3), width: 1, height: 1 }),
+      ]) {
+        try {
+          bad();
+        } catch {
+          rejects += 1;
+        }
+      }
+      return (
+        pending &&
+        labels.join(" | ") ===
+          "Aggiungi firma a pagina 2 | Sposta firma a pagina 2 | Ridimensiona firma a pagina 2" &&
+        undone &&
+        removed &&
+        back &&
+        rejects === 4
+      );
+    },
+    fourPagesBytes,
+  );
+
+  results["commit draws the annotation where it was placed and clears it"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    const asset = doc.addAsset(window.__redSquare());
+    doc.addAnnotation({ page: 1, asset, x: 0.5, y: 0.5, width: 0.4 });
+    const before = await doc.getPreview(1, 0.3); // previews show the baseline: not red yet
+    const notYet = !window.__isRed(await window.__pixelAt(before.png, 0.7, 0.55));
+    await doc.commit();
+    const after = await doc.getPreview(1, 0.3);
+    const inside = window.__isRed(await window.__pixelAt(after.png, 0.7, 0.55));
+    const outside = !window.__isRed(await window.__pixelAt(after.png, 0.3, 0.3));
+    return notYet && inside && outside && doc.annotations().length === 0 && !doc.hasPendingChanges();
+  }, fourPagesBytes);
+
+  results["annotations follow their page through reorder, deletion and extraction"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfEditor } = window.__pdfModel;
+      const editor = new PdfEditor();
+      const id = await editor.addDocument(new Uint8Array(bytes));
+      const doc = editor.getDocument(id);
+      const asset = doc.addAsset(window.__redSquare());
+      // Top-left area of page 3, then page 3 moved first; page 4 deleted with its own annotation.
+      doc.addAnnotation({ page: 3, asset, x: 0.05, y: 0.05, width: 0.3 });
+      doc.addAnnotation({ page: 4, asset, x: 0.5, y: 0.5, width: 0.3 });
+      const cached3 = await doc.getPreview(3, 0.3);
+      doc.movePage(3, 0);
+      doc.deletePage(4);
+
+      const extractedId = await editor.extractPages(id, [3]);
+      const extracted = editor.getDocument(extractedId);
+      const notCarried = extracted.cachedEntriesForPage(1).length === 0; // annotated: a new picture
+      const extractedPng = (await extracted.getPreview(1, 0.3)).png;
+      const extractedRed = window.__isRed(await window.__pixelAt(extractedPng, 0.15, 0.08));
+
+      await doc.commit();
+      const first = (await doc.getPreview(1, 0.3)).png;
+      const red = window.__isRed(await window.__pixelAt(first, 0.15, 0.08));
+      return (
+        notCarried &&
+        extractedRed &&
+        red &&
+        doc.getPageCount() === 3 &&
+        cached3.png !== first // the committed page is a new render
+      );
+    },
+    fourPagesBytes,
+  );
+
   results["no console/page errors"] = consoleErrors.length === 0;
 
   await browser.close();
