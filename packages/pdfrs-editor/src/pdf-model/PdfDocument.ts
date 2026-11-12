@@ -101,6 +101,10 @@ function assertBox(box: { x: number; y: number; width: number; rotation: number 
   }
 }
 
+function capitalize(word: string): string {
+  return word.charAt(0).toUpperCase() + word.slice(1);
+}
+
 /** An angle in degrees brought into (-180, 180], so equal turns compare equal. */
 function normalizeAngle(degrees: number): number {
   const turned = ((degrees % 360) + 360) % 360;
@@ -150,6 +154,7 @@ export class PdfDocument {
   // annotation refers to is simply never written into the file.
   private readonly annotationsById = new Map<AnnotationId, PageAnnotation>();
   private readonly assets = new Map<AssetId, ImageAsset>();
+  private readonly assetNouns = new Map<AssetId, string>();
   private nextAssetId = 1;
   // Not restored by undo, so an id is never handed out twice.
   private nextAnnotationId = 1;
@@ -523,7 +528,13 @@ export class PdfDocument {
   // --- Annotations: images placed on pages ----------------------------------
 
   /** Registers an image for `addAnnotation`. The pixels are kept as they are: don't mutate them afterwards. */
-  addAsset(asset: ImageAsset): AssetId {
+  /**
+   * Registers an image for `addAnnotation`. `noun` is how the history names
+   * what's placed with it ("Aggiungi immagine a pagina 2"): a feminine
+   * Italian noun, "firma" by default. The pixels are kept as they are: don't
+   * mutate them afterwards.
+   */
+  addAsset(asset: ImageAsset, noun = "firma"): AssetId {
     if (
       !Number.isInteger(asset.width) ||
       !Number.isInteger(asset.height) ||
@@ -535,7 +546,13 @@ export class PdfDocument {
     }
     const id = this.nextAssetId++;
     this.assets.set(id, asset);
+    this.assetNouns.set(id, noun);
     return id;
+  }
+
+  /** What the history calls an annotation's image. */
+  private nounOf(annotation: PageAnnotation): string {
+    return this.assetNouns.get(annotation.asset) ?? "firma";
   }
 
   /** The pending annotations, in the order they were added. */
@@ -562,7 +579,7 @@ export class PdfDocument {
     };
     assertBox(placed);
     const id = this.nextAnnotationId++;
-    this.pushUndo(`Aggiungi firma a pagina ${annotation.page}`);
+    this.pushUndo(`Aggiungi ${this.assetNouns.get(annotation.asset) ?? "firma"} a pagina ${annotation.page}`);
     this.annotationsById.set(id, { ...placed, id });
     return id;
   }
@@ -590,8 +607,8 @@ export class PdfDocument {
     const { x, y, width, rotation } = reference;
     this.pushUndo(
       relinking
-        ? `Firma di nuovo uguale alle altre a pagina ${source.page}`
-        : `Firma su tutte le pagine (${covered.size + targets.length})`,
+        ? `${capitalize(this.nounOf(source))} di nuovo uguale alle altre a pagina ${source.page}`
+        : `${capitalize(this.nounOf(source))} su tutte le pagine (${covered.size + targets.length})`,
     );
     const linked = { ...source, x, y, width, rotation, group, linked: true };
     this.annotationsById.set(id, linked);
@@ -609,7 +626,7 @@ export class PdfDocument {
   detachAnnotation(id: AnnotationId): void {
     const current = this.annotationsById.get(id);
     if (!current || !current.linked) return;
-    this.pushUndo(`Firma modificabile solo a pagina ${current.page}`);
+    this.pushUndo(`${capitalize(this.nounOf(current))} modificabile solo a pagina ${current.page}`);
     this.annotationsById.set(id, { ...current, linked: false });
   }
 
@@ -644,7 +661,9 @@ export class PdfDocument {
       next.rotation !== current.rotation ? "Ruota" : next.width !== current.width ? "Ridimensiona" : "Sposta";
     const members = this.groupMembers(current);
     this.pushUndo(
-      members.length > 1 ? `${verb} firma su ${members.length} pagine` : `${verb} firma a pagina ${current.page}`,
+      members.length > 1
+        ? `${verb} ${this.nounOf(current)} su ${members.length} pagine`
+        : `${verb} ${this.nounOf(current)} a pagina ${current.page}`,
     );
     const { x, y, width, rotation } = next;
     for (const member of members) this.annotationsById.set(member.id, { ...member, x, y, width, rotation });
@@ -656,7 +675,9 @@ export class PdfDocument {
     if (!current) return;
     const members = this.groupMembers(current);
     this.pushUndo(
-      members.length > 1 ? `Rimuovi firma da ${members.length} pagine` : `Rimuovi firma da pagina ${current.page}`,
+      members.length > 1
+        ? `Rimuovi ${this.nounOf(current)} da ${members.length} pagine`
+        : `Rimuovi ${this.nounOf(current)} da pagina ${current.page}`,
     );
     for (const member of members) this.annotationsById.delete(member.id);
   }

@@ -1099,6 +1099,23 @@ async function main() {
     fourPagesBytes,
   );
 
+  results["an asset's noun names its annotations in the history"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    const logo = doc.addAsset(window.__redSquare(), "immagine");
+    const id = doc.addAnnotation({ page: 1, asset: logo, x: 0.1, y: 0.1, width: 0.2 });
+    doc.updateAnnotation(id, { rotation: 15 });
+    doc.applyAnnotationToAllPages(id);
+    doc.removeAnnotation(id);
+    const signature = doc.addAsset(window.__redSquare()); // default noun
+    doc.addAnnotation({ page: 2, asset: signature, x: 0.1, y: 0.1, width: 0.2 });
+    return (
+      doc.history().slice(1).map((h) => h.label).join(" | ") ===
+      "Aggiungi immagine a pagina 1 | Ruota immagine a pagina 1 | Immagine su tutte le pagine (4) | " +
+        "Rimuovi immagine da 4 pagine | Aggiungi firma a pagina 2"
+    );
+  }, fourPagesBytes);
+
   results["no console/page errors"] = consoleErrors.length === 0;
 
   await browser.close();
