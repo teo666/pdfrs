@@ -13,6 +13,16 @@ Idee di funzionalità discusse e non ancora implementate.
 - [ ] rimozione firma digitale
 - [ ] creazione firma digitale
 
+## Già nella libreria, da portare nell'app (pdfrs-app)
+
+In ordine di priorità suggerito.
+
+- [ ] **Pannello "Proprietà": i metadati del documento** — titolo, autore, oggetto, parole chiave, creator, producer, date. Il motore li legge e scrive (`read_metadata`/`write_metadata`) e il modello li gestisce già come una modifica in sospeso (`PdfDocument.getMetadata()`/`setMetadata()`: lettura lazy, annullabili, applicati con il commit). Utile per correggere il titolo che i lettori PDF mostrano al posto del nome del file, o per togliere l'autore prima di condividere.
+- [ ] **Cronologia delle modifiche** — il modello tiene una cronologia con un'etichetta per ogni passo ("Conferma modifiche (12 pagine)", il nome dell'immagine inserita…) e può saltare a un punto preciso (`history()`, `goToHistoryIndex()`); l'app ha solo Annulla/Ripeti. Un pannello con l'elenco permetterebbe di tornare indietro di più passi in un clic e di vedere cosa si annulla.
+- [ ] **Pagina A4/Letter per i JPEG** — `image_to_pdf` e `PdfEditor.addImage` accettano `ImagePageOptions` (`pageSize`: `native`/`a4`/`letter`, `orientation`: `portrait`/`landscape`/`auto`); l'app usa sempre `native`, quindi una foto da telefono diventa una pagina enorme. Basta una scelta all'apertura o all'inserimento di un JPEG.
+- [ ] **Togliere solo la rotazione** di una pagina (`PdfDocument.resetRotation`): oggi si ruota di nuovo o si annulla.
+- [ ] **Permessi del PDF protetto** (stampa, copia del testo, modifica) — questo richiede prima il motore: `encrypt` in `src/operations/crypto.rs` usa `Permissions::default()`, cioè tutto consentito.
+
 ## Ottimizzazioni future
 
 - [ ] **Documento già letto tenuto nel worker, lato Rust** — oggi i worker del pool di anteprime tengono i *byte* del documento (`preview-worker-pool.ts`: inviati una volta per worker, non più a ogni pagina), ma ogni pagina da renderizzare paga ancora, dentro il worker:
