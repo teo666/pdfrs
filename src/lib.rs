@@ -98,6 +98,14 @@ pub async fn decrypt_pdf(file: Uint8Array, password: String) -> std::result::Res
     Ok(save(&mut doc)?)
 }
 
+/// True when the PDF can't be opened without a password (it has a user
+/// password). Such a PDF reads as having no pages: decrypt it first with
+/// `decrypt_pdf`. A PDF with only an owner password reads as `false`.
+#[wasm_bindgen]
+pub async fn is_password_protected(file: Uint8Array) -> std::result::Result<bool, JsValue> {
+    Ok(operations::crypto::needs_password(&file.to_vec())?)
+}
+
 /// Returns the number of pages in a PDF file (useful to know how many
 /// preview thumbnails to request from `render_page_preview`).
 #[wasm_bindgen]

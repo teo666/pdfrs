@@ -47,6 +47,16 @@ pub fn load_decrypted(bytes: &[u8], password: &str) -> Result<Document> {
     Document::load_mem_with_options(bytes, LoadOptions::with_password(password)).map_err(PdfrsError::from)
 }
 
+/// True when the PDF can't be read without a password: it has a user
+/// password. A PDF with only an owner password (restrictions, no password to
+/// open it) reads as `false` - lopdf opens it with the empty password, and
+/// every operation on it already works.
+pub fn needs_password(bytes: &[u8]) -> Result<bool> {
+    // Loading without a password leaves a user-password PDF still encrypted
+    // (and with no readable pages); any other PDF comes out decrypted.
+    Ok(Document::load_mem(bytes)?.is_encrypted())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,6 +87,31 @@ mod tests {
         doc.save_to(&mut bytes).unwrap();
 
         assert!(load_decrypted(&bytes, "wrong-password").is_err());
+    }
+
+    fn encrypted_bytes(owner: &str, user: &str) -> Vec<u8> {
+        let mut doc = multi_page_document(3);
+        encrypt(&mut doc, owner, user).unwrap();
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn tells_which_pdfs_need_a_password() {
+        let mut plain = Vec::new();
+        multi_page_document(2).save_to(&mut plain).unwrap();
+        assert!(!needs_password(&plain).unwrap());
+        assert!(needs_password(&encrypted_bytes("owner", "user")).unwrap());
+        // Only an owner password: it opens without one.
+        assert!(!needs_password(&encrypted_bytes("owner", "")).unwrap());
+    }
+
+    #[test]
+    fn opens_with_either_the_user_or_the_owner_password() {
+        let bytes = encrypted_bytes("owner", "user");
+        assert_eq!(load_decrypted(&bytes, "user").unwrap().get_pages().len(), 3);
+        assert_eq!(load_decrypted(&bytes, "owner").unwrap().get_pages().len(), 3);
     }
 
     #[test]

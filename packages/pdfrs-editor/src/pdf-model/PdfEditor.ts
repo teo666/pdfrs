@@ -1,4 +1,4 @@
-import { merge_pdfs, split_pdf } from "../worker/pdfrs-worker-client";
+import { decrypt_pdf, encrypt_pdf, merge_pdfs, split_pdf } from "../worker/pdfrs-worker-client";
 import { PdfDocument } from "./PdfDocument";
 import type { DocumentId, ImagePageOptions, PageId } from "./types";
 
@@ -170,6 +170,45 @@ export class PdfEditor {
       ids.push(await this.addDocument(part));
     }
     return ids;
+  }
+
+  /**
+   * A password-protected copy of a document, as it looks now (pending edits
+   * applied), registered as a new document - locked, see
+   * `PdfDocument.isLocked`. The source stays as it is. AES-256; `password`
+   * opens the copy, `ownerPassword` (the same one unless given) is the
+   * owner's.
+   */
+  async protectDocument(id: DocumentId, password: string, ownerPassword = password): Promise<DocumentId> {
+    const source = this.getDocument(id);
+    if (source.isLocked()) throw new Error("il documento è già protetto da password");
+    if (!password) throw new Error("serve una password");
+    return this.addDocument(await encrypt_pdf(await source.exportBytes(), ownerPassword, password));
+  }
+
+  /**
+   * A readable copy of a locked document, without the password, registered
+   * as a new document. Either the password to open it or the owner's will
+   * do. A wrong one throws an error saying so.
+   */
+  async unlockDocument(id: DocumentId, password: string): Promise<DocumentId> {
+    const source = this.getDocument(id);
+    let bytes: Uint8Array;
+    try {
+      bytes = await decrypt_pdf(source.getBytes(), password);
+    } catch (err) {
+      if (err instanceof Error && /invalid password/i.test(err.message)) throw new WrongPasswordError();
+      throw err;
+    }
+    return this.addDocument(bytes);
+  }
+}
+
+/** Thrown by `PdfEditor.unlockDocument` when the password doesn't open the document. */
+export class WrongPasswordError extends Error {
+  constructor() {
+    super("password errata");
+    this.name = "WrongPasswordError";
   }
 }
 

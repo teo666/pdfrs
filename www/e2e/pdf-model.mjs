@@ -383,6 +383,56 @@ async function main() {
     return doc.hasPendingChanges() === true && doc.getPageCount() === 4;
   }, fourPagesBytes);
 
+  // --- protectDocument: a locked copy (no pages, encrypted bytes), the
+  // source untouched; unlockDocument: a readable copy with either password,
+  // a wrong one rejected as such. The protected copy is the document as it
+  // looks now (pending deletion applied).
+  results["protectDocument / unlockDocument round trip, as new documents"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfEditor } = window.__pdfModel;
+      const editor = new PdfEditor();
+      const sourceId = await editor.addDocument(new Uint8Array(bytes));
+      const source = editor.getDocument(sourceId);
+      source.deletePage(2);
+
+      const lockedId = await editor.protectDocument(sourceId, "segreta", "padrone");
+      const locked = editor.getDocument(lockedId);
+      const text = new TextDecoder("latin1").decode(locked.getBytes());
+
+      let wrong = "";
+      try {
+        await editor.unlockDocument(lockedId, "sbagliata");
+      } catch (err) {
+        wrong = err.name;
+      }
+      const byUser = editor.getDocument(await editor.unlockDocument(lockedId, "segreta"));
+      const byOwner = editor.getDocument(await editor.unlockDocument(lockedId, "padrone"));
+      const preview = await byUser.getPreview(1, 0.3);
+
+      let twice = false;
+      try {
+        await editor.protectDocument(lockedId, "ancora");
+      } catch {
+        twice = true;
+      }
+      return (
+        locked.isLocked() &&
+        locked.getPageCount() === 0 &&
+        text.includes("/Encrypt") &&
+        source.getPageCount() === 4 &&
+        source.hasPendingChanges() &&
+        !source.isLocked() &&
+        wrong === "WrongPasswordError" &&
+        !byUser.isLocked() &&
+        byUser.getPageCount() === 3 &&
+        byOwner.getPageCount() === 3 &&
+        preview.png.length > 0 &&
+        twice
+      );
+    },
+    fourPagesBytes,
+  );
+
   // --- PdfEditor.mergeDocuments / splitDocument register new documents with the right page counts ---
   results["PdfEditor.mergeDocuments produces a new document with the summed page count"] = await page.evaluate(
     async ({ bytesA, bytesB }) => {

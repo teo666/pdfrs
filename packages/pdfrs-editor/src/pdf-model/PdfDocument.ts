@@ -4,6 +4,7 @@ import {
   decrypt_pdf,
   encrypt_pdf,
   image_to_pdf,
+  is_password_protected,
   merge_pdfs,
   page_count,
   read_metadata,
@@ -173,9 +174,13 @@ export class PdfDocument {
   // soon as that state becomes a past (or future) one.
   private currentLabel = "Documento aperto";
 
-  private constructor(bytes: Uint8Array, pageCount: number) {
+  /** Can't be read without a password: no pages until decrypted (see `isLocked`). */
+  private readonly locked: boolean;
+
+  private constructor(bytes: Uint8Array, pageCount: number, locked = false) {
     this.bytes = bytes;
     this.pageCount = pageCount;
+    this.locked = locked;
     this.order = identityOrder(pageCount);
   }
 
@@ -186,7 +191,19 @@ export class PdfDocument {
    */
   static async open(bytes: Uint8Array): Promise<PdfDocument> {
     const count = await page_count(bytes);
-    return new PdfDocument(bytes, count);
+    // A PDF that needs a password reads as having no pages: asked only
+    // then, so an ordinary PDF isn't parsed twice.
+    const locked = count === 0 && (await is_password_protected(bytes));
+    return new PdfDocument(bytes, count, locked);
+  }
+
+  /**
+   * True for a PDF that can't be read without its password: it has no pages
+   * here, and its bytes (`getBytes`/`exportBytes`) are the encrypted file,
+   * as it was opened. `PdfEditor.unlockDocument` makes a readable copy.
+   */
+  isLocked(): boolean {
+    return this.locked;
   }
 
   /**

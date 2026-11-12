@@ -106,6 +106,11 @@ export function decrypt_pdf(file: Uint8Array, password: string): Promise<Uint8Ar
   return call("decrypt_pdf", [file, password]);
 }
 
+/** True when the PDF can't be opened without a password (it reads as having no pages until decrypted). */
+export function is_password_protected(file: Uint8Array): Promise<boolean> {
+  return call("is_password_protected", [file]);
+}
+
 export function page_count(file: Uint8Array): Promise<number> {
   return call("page_count", [file]);
 }
