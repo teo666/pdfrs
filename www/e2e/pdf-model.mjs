@@ -1116,6 +1116,28 @@ async function main() {
     );
   }, fourPagesBytes);
 
+  results["an annotation with an explicit height is drawn stretched"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    const asset = doc.addAsset(window.__redSquare());
+    // A square image at 40% of the width: naturally ~28% of an A4's height.
+    const id = doc.addAnnotation({ page: 1, asset, x: 0.3, y: 0.3, width: 0.4 });
+    const natural = doc.annotations()[0].height === null;
+    doc.updateAnnotation(id, { height: 0.05 }); // squashed into a thin bar
+    const label = doc.history().at(-1).label;
+    let rejects = false;
+    try {
+      doc.updateAnnotation(id, { height: -1 });
+    } catch {
+      rejects = true;
+    }
+    await doc.commit();
+    const png = (await doc.getPreview(1, 0.3)).png;
+    const inBar = window.__isRed(await window.__pixelAt(png, 0.5, 0.32));
+    const belowBar = window.__isRed(await window.__pixelAt(png, 0.5, 0.45)); // red if it were square
+    return natural && label === "Ridimensiona firma a pagina 1" && rejects && inBar && !belowBar;
+  }, fourPagesBytes);
+
   results["no console/page errors"] = consoleErrors.length === 0;
 
   await browser.close();

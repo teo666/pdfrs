@@ -90,6 +90,11 @@ export interface PageAnnotation {
   /** Degrees, clockwise as the page is seen (in the same frame as x/y), about the box's own centre. 0 = upright. */
   rotation: number;
   /**
+   * Fraction of the page's height, for an image stretched out of its own
+   * proportions. `null`: the height follows from `width` and the image.
+   */
+  height: number | null;
+  /**
    * Copies of one signature put on every page share a group. `null` for an
    * annotation that was never applied to all pages.
    */

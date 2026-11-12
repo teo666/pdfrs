@@ -95,8 +95,9 @@ function cacheKey(id: PageId, scale: number): string {
   return `${id}:${scale}`;
 }
 
-function assertBox(box: { x: number; y: number; width: number; rotation: number }): void {
-  if (![box.x, box.y, box.width, box.rotation].every(Number.isFinite) || box.width <= 0) {
+function assertBox(box: { x: number; y: number; width: number; rotation: number; height?: number | null }): void {
+  const heightOk = box.height == null || (Number.isFinite(box.height) && box.height > 0);
+  if (![box.x, box.y, box.width, box.rotation].every(Number.isFinite) || box.width <= 0 || !heightOk) {
     throw new Error(`posizione non valida: x=${box.x}, y=${box.y}, larghezza=${box.width}, rotazione=${box.rotation}`);
   }
 }
@@ -567,13 +568,17 @@ export class PdfDocument {
 
   /** Places an image on a page, as a pending edit (one undo step). `rotation` defaults to 0. */
   addAnnotation(
-    annotation: Omit<PageAnnotation, "id" | "rotation" | "group" | "linked"> & { rotation?: number },
+    annotation: Omit<PageAnnotation, "id" | "rotation" | "height" | "group" | "linked"> & {
+      rotation?: number;
+      height?: number | null;
+    },
   ): AnnotationId {
     this.assertValidPage(annotation.page);
     if (!this.assets.has(annotation.asset)) throw new Error(`immagine ${annotation.asset} non registrata`);
     const placed = {
       ...annotation,
       rotation: normalizeAngle(annotation.rotation ?? 0),
+      height: annotation.height ?? null,
       group: null,
       linked: false,
     };
@@ -604,13 +609,13 @@ export class PdfDocument {
 
     // Linking back takes the box the linked copies have now, if any are left.
     const reference = inGroup.find((a) => a.linked && a.id !== id) ?? source;
-    const { x, y, width, rotation } = reference;
+    const { x, y, width, rotation, height } = reference;
     this.pushUndo(
       relinking
         ? `${capitalize(this.nounOf(source))} di nuovo uguale alle altre a pagina ${source.page}`
         : `${capitalize(this.nounOf(source))} su tutte le pagine (${covered.size + targets.length})`,
     );
-    const linked = { ...source, x, y, width, rotation, group, linked: true };
+    const linked = { ...source, x, y, width, rotation, height, group, linked: true };
     this.annotationsById.set(id, linked);
     return targets.map((page) => {
       const copyId = this.nextAnnotationId++;
@@ -642,7 +647,7 @@ export class PdfDocument {
    */
   updateAnnotation(
     id: AnnotationId,
-    patch: Partial<Pick<PageAnnotation, "x" | "y" | "width" | "rotation">>,
+    patch: Partial<Pick<PageAnnotation, "x" | "y" | "width" | "rotation" | "height">>,
   ): void {
     const current = this.annotationsById.get(id);
     if (!current) throw new Error(`firma ${id} inesistente`);
@@ -653,20 +658,27 @@ export class PdfDocument {
       next.x === current.x &&
       next.y === current.y &&
       next.width === current.width &&
-      next.rotation === current.rotation
+      next.rotation === current.rotation &&
+      next.height === current.height
     ) {
       return;
     }
     const verb =
-      next.rotation !== current.rotation ? "Ruota" : next.width !== current.width ? "Ridimensiona" : "Sposta";
+      next.rotation !== current.rotation
+        ? "Ruota"
+        : next.width !== current.width || next.height !== current.height
+          ? "Ridimensiona"
+          : "Sposta";
     const members = this.groupMembers(current);
     this.pushUndo(
       members.length > 1
         ? `${verb} ${this.nounOf(current)} su ${members.length} pagine`
         : `${verb} ${this.nounOf(current)} a pagina ${current.page}`,
     );
-    const { x, y, width, rotation } = next;
-    for (const member of members) this.annotationsById.set(member.id, { ...member, x, y, width, rotation });
+    const { x, y, width, rotation, height } = next;
+    for (const member of members) {
+      this.annotationsById.set(member.id, { ...member, x, y, width, rotation, height });
+    }
   }
 
   /** Removes an annotation - with all its linked copies, if it's one (one undo step). */
@@ -700,12 +712,13 @@ export class PdfDocument {
       this.bytes,
       images.map((image) => image.pixels),
       images.map(({ width, height }) => ({ width, height })),
-      annotations.map(({ page, x, y, width, rotation, asset }) => ({
+      annotations.map(({ page, x, y, width, rotation, height, asset }) => ({
         page,
         x,
         y,
         width,
         rotation,
+        ...(height === null ? {} : { height }),
         kind: "image" as const,
         asset: index.get(asset) as number,
       })),

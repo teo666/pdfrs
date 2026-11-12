@@ -60,6 +60,8 @@ export interface Annotation {
   width: number;
   /** Degrees, clockwise as the reader sees the page, about the image's own centre. Optional: absent means upright. */
   rotation?: number;
+  /** Fraction of the displayed page's height. Absent: from `width` and the image's proportions. */
+  height?: number;
   kind: "image";
   asset: number;
 }

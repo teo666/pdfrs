@@ -36,8 +36,9 @@ pub enum AnnotationKind {
 /// (bottom-left, `/Rotate` not applied). Converting between the two is this
 /// module's job; see `stamp_matrix`.
 ///
-/// There is no height: it follows from `width` and the image's aspect ratio,
-/// so a signature can't be stretched out of shape.
+/// The height normally follows from `width` and the image's aspect ratio, so
+/// a signature keeps its proportions. `height`, when given, sets it instead -
+/// for an image deliberately stretched to fill a box.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Annotation {
@@ -52,6 +53,10 @@ pub struct Annotation {
     /// written before this field existed still work.
     #[serde(default)]
     pub rotation: f64,
+    /// Fraction (0..1) of the displayed page's height. Absent: from `width`
+    /// and the image's own proportions.
+    #[serde(default)]
+    pub height: Option<f64>,
     #[serde(flatten)]
     pub kind: AnnotationKind,
 }
@@ -203,6 +208,13 @@ fn validate_annotation(annotation: &Annotation, asset_count: usize) -> Result<()
     }
     if !annotation.x.is_finite() || !annotation.y.is_finite() {
         return Err(PdfrsError::InvalidArgument("posizione dell'annotazione non valida".to_string()));
+    }
+    if let Some(height) = annotation.height {
+        if !height.is_finite() || height <= 0.0 {
+            return Err(PdfrsError::InvalidArgument(format!(
+                "altezza dell'annotazione non valida: {height}"
+            )));
+        }
     }
     if !annotation.rotation.is_finite() {
         return Err(PdfrsError::InvalidArgument(format!(
@@ -395,7 +407,10 @@ fn stamp_matrix(
     };
 
     let stamp_width = placement.width * view_width;
-    let stamp_height = stamp_width * aspect_ratio;
+    let stamp_height = match placement.height {
+        Some(height) => height * view_height,
+        None => stamp_width * aspect_ratio,
+    };
     let left = placement.x * view_width;
     // The UI's y grows downwards from the top edge; PDF's grows upwards from
     // the bottom, and the rectangle is anchored by its top-left corner.
@@ -459,7 +474,7 @@ mod tests {
     }
 
     pub(super) fn at(page: u32, x: f64, y: f64, width: f64, asset: usize) -> Annotation {
-        Annotation { page, x, y, width, rotation: 0.0, kind: AnnotationKind::Image { asset } }
+        Annotation { page, x, y, width, rotation: 0.0, height: None, kind: AnnotationKind::Image { asset } }
     }
 
     /// `at`, turned by `rotation` degrees clockwise as the reader sees it.
@@ -664,6 +679,37 @@ mod tests {
         let plain = stamp_matrix(centered(), 1.0, 595.0, 842.0, 0, 0.0, 0.0);
         assert_eq!(shifted[4] - plain[4], 20.0);
         assert_eq!(shifted[5] - plain[5], 30.0);
+    }
+
+    /// An explicit height stretches the image: its own proportions no longer
+    /// count, on an upright page and on one turned a quarter.
+    #[test]
+    fn an_explicit_height_stretches_the_image() {
+        let natural = stamp_matrix(at(1, 0.1, 0.1, 0.5, 0), 0.5, 600.0, 800.0, 0, 0.0, 0.0);
+        assert_eq!(natural[3], 0.5 * 600.0 * 0.5);
+
+        let stretched = Annotation { height: Some(0.25), ..at(1, 0.1, 0.1, 0.5, 0) };
+        let matrix = stamp_matrix(stretched, 0.5, 600.0, 800.0, 0, 0.0, 0.0);
+        assert_eq!(matrix[0], 0.5 * 600.0, "the width is untouched");
+        assert_eq!(matrix[3], 0.25 * 800.0, "the height is a quarter of the page's");
+        // Still anchored by its top-left corner: the top edge doesn't move.
+        assert_eq!(matrix[5] + matrix[3], 800.0 - 0.1 * 800.0);
+
+        // On a page shown turned a quarter, "height" is the displayed one,
+        // i.e. the page's width; the quarter turn moves the vertical scale
+        // into the matrix's `c` entry.
+        let turned_page = stamp_matrix(stretched, 0.5, 600.0, 800.0, 90, 0.0, 0.0);
+        assert!((turned_page[2].abs() - 0.25 * 600.0).abs() < 1e-9);
+        assert!((turned_page[1].abs() - 0.5 * 800.0).abs() < 1e-9, "the width, the displayed one");
+    }
+
+    #[test]
+    fn rejects_a_height_that_is_not_a_positive_number() {
+        let mut doc = multi_page_document(1);
+        let pixels = vec![0u8; 4];
+        let bad = Annotation { height: Some(0.0), ..at(1, 0.1, 0.1, 0.2, 0) };
+        let result = annotate(&mut doc, &[ImageAsset { pixels: &pixels, width: 1, height: 1 }], &[bad]);
+        assert!(result.is_err());
     }
 
     /// A rotation of zero must produce exactly the matrix it produced before
