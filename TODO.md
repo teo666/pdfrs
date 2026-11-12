@@ -21,6 +21,11 @@ In ordine di priorità suggerito.
 - [ ] **Cronologia delle modifiche** — il modello tiene una cronologia con un'etichetta per ogni passo ("Conferma modifiche (12 pagine)", il nome dell'immagine inserita…) e può saltare a un punto preciso (`history()`, `goToHistoryIndex()`); l'app ha solo Annulla/Ripeti. Un pannello con l'elenco permetterebbe di tornare indietro di più passi in un clic e di vedere cosa si annulla.
 - [ ] **Pagina A4/Letter per i JPEG** — `image_to_pdf` e `PdfEditor.addImage` accettano `ImagePageOptions` (`pageSize`: `native`/`a4`/`letter`, `orientation`: `portrait`/`landscape`/`auto`); l'app usa sempre `native`, quindi una foto da telefono diventa una pagina enorme. Basta una scelta all'apertura o all'inserimento di un JPEG.
 - [ ] **Togliere solo la rotazione** di una pagina (`PdfDocument.resetRotation`): oggi si ruota di nuovo o si annulla.
+- [ ] **Indice del PDF (segnalibri)** — da esporre prima nel motore: `lopdf` lo legge già (`Document::get_toc()`: livello, titolo, pagina di ogni voce).
+  - Motore: funzione wasm `read_outline(file)` → `[{ level, title, page }]`.
+  - Modello: `PdfDocument.getOutline()`, letto solo quando serve e tenuto in cache come i metadati (invalidato con la baseline); le pagine di destinazione come page id, così una voce resta giusta anche dopo un riordino, e segnala quelle che puntano a pagine da eliminare.
+  - App: pannello "Indice" con le voci rientrate per livello; un clic porta alla pagina nella griglia o la apre nel visualizzatore.
+  - **Poi: non perdere l'indice.** Oggi `compose` (`src/operations/compose.rs`) toglie `/Outlines` dal catalogo, e così `merge`, `nup` e `booklet`: un'eliminazione o un riordino applicato (o scaricato), un'unione, una divisione o un'estrazione producono un PDF senza indice. Rotazioni, firme e testo lo conservano. Va ricostruito con le pagine rinumerate, togliendo le voci che puntano a pagine eliminate (per l'unione: un ramo per documento).
 - [ ] **Permessi del PDF protetto** (stampa, copia del testo, modifica) — questo richiede prima il motore: `encrypt` in `src/operations/crypto.rs` usa `Permissions::default()`, cioè tutto consentito.
 
 ## Ottimizzazioni future
