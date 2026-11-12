@@ -153,6 +153,7 @@ export class PdfDocument {
   private nextAssetId = 1;
   // Not restored by undo, so an id is never handed out twice.
   private nextAnnotationId = 1;
+  private nextGroupId = 1;
   // What the baseline's /Info holds, read lazily on the first getMetadata()
   // call and cached like the previews are - `null` means "not read yet".
   // Invalidated wherever `previewCache` is, since it depends on exactly the
@@ -548,10 +549,17 @@ export class PdfDocument {
   }
 
   /** Places an image on a page, as a pending edit (one undo step). `rotation` defaults to 0. */
-  addAnnotation(annotation: Omit<PageAnnotation, "id" | "rotation"> & { rotation?: number }): AnnotationId {
+  addAnnotation(
+    annotation: Omit<PageAnnotation, "id" | "rotation" | "group" | "linked"> & { rotation?: number },
+  ): AnnotationId {
     this.assertValidPage(annotation.page);
     if (!this.assets.has(annotation.asset)) throw new Error(`immagine ${annotation.asset} non registrata`);
-    const placed = { ...annotation, rotation: normalizeAngle(annotation.rotation ?? 0) };
+    const placed = {
+      ...annotation,
+      rotation: normalizeAngle(annotation.rotation ?? 0),
+      group: null,
+      linked: false,
+    };
     assertBox(placed);
     const id = this.nextAnnotationId++;
     this.pushUndo(`Aggiungi firma a pagina ${annotation.page}`);
@@ -559,7 +567,62 @@ export class PdfDocument {
     return id;
   }
 
-  /** Moves, resizes and/or turns an annotation (one undo step; nothing if nothing changes). */
+  /**
+   * Puts the same annotation on every page of the document (one undo step):
+   * linked copies with the same image, position, size and angle - editing
+   * any of them edits them all. Pages that already have a copy of the group
+   * (linked or not) are skipped, so applying again only fills in pages added
+   * since. On a copy that was unlinked, this links it back: it takes the
+   * group's current position again. Returns the ids of the new copies.
+   */
+  applyAnnotationToAllPages(id: AnnotationId): AnnotationId[] {
+    const source = this.annotationsById.get(id);
+    if (!source) throw new Error(`firma ${id} inesistente`);
+    const group = source.group ?? this.nextGroupId++;
+    const inGroup = [...this.annotationsById.values()].filter((a) => a.group === group);
+    const covered = new Set([...inGroup.map((a) => a.page), source.page]);
+    const targets = this.order.filter((page) => !covered.has(page));
+    const relinking = source.group !== null && !source.linked;
+    if (targets.length === 0 && !relinking) return [];
+
+    // Linking back takes the box the linked copies have now, if any are left.
+    const reference = inGroup.find((a) => a.linked && a.id !== id) ?? source;
+    const { x, y, width, rotation } = reference;
+    this.pushUndo(
+      relinking
+        ? `Firma di nuovo uguale alle altre a pagina ${source.page}`
+        : `Firma su tutte le pagine (${covered.size + targets.length})`,
+    );
+    const linked = { ...source, x, y, width, rotation, group, linked: true };
+    this.annotationsById.set(id, linked);
+    return targets.map((page) => {
+      const copyId = this.nextAnnotationId++;
+      this.annotationsById.set(copyId, { ...linked, id: copyId, page });
+      return copyId;
+    });
+  }
+
+  /**
+   * Unlinks one copy from its group (one undo step): it keeps its place and
+   * from now on is edited on its own; the other copies stay linked.
+   */
+  detachAnnotation(id: AnnotationId): void {
+    const current = this.annotationsById.get(id);
+    if (!current || !current.linked) return;
+    this.pushUndo(`Firma modificabile solo a pagina ${current.page}`);
+    this.annotationsById.set(id, { ...current, linked: false });
+  }
+
+  /** The copies that move with `annotation`: its linked group, or just itself. */
+  private groupMembers(annotation: PageAnnotation): PageAnnotation[] {
+    if (annotation.group === null || !annotation.linked) return [annotation];
+    return [...this.annotationsById.values()].filter((a) => a.group === annotation.group && a.linked);
+  }
+
+  /**
+   * Moves, resizes and/or turns an annotation - and, if it's a linked copy,
+   * all the linked copies alike (one undo step; nothing if nothing changes).
+   */
   updateAnnotation(
     id: AnnotationId,
     patch: Partial<Pick<PageAnnotation, "x" | "y" | "width" | "rotation">>,
@@ -579,15 +642,23 @@ export class PdfDocument {
     }
     const verb =
       next.rotation !== current.rotation ? "Ruota" : next.width !== current.width ? "Ridimensiona" : "Sposta";
-    this.pushUndo(`${verb} firma a pagina ${current.page}`);
-    this.annotationsById.set(id, next);
+    const members = this.groupMembers(current);
+    this.pushUndo(
+      members.length > 1 ? `${verb} firma su ${members.length} pagine` : `${verb} firma a pagina ${current.page}`,
+    );
+    const { x, y, width, rotation } = next;
+    for (const member of members) this.annotationsById.set(member.id, { ...member, x, y, width, rotation });
   }
 
+  /** Removes an annotation - with all its linked copies, if it's one (one undo step). */
   removeAnnotation(id: AnnotationId): void {
     const current = this.annotationsById.get(id);
     if (!current) return;
-    this.pushUndo(`Rimuovi firma da pagina ${current.page}`);
-    this.annotationsById.delete(id);
+    const members = this.groupMembers(current);
+    this.pushUndo(
+      members.length > 1 ? `Rimuovi firma da ${members.length} pagine` : `Rimuovi firma da pagina ${current.page}`,
+    );
+    for (const member of members) this.annotationsById.delete(member.id);
   }
 
   /**

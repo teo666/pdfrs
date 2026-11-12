@@ -89,4 +89,16 @@ export interface PageAnnotation {
   width: number;
   /** Degrees, clockwise as the page is seen (in the same frame as x/y), about the box's own centre. 0 = upright. */
   rotation: number;
+  /**
+   * Copies of one signature put on every page share a group. `null` for an
+   * annotation that was never applied to all pages.
+   */
+  group: number | null;
+  /**
+   * Whether this copy follows its group: linked copies move, resize, turn
+   * and go away together. A copy unlinked on one page (e.g. moved off some
+   * text there) is edited on its own and leaves the others alone. Always
+   * false without a group.
+   */
+  linked: boolean;
 }

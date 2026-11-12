@@ -1034,6 +1034,71 @@ async function main() {
     return defaultsUpright && label === "Ruota firma a pagina 1" && normalised && steps === 3 && above && !oldEnd;
   }, fourPagesBytes);
 
+  results["a signature on all pages moves together; an unlinked copy is edited on its own"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfDocument } = window.__pdfModel;
+      const doc = await PdfDocument.open(new Uint8Array(bytes));
+      const asset = doc.addAsset(window.__redSquare());
+      const id = doc.addAnnotation({ page: 2, asset, x: 0.6, y: 0.8, width: 0.2 });
+      const copies = doc.applyAnnotationToAllPages(id);
+      const onAll = doc.annotations().map((a) => a.page).sort().join(",") === "1,2,3,4";
+      const allLinked = doc.annotations().every((a) => a.linked && a.group === doc.annotations()[0].group);
+      const again = doc.applyAnnotationToAllPages(copies[0]).length === 0; // already everywhere
+
+      // Editing any linked copy edits them all, in one step.
+      doc.updateAnnotation(copies[1], { x: 0.1, rotation: 30 });
+      const together = doc.annotations().every((a) => a.x === 0.1 && a.rotation === 30);
+      const moveLabel = doc.history().at(-1).label;
+
+      // Page 3's copy unlinked and moved: only it moves; the others follow
+      // their own edits without dragging it along.
+      const page3 = () => doc.annotations().find((a) => a.page === 3);
+      doc.detachAnnotation(page3().id);
+      doc.updateAnnotation(page3().id, { y: 0.1 });
+      doc.updateAnnotation(id, { width: 0.3 });
+      const others = doc.annotations().filter((a) => a.page !== 3);
+      const independent =
+        page3().y === 0.1 && page3().width === 0.2 && others.every((a) => a.y === 0.8 && a.width === 0.3);
+      const onlyLabel = doc.history().at(-2).label;
+
+      // Linking it back puts it where the others are.
+      doc.applyAnnotationToAllPages(page3().id);
+      const relinked = page3().linked && page3().y === 0.8 && page3().width === 0.3;
+
+      // Pages inserted later get a copy when applying again.
+      await doc.insertPages(new Uint8Array(bytes));
+      const added = doc.applyAnnotationToAllPages(id).length === 4;
+
+      // Removing a linked copy removes the linked ones, not an unlinked one.
+      doc.detachAnnotation(page3().id);
+      doc.removeAnnotation(id);
+      const kept = doc.annotations();
+      const removed = kept.length === 1 && kept[0].page === 3;
+
+      // A commit draws every copy.
+      doc.undo();
+      await doc.commit();
+      const png = (await doc.getPreview(8, 0.3)).png;
+      const drawn = window.__isRed(await window.__pixelAt(png, 0.2, 0.87));
+
+      return (
+        copies.length === 3 &&
+        onAll &&
+        allLinked &&
+        again &&
+        together &&
+        moveLabel === "Ruota firma su 4 pagine" &&
+        independent &&
+        onlyLabel === "Sposta firma a pagina 3" &&
+        relinked &&
+        added &&
+        removed &&
+        drawn
+      );
+    },
+    fourPagesBytes,
+  );
+
   results["no console/page errors"] = consoleErrors.length === 0;
 
   await browser.close();
