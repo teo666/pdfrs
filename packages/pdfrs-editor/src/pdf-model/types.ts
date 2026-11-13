@@ -165,6 +165,21 @@ export interface ExtractedImage {
   bytes: Uint8Array;
 }
 
+/** How much `compressDocument` gives up for a lighter file: about 220, 150 or 100 dpi. */
+export type CompressionLevel = "high" | "balanced" | "small";
+
+/** What `PdfEditor.compressDocument` did. */
+export interface CompressResult {
+  /** The lighter copy, registered as a new document; `null` when no image came out lighter. */
+  id: DocumentId | null;
+  /** The whole file's size, before and after. */
+  bytesBefore: number;
+  bytesAfter: number;
+  /** Images that could be recompressed, and those that came out lighter. */
+  considered: number;
+  recompressed: number;
+}
+
 export interface PageAnnotation {
   id: AnnotationId;
   page: PageId;

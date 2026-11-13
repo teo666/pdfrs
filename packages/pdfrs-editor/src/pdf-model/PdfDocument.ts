@@ -12,6 +12,7 @@ import {
   read_metadata,
   read_outline,
   remove_images,
+  replace_image,
   rotate_pages,
   write_metadata,
   write_outline,
@@ -1070,6 +1071,36 @@ export class PdfDocument {
     if (removed.length === 0) return;
     this.pushUndo(this.removalLabel("Ripristina", removed), this.removalAction("restoreImages", removed));
     for (const id of removed) this.removedImages.delete(id);
+  }
+
+  /**
+   * Puts the picture `file` (a JPEG or PNG file) in the place of the image
+   * `key`, wherever the document draws it - every page, and every Form.
+   * One of other proportions is fitted inside the old image's box, with
+   * transparent margins: nothing else on the page moves.
+   *
+   * Applied to the baseline at once, like `setPhotoPage` (one undo step):
+   * the image object keeps its id, so the pages, their pending edits and
+   * the placement ids stay as they were.
+   */
+  async replaceImage(key: string, file: Uint8Array): Promise<void> {
+    const pages = [
+      ...new Set((await this.getImages()).placements.filter((p) => p.image === key).map((p) => p.page)),
+    ];
+    const before = this.snapshot();
+    this.bytes = await replace_image(this.bytes, key, file);
+    this.baselineImages = null;
+    // Only the pages that draw it look different.
+    for (const page of pages) {
+      for (const cached of [...this.previewCache.keys()]) {
+        if (cached.startsWith(`${page}:`)) this.previewCache.delete(cached);
+      }
+    }
+    this.recordSnapshot(
+      before,
+      pages.length === 1 ? `Sostituisci immagine (pagina ${pages[0]})` : `Sostituisci immagine su ${pages.length} pagine`,
+      { type: "replaceImage", params: { pages: pages.length, page: pages[0] ?? 0 } },
+    );
   }
 
   /** "Rimuovi immagine (pagina 3)", "Rimuovi 2 immagini da 12 pagine"... */

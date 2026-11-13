@@ -136,7 +136,7 @@ impl Grabber {
     }
 }
 
-fn to_image(data: ImageData, alpha: Option<LumaData>) -> Option<DynamicImage> {
+pub(crate) fn to_image(data: ImageData, alpha: Option<LumaData>) -> Option<DynamicImage> {
     let (width, height) = (data.width(), data.height());
     // A mask of another size than the image is scaled to it.
     let alpha = alpha.map(|mask| {

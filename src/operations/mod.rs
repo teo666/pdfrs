@@ -5,6 +5,8 @@ pub mod crypto;
 #[cfg(feature = "image-import")]
 pub mod image;
 #[cfg(all(feature = "preview", feature = "image-import"))]
+pub mod image_edit;
+#[cfg(all(feature = "preview", feature = "image-import"))]
 pub mod image_extract;
 pub mod images;
 pub mod merge;

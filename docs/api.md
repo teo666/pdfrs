@@ -200,6 +200,38 @@ const { mime, bytes: data } = await extract_image(bytes, images[0].key);
 const url = URL.createObjectURL(new Blob([data], { type: mime }));
 ```
 
+## `replace_image(file: Uint8Array, key: string, image: Uint8Array): Promise<Uint8Array>`
+
+**Solo nella build "full".** Mette la figura `image` (un file JPEG o PNG) al posto dell'immagine `key` (da `list_images`), **ovunque sia disegnata**: in ogni pagina e in ogni Form. Si riscrive l'oggetto immagine mantenendone l'id, quindi i contenuti delle pagine, con le loro `cm`, restano com'erano.
+
+- Una figura di **proporzioni diverse** viene adattata nel riquadro della vecchia, centrata, con margini trasparenti (maschera `SMask`): niente si sposta e niente si deforma.
+- Un **JPEG** che non va né ruotato (orientamento EXIF) né adattato entra byte per byte. Altrimenti una foto resta JPEG (qualità 90) e un PNG resta senza perdita (Flate).
+- Rifiuta le immagini inline (scritte dentro la pagina) e le maschere (`/ImageMask`). Accetta solo JPEG e PNG: altri formati vanno convertiti prima, per esempio con un canvas.
+
+```ts
+const { images } = await list_images(bytes);
+const updated = await replace_image(bytes, images[0].key, logoPng);
+```
+
+## `compress_images(file: Uint8Array, options?): Promise<{ bytes, considered, recompressed, bytesBefore, bytesAfter }>`
+
+**Solo nella build "full".** Ricomprime le immagini in JPEG, ridotte alla risoluzione che serve **dove sono disegnate più grandi**. `options` è `{ level?: "high" | "balanced" | "small" }`, predefinito `"balanced"`:
+
+| livello | risoluzione | qualità JPEG |
+| --- | --- | --- |
+| `high` | 220 dpi | 85 |
+| `balanced` | 150 dpi | 75 |
+| `small` | 100 dpi | 60 |
+
+- Un'immagine che non diventerebbe almeno un decimo più leggera resta com'era.
+- Restano com'erano anche le scansioni in bianco e nero (JBIG2, CCITT, 1 bit), le maschere, le immagini inline e quelle sotto 8 KB.
+- La trasparenza resta, come `SMask`.
+- Restituisce il nuovo PDF (`bytes`) e i conteggi: `considered` (immagini che si potevano ricomprimere), `recompressed` (quelle ricompresse davvero) e la loro dimensione prima e dopo (`bytesBefore`, `bytesAfter`, maschere comprese).
+
+```ts
+const { bytes: lighter, recompressed } = await compress_images(bytes, { level: "small" });
+```
+
 ## `render_page_preview(file: Uint8Array, page: number, scale: number): Promise<Uint8Array>`
 
 > Dietro la feature Cargo `preview` (attiva di default, ma assente in una build "core" - vedi docs/architecture.md). Nel frontend `www/`, chiamarla è ciò che fa scaricare `pdfrs-full` (`pkg-full/`, ~4.3MB) al posto del solo pacchetto `pdfrs` core - vedi docs/development.md.

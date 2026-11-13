@@ -9,8 +9,8 @@ previews. Everything runs locally: no file leaves the page.
 
 | Import | Size (wasm) | What's in it |
 | --- | --- | --- |
-| `pdfrs.js/core` | ~1.2 MB | everything except the three functions on the next line |
-| `pdfrs.js/full` | ~5.9 MB | `core` plus `render_page_preview` (pages to PNG), `image_to_pdf` (JPEG to PDF page) and `extract_image` |
+| `pdfrs.js/core` | ~1.2 MB | everything except the five functions on the next line |
+| `pdfrs.js/full` | ~5.9 MB | `core` plus `render_page_preview` (pages to PNG), `image_to_pdf` (JPEG to PDF page), `extract_image`, `replace_image` and `compress_images` |
 
 The functions in both builds have the same signatures; pick `core` unless you
 need previews or image import.
@@ -55,6 +55,8 @@ them, though: for a responsive page, call them from a Web Worker.
 | `render_page_preview(file, page, scale)` | a page as PNG (`full` only) |
 | `image_to_pdf(file, options?)` | a JPEG as a one-page PDF (`full` only) |
 | `extract_image(file, key, maxSize?)` | an image of the PDF as JPEG or PNG (`full` only) |
+| `replace_image(file, key, image)` | another picture in the place of an image, everywhere it's drawn (`full` only) |
+| `compress_images(file, options?)` | recompresses the images for a lighter file (`full` only) |
 
 The TypeScript declarations (`pdfrs.d.ts`) ship with the package; the full
 documentation, with every option, is in the repository's

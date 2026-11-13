@@ -10,7 +10,7 @@ Idee di funzionalità discusse e non ancora implementate.
 - [x] **fascicolatura / booklet** — imposizione a libretto piegato al centro (saddle-stitch), riordino automatico a multipli di 4, supporto fronte/retro e direzione di rilegatura (`booklet_pdf`).
 - [x] **pdf multipagina / N-up** — layout a griglia con $N$ pagine per foglio (1, 2, 4, 6, 8, 9, 16 o custom), margini, spacing, bordi, orientamento e auto-rotazione (`nup_pdf`).
 - [x] **rimozione immagini (fase 1)** — elenco delle immagini già nel PDF con posizione, scarico (JPEG originale o PNG), rimozione in sospeso da una pagina o da tutte (`images.rs`, `image_extract.rs`, strumento «Immagini» dell'app).
-- [ ] **Immagini, fase 2** — sostituire un'immagine mantenendone posizione e dimensione (riusando `stamp::add_image_object`); ricomprimere/ridurre le immagini per alleggerire il file (decodifica via hayro, ricodifica JPEG; JBIG2/JPX da saltare o convertire).
+- [x] **Immagini, fase 2** — sostituire un'immagine (ovunque sia disegnata, adattata nel riquadro con margini trasparenti: `replace_image`) e alleggerire il file ricomprimendo le immagini in una copia (`compress_images`, tre livelli). `image_edit.rs`; strumento «Immagini» dell'app.
 - [ ] **Immagini, fase 3** — spostare e ridimensionare un'immagine esistente (riscrivere la `cm` che la precede; attenzione a trasformazioni annidate e ritagli).
 - [ ] rimozione firma digitale
 - [ ] creazione firma digitale

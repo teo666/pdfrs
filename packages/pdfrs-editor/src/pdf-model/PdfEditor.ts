@@ -1,6 +1,6 @@
-import { decrypt_pdf, encrypt_pdf, merge_pdfs, split_pdf, write_outline } from "../worker/pdfrs-worker-client";
+import { compress_images, decrypt_pdf, encrypt_pdf, merge_pdfs, split_pdf, write_outline } from "../worker/pdfrs-worker-client";
 import { PdfDocument } from "./PdfDocument";
-import type { DocumentId, ImagePageOptions, OutlineEntry, PageId } from "./types";
+import type { CompressionLevel, CompressResult, DocumentId, ImagePageOptions, OutlineEntry, PageId } from "./types";
 
 /**
  * Manages a collection of `PdfDocument`s and the operations that span more
@@ -216,6 +216,26 @@ export class PdfEditor {
     if (source.isLocked()) throw new Error("il documento è già protetto da password");
     if (!password) throw new Error("serve una password");
     return this.addDocument(await encrypt_pdf(await source.exportBytes(), ownerPassword, password));
+  }
+
+  /**
+   * A lighter copy of a document - as it appears, pending edits included -
+   * with its images recompressed for `level`, registered as a new document.
+   * When no image comes out lighter, nothing is registered (`id: null`).
+   */
+  async compressDocument(id: DocumentId, level: CompressionLevel = "balanced"): Promise<CompressResult> {
+    const source = this.getDocument(id);
+    if (source.isLocked()) throw new Error("il documento è protetto da password: va prima sbloccato");
+    const bytes = await source.exportBytes();
+    const result = await compress_images(bytes, { level });
+    const lighter = result.recompressed > 0 && result.bytes.length < bytes.length;
+    return {
+      id: lighter ? await this.addDocument(result.bytes) : null,
+      bytesBefore: bytes.length,
+      bytesAfter: lighter ? result.bytes.length : bytes.length,
+      considered: result.considered,
+      recompressed: lighter ? result.recompressed : 0,
+    };
   }
 
   /**
