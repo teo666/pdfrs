@@ -5,6 +5,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 use super::content_scan;
+use super::nup::get_visible_box;
 use super::text::{self, FontFace, StandardFont, TextAlign};
 use crate::error::{PdfrsError, Result};
 
@@ -120,7 +121,9 @@ pub fn annotate(doc: &mut Document, assets: &[ImageAsset], annotations: &[Annota
     let mut font_ids: HashMap<FontFace, ObjectId> = HashMap::new();
 
     for (page, page_id, grouped) in targets {
-        let (media_x, media_y, page_width, page_height) = page_box(doc, page_id, page)?;
+        // The part of the page shown (CropBox within MediaBox): what the
+        // annotation's fractions are of, as in the previews they were placed on.
+        let (origin_x, origin_y, page_width, page_height) = get_visible_box(doc, page_id, page)?;
         let rotation = page_rotation(doc, page_id);
 
         // Must happen before add_xobject: see the function's own comment for
@@ -170,8 +173,8 @@ pub fn annotate(doc: &mut Document, assets: &[ImageAsset], annotations: &[Annota
                         page_width,
                         page_height,
                         rotation,
-                        media_x,
-                        media_y,
+                        origin_x,
+                        origin_y,
                     );
                     // Same shape as lopdf's own `Document::insert_image`, but
                     // writing the full matrix ourselves: that helper only takes
@@ -204,8 +207,8 @@ pub fn annotate(doc: &mut Document, assets: &[ImageAsset], annotations: &[Annota
                         page_width,
                         page_height,
                         rotation,
-                        media_x,
-                        media_y,
+                        origin_x,
+                        origin_y,
                     );
                     text_operations(&layout, &name, *align, text::parse_color(color), matrix)
                 }
@@ -400,46 +403,6 @@ fn inherited_attribute(doc: &Document, page_id: ObjectId, key: &[u8]) -> Option<
     None
 }
 
-/// The page's `/MediaBox` as (origin x, origin y, width, height). The origin
-/// is rarely non-zero, but when it is, every coordinate on the page is
-/// offset by it.
-fn page_box(doc: &Document, page_id: ObjectId, page: u32) -> Result<(f64, f64, f64, f64)> {
-    let media_box = inherited_attribute(doc, page_id, b"MediaBox")
-        .ok_or_else(|| PdfrsError::InvalidArgument(format!("la pagina {page} non ha un /MediaBox")))?;
-
-    let values = media_box
-        .as_array()
-        .map_err(|_| PdfrsError::InvalidArgument(format!("/MediaBox della pagina {page} non è un array")))?;
-    if values.len() != 4 {
-        return Err(PdfrsError::InvalidArgument(format!(
-            "/MediaBox della pagina {page} ha {} valori invece di 4",
-            values.len()
-        )));
-    }
-
-    let mut numbers = [0.0f64; 4];
-    for (index, value) in values.iter().enumerate() {
-        numbers[index] = doc
-            .dereference(value)
-            .ok()
-            .and_then(|(_, object)| object.as_float().ok())
-            .map(|float| float as f64)
-            .ok_or_else(|| PdfrsError::InvalidArgument(format!("/MediaBox della pagina {page} non è numerico")))?;
-    }
-
-    let [x0, y0, x1, y1] = numbers;
-    let (left, right) = (x0.min(x1), x0.max(x1));
-    let (bottom, top) = (y0.min(y1), y0.max(y1));
-    let (width, height) = (right - left, top - bottom);
-    if width <= 0.0 || height <= 0.0 {
-        return Err(PdfrsError::InvalidArgument(format!(
-            "/MediaBox della pagina {page} è degenere"
-        )));
-    }
-
-    Ok((left, bottom, width, height))
-}
-
 /// `/Rotate` normalised to 0/90/180/270. Anything else (absent, malformed, or
 /// not a multiple of 90) is treated as 0, which is what viewers do.
 fn page_rotation(doc: &Document, page_id: ObjectId) -> i64 {
@@ -533,8 +496,8 @@ fn stamp_matrix(
     page_width: f64,
     page_height: f64,
     rotation: i64,
-    media_x: f64,
-    media_y: f64,
+    origin_x: f64,
+    origin_y: f64,
 ) -> [f64; 6] {
     // For a quarter turn the displayed page is the page with its sides swapped.
     let (view_width, view_height) = match rotation {
@@ -579,9 +542,10 @@ fn stamp_matrix(
     };
 
     let mut matrix = multiply(place, to_page);
-    // A /MediaBox that doesn't start at the origin shifts everything on the page.
-    matrix[4] += media_x;
-    matrix[5] += media_y;
+    // A shown box that doesn't start at the origin (a cropped page, or a
+    // /MediaBox that doesn't) shifts everything on the page.
+    matrix[4] += origin_x;
+    matrix[5] += origin_y;
     matrix
 }
 
@@ -851,6 +815,50 @@ mod tests {
         let plain = stamp_matrix(&centered(), 1.0, 595.0, 842.0, 0, 0.0, 0.0);
         assert_eq!(shifted[4] - plain[4], 20.0);
         assert_eq!(shifted[5] - plain[5], 30.0);
+    }
+
+    /// A page cropped with /CropBox: the previews show only that box, so
+    /// that's what the annotation's fractions are of - not the MediaBox
+    /// around it (once the cause of signatures landing off where they were put).
+    #[test]
+    fn the_fractions_are_of_the_crop_box_shown() {
+        let mut doc = multi_page_document(1);
+        let page_id = *doc.get_pages().get(&1).unwrap();
+        let crop: Vec<Object> = vec![100.into(), 200.into(), 500.into(), 700.into()];
+        doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap().set("CropBox", crop);
+
+        stamp(&mut doc, 1).unwrap(); // x 0.25, y 0.25, width 0.5
+
+        let matrix = stamp_matrix_of(&doc, 1);
+        assert_eq!(matrix[0], 0.5 * 400.0, "half the crop box's width");
+        assert_eq!(matrix[4], 100.0 + 0.25 * 400.0, "a quarter in from the crop box's left edge");
+        assert_eq!(matrix[5] + matrix[3], 700.0 - 0.25 * 500.0, "a quarter down from its top edge");
+    }
+
+    /// Whatever /Rotate, a stamp as big as the page shown covers exactly the
+    /// crop box.
+    #[test]
+    fn a_full_page_stamp_covers_the_crop_box_on_a_rotated_page() {
+        for rotation in [0i64, 90, 180, 270] {
+            let mut doc = multi_page_document(1);
+            let page_id = *doc.get_pages().get(&1).unwrap();
+            let dict = doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap();
+            dict.set("CropBox", vec![Object::from(100), 200.into(), 500.into(), 700.into()]);
+            dict.set("Rotate", rotation);
+
+            let (pixels, width, height) = tiny_image();
+            let asset = ImageAsset { pixels: &pixels, width, height };
+            let whole = Annotation { height: Some(1.0), ..at(1, 0.0, 0.0, 1.0, 0) };
+            annotate(&mut doc, &[asset], &[whole]).unwrap();
+
+            let [a, b, c, d, e, f] = stamp_matrix_of(&doc, 1)[..] else { panic!("a cm has six operands") };
+            let mut corners: Vec<(i64, i64)> = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+                .iter()
+                .map(|&(x, y)| ((a * x + c * y + e).round() as i64, (b * x + d * y + f).round() as i64))
+                .collect();
+            corners.sort();
+            assert_eq!(corners, vec![(100, 200), (100, 700), (500, 200), (500, 700)], "rotation {rotation}");
+        }
     }
 
     /// An explicit height stretches the image: its own proportions no longer
@@ -1546,5 +1554,41 @@ mod render_tests {
             .count();
 
         assert_eq!(red, 0, "a fully transparent stamp must not paint anything");
+    }
+
+    /// End to end on a cropped page: the preview shows only the crop box,
+    /// and the stamp must land in it exactly where it was put on that preview
+    /// - also when the page is turned.
+    #[test]
+    fn on_a_cropped_page_the_stamp_lands_where_it_was_put_on_the_preview() {
+        for rotation in [0i64, 90] {
+            let mut doc = multi_page_document(1);
+            let page_id = *doc.get_pages().get(&1).unwrap();
+            let dict = doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap();
+            dict.set("CropBox", vec![Object::from(100), 200.into(), 500.into(), 700.into()]);
+            dict.set("Rotate", rotation);
+
+            let pixels = vec![255u8, 0, 0, 255].repeat(16 * 16);
+            annotate(
+                &mut doc,
+                &[ImageAsset { pixels: &pixels, width: 16, height: 16 }],
+                &[at(1, 0.5, 0.5, 0.2, 0)],
+            )
+            .unwrap();
+            let mut bytes = Vec::new();
+            doc.save_to(&mut bytes).unwrap();
+            let png = render_page_preview(&bytes, 1, 0.5).unwrap();
+
+            // The square's side is a fifth of the shown width; its height, as
+            // a fraction, depends on the shown proportions (400×500, or 500×400 turned).
+            let (shown_width, shown_height) = if rotation == 90 { (500.0, 400.0) } else { (400.0, 500.0) };
+            let expected = (0.6, 0.5 + 0.2 * shown_width / shown_height / 2.0);
+            let (x, y) = red_centroid(&png);
+            assert!(
+                (x - expected.0).abs() < 0.02 && (y - expected.1).abs() < 0.02,
+                "rotation {}: expected the square's centre at {:?}, it was at ({}, {})",
+                rotation, expected, x, y
+            );
+        }
     }
 }

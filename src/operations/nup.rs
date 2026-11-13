@@ -572,6 +572,31 @@ pub(crate) fn get_page_box(doc: &Document, page_id: ObjectId, page: u32) -> Resu
     Ok((left, bottom, width, height))
 }
 
+/// The part of the page that is shown, as (left, bottom, width, height): the
+/// `/CropBox`, where it lies within the `/MediaBox`, otherwise the MediaBox.
+/// What readers and the previews display, so what fractions of "the page"
+/// coming from the UI are fractions of.
+pub(crate) fn get_visible_box(doc: &Document, page_id: ObjectId, page: u32) -> Result<(f64, f64, f64, f64)> {
+    let media = get_page_box(doc, page_id, page)?;
+    let (left, bottom, width, height) = media;
+    let crop = get_inherited_attribute(doc, page_id, b"CropBox").and_then(|crop| {
+        let values = crop.as_array().ok()?;
+        let numbers: Vec<f64> = values
+            .iter()
+            .map(|value| doc.dereference(value).ok()?.1.as_float().ok().map(f64::from))
+            .collect::<Option<_>>()?;
+        match numbers[..] {
+            [x0, y0, x1, y1] => Some((x0, y0, x1, y1)),
+            _ => None,
+        }
+    });
+    let Some((x0, y0, x1, y1)) = crop else { return Ok(media) };
+    let (l, r) = (x0.min(x1).max(left), x0.max(x1).min(left + width));
+    let (b, t) = (y0.min(y1).max(bottom), y0.max(y1).min(bottom + height));
+    // A crop box outside the media box shows nothing: readers fall back to the MediaBox.
+    Ok(if r > l && t > b { (l, b, r - l, t - b) } else { media })
+}
+
 pub(crate) fn get_page_rotation(doc: &Document, page_id: ObjectId) -> i64 {
     let degrees = get_inherited_attribute(doc, page_id, b"Rotate")
         .and_then(|object| object.as_i64().ok())

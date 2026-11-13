@@ -20,7 +20,7 @@ use lopdf::{Dictionary, Document, Object, ObjectId};
 use serde::Serialize;
 
 use super::content_scan::{self, InlineImage, Op, Operand};
-use super::nup::{get_inherited_attribute, get_page_box, get_page_rotation, multiply_matrix};
+use super::nup::{get_inherited_attribute, get_page_rotation, get_visible_box, multiply_matrix};
 use crate::error::{PdfrsError, Result};
 
 /// Forms nested deeper than this are not followed (and a Form drawing itself never is).
@@ -267,17 +267,8 @@ struct Display {
 
 impl Display {
     fn of(doc: &Document, page_id: ObjectId, page: u32) -> Result<Display> {
-        let (mut left, mut bottom, mut width, mut height) = get_page_box(doc, page_id, page)?;
         // Like the previews: the CropBox, where it lies within the MediaBox.
-        if let Some(crop) = get_inherited_attribute(doc, page_id, b"CropBox").and_then(|c| numbers(doc, &c)) {
-            if let [x0, y0, x1, y1] = crop[..] {
-                let (l, r) = (x0.min(x1).max(left), x0.max(x1).min(left + width));
-                let (b, t) = (y0.min(y1).max(bottom), y0.max(y1).min(bottom + height));
-                if r > l && t > b {
-                    (left, bottom, width, height) = (l, b, r - l, t - b);
-                }
-            }
-        }
+        let (left, bottom, width, height) = get_visible_box(doc, page_id, page)?;
         Ok(Display { left, bottom, width, height, rotation: get_page_rotation(doc, page_id) })
     }
 
