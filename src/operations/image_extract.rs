@@ -10,11 +10,11 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use hayro::hayro_interpret::hayro_syntax::Pdf;
+use hayro::hayro_interpret::kurbo::{Affine, BezPath, Rect};
 use hayro::hayro_interpret::{
-    BlendMode, ClipPath, Context, Device, GlyphDrawMode, Image, ImageData, InterpreterCache, InterpreterSettings,
-    LumaData, Paint, PathDrawMode, SoftMask, font::Glyph, interpret_page,
+    BlendMode, ClipPath, Context, Device, DrawMode, DrawProps, Image, ImageData, ImageDrawProps, InterpreterCache,
+    InterpreterSettings, LumaData, RenderContent, SoftMask, font::GlyphRun, interpret_page,
 };
-use hayro::vello_cpu::kurbo::{Affine, BezPath, Rect};
 use image::{DynamicImage, GrayAlphaImage, GrayImage, ImageFormat, RgbImage, RgbaImage};
 use lopdf::{Document, Object};
 use serde::Serialize;
@@ -50,13 +50,14 @@ pub fn extract(bytes: &[u8], key: &str, max_size: Option<u32>) -> Result<Extract
 
     let mut grabber = Grabber {
         draw_index,
-        object: object.map(|(number, generation)| (number as i32, generation as i32)),
+        object: object.map(|(number, generation)| (number, generation as i32)),
         seen: 0,
         max_size,
         image: None,
     };
     let cache = InterpreterCache::new();
-    let settings = InterpreterSettings { render_annotations: false, ..InterpreterSettings::default() };
+    // The page's own content: annotation appearances aren't the document's images.
+    let settings = InterpreterSettings { render_content: RenderContent::PAGE, ..InterpreterSettings::default() };
     let (width, height) = page.render_dimensions();
     let mut context = Context::new(
         Affine::IDENTITY,
@@ -117,7 +118,7 @@ fn plain_jpeg(doc: &Document, id: lopdf::ObjectId, max_size: Option<u32>) -> Opt
 /// the image object with that id, or (inline) the draw at that index.
 struct Grabber {
     draw_index: usize,
-    object: Option<(i32, i32)>,
+    object: Option<(u32, i32)>,
     seen: usize,
     max_size: Option<u32>,
     image: Option<DynamicImage>,
@@ -161,16 +162,14 @@ fn to_image(data: ImageData, alpha: Option<LumaData>) -> Option<DynamicImage> {
 }
 
 impl<'a> Device<'a> for Grabber {
-    fn set_soft_mask(&mut self, _: Option<SoftMask<'a>>) {}
-    fn set_blend_mode(&mut self, _: BlendMode) {}
-    fn draw_path(&mut self, _: &BezPath, _: Affine, _: &Paint<'a>, _: &PathDrawMode) {}
+    fn draw_path(&mut self, _: &BezPath, _: DrawProps<'a>, _: &DrawMode) {}
     fn push_clip_path(&mut self, _: &ClipPath) {}
     fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'a>>, _: BlendMode) {}
-    fn draw_glyph(&mut self, _: &Glyph<'a>, _: Affine, _: Affine, _: &Paint<'a>, _: &GlyphDrawMode) {}
-    fn pop_clip_path(&mut self) {}
+    fn draw_glyph_run(&mut self, _: &GlyphRun<'_, 'a>, _: DrawProps<'a>, _: &DrawMode) {}
+    fn pop_clip(&mut self) {}
     fn pop_transparency_group(&mut self) {}
 
-    fn draw_image(&mut self, image: Image<'a, '_>, _: Affine) {
+    fn draw_image(&mut self, image: Image<'a, '_>, _: ImageDrawProps<'a>) {
         let index = self.seen;
         self.seen += 1;
         if self.image.is_some() {

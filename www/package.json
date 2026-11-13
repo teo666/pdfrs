@@ -14,8 +14,8 @@
     "pdfrs-editor": "link:../packages/pdfrs-editor"
   },
   "devDependencies": {
-    "playwright": "^1.62.1",
+    "playwright": "^1.65.0",
     "typescript": "^7.0.2",
-    "vite": "^8.2.2"
+    "vite": "^8.3.8"
   }
 }
