@@ -289,20 +289,14 @@ pub(crate) fn create_page_form_xobject(
     // Gather page resources (materializing inherited ones if needed)
     let resources = get_page_resources_dict(doc, page_id)?;
 
-    // Get the page content stream decoded operations
-    let content_ops = doc.get_and_decode_page_content(page_id).unwrap_or_else(|_| {
-        lopdf::content::Content { operations: vec![] }
-    });
-
-    // Wrap the operations in q ... Q to isolate the graphics state
-    let mut wrapped_ops = Vec::with_capacity(content_ops.operations.len() + 2);
-    wrapped_ops.push(Operation::new("q", vec![]));
-    wrapped_ops.extend(content_ops.operations);
-    wrapped_ops.push(Operation::new("Q", vec![]));
-
-    let encoded_content = lopdf::content::Content { operations: wrapped_ops }
-        .encode()
-        .map_err(|err| PdfrsError::InvalidArgument(err.to_string()))?;
+    // The page's content, as bytes: never decoded and re-encoded, which
+    // would lose any inline image on it (see content_scan.rs). Wrapped in
+    // q ... Q to isolate the graphics state.
+    let original = doc.get_page_content(page_id);
+    let mut encoded_content = Vec::with_capacity(original.len() + 4);
+    encoded_content.extend_from_slice(b"q\n");
+    encoded_content.extend_from_slice(&original);
+    encoded_content.extend_from_slice(b"\nQ");
 
     let mut form_dict = dictionary! {
         "Type" => "XObject",
@@ -608,6 +602,22 @@ pub(crate) fn get_page_resources_dict(doc: &Document, page_id: ObjectId) -> Resu
 mod tests {
     use super::*;
     use crate::operations::test_support::multi_page_document;
+
+    #[test]
+    fn keeps_an_inline_image_byte_for_byte_in_the_sheet() {
+        let mut doc = multi_page_document(2);
+        let page_id = *doc.get_pages().get(&1).unwrap();
+        let original = b"q 20 0 0 20 100 100 cm BI /W 2 /H 1 /CS /G /BPC 8 /F /AHx ID 00FF> EI Q".to_vec();
+        crate::operations::content_scan::set_page_content(&mut doc, page_id, original.clone()).unwrap();
+
+        let result = nup(&doc, NUpOptions { layout: NUpLayout::Preset(2), ..Default::default() }).unwrap();
+
+        let found = result.objects.values().filter_map(|object| object.as_stream().ok()).any(|stream| {
+            let data = stream.decompressed_content().unwrap_or_else(|_| stream.content.clone());
+            data.windows(original.len()).any(|window| window == original.as_slice())
+        });
+        assert!(found, "the inline image should reach the sheet untouched");
+    }
 
     #[test]
     fn test_nup_2up_generates_correct_page_count() {

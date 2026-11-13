@@ -433,6 +433,63 @@ async function main() {
     fourPagesBytes,
   );
 
+  // --- Images already in the PDF: listed with where they're drawn,
+  // extracted (the JPEG byte for byte, or a scaled PNG thumbnail), removed
+  // as a pending, undoable edit that leaves the exported file lighter -
+  // and still applied after pages are inserted meanwhile.
+  results["getImages / extractImage / removeImages, through commit and insertPages"] = await page.evaluate(
+    async ([photo, four]) => {
+      const { PdfEditor, PdfDocument } = window.__pdfModel;
+      const editor = new PdfEditor();
+      const imageId = await editor.addImage(new Uint8Array(photo));
+      const textId = await editor.addDocument(new Uint8Array(four));
+      const doc = editor.getDocument(await editor.mergeDocuments([imageId, textId]));
+
+      const { images, placements } = await doc.getImages();
+      const [placement] = placements;
+      const fullPage = placement.x < 0.01 && placement.y < 0.01 && placement.width > 0.99 && placement.height > 0.99;
+
+      const jpeg = await doc.extractImage(images[0].key);
+      const same = jpeg.mime === "image/jpeg" && jpeg.bytes.length === photo.length && jpeg.bytes.every((b, i) => b === photo[i]);
+      const thumb = await doc.extractImage(images[0].key, 16);
+
+      doc.removeImages([placement.id]);
+      const label = doc.history().at(-1).label;
+      const pending = doc.hasPendingChanges() && doc.pendingImageRemovals().has(placement.id);
+      doc.undo();
+      const undone = !doc.hasPendingChanges();
+      doc.redo();
+
+      const baselineSize = doc.getBytes().length;
+      const exported = await doc.exportBytes();
+      const after = await (await PdfDocument.open(exported)).getImages();
+
+      // Pages inserted while the removal waits: still applied at commit.
+      await doc.insertPages(new Uint8Array(four));
+      await doc.commit();
+      const committed = await doc.getImages();
+
+      return (
+        images.length === 1 &&
+        images[0].format === "jpeg" &&
+        placements.length === 1 &&
+        placement.page === 1 &&
+        fullPage &&
+        same &&
+        thumb.mime === "image/png" &&
+        Math.max(thumb.width, thumb.height) <= 16 &&
+        label === "Rimuovi immagine (pagina 1)" &&
+        pending &&
+        undone &&
+        after.images.length === 0 &&
+        exported.length < baselineSize - photo.length / 2 &&
+        committed.images.length === 0 &&
+        doc.getPageCount() === 9
+      );
+    },
+    [photoJpgBytes, fourPagesBytes],
+  );
+
   // --- PdfEditor.mergeDocuments / splitDocument register new documents with the right page counts ---
   results["PdfEditor.mergeDocuments produces a new document with the summed page count"] = await page.evaluate(
     async ({ bytesA, bytesB }) => {

@@ -215,6 +215,7 @@ export class WrongPasswordError extends Error {
 /** Pages whose exported picture differs from their cached preview: rotated or annotated. */
 function changedPages(doc: PdfDocument): Set<PageId> {
   const changed = doc.pagesWithAnnotations();
+  for (const page of doc.pagesWithImageRemovals()) changed.add(page);
   for (const page of doc.pages()) if (page.pendingRotation !== 0) changed.add(page.id);
   return changed;
 }

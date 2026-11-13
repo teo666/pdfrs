@@ -82,6 +82,55 @@ export interface ImageAsset {
  * attached to the content when the page is rotated. `x`/`y` are the box's
  * top-left corner; its height follows from `width` and the image's aspect.
  */
+/** One distinct image already in the PDF (see `PdfDocument.getImages`). */
+export interface PdfImageInfo {
+  /** Identifies the image: `"12 0"` for an image object, `"inline:…"` for an inline one. */
+  key: string;
+  /** In pixels. */
+  width: number;
+  height: number;
+  /** How it's stored: `jpeg`, `jpx`, `jbig2`, `ccitt`, `flate`, `lzw`, `rle`, `raw` or `other`. */
+  format: string;
+  /** Size of the stored (compressed) data. */
+  bytes: number;
+  colorSpace?: string;
+  bitsPerComponent?: number;
+  /** Parts of it are transparent (soft mask or mask). */
+  hasMask: boolean;
+  inline: boolean;
+}
+
+/** One place an image is drawn: fractions of the page as shown in the baseline (its /Rotate applied, pending rotations not), origin top-left - the frame of `PageAnnotation`. */
+export interface PdfImagePlacement {
+  /** What `removeImages` takes. The same on every page that draws the same Form. */
+  id: string;
+  page: PageId;
+  /** The `PdfImageInfo.key` drawn. */
+  image: string;
+  /** Top-left, top-right, bottom-right, bottom-left corners of the image. */
+  corners: [[number, number], [number, number], [number, number], [number, number]];
+  /** The box around the corners. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Other pages drawing the same Form: removing it here removes it there too. */
+  sharedPages: PageId[];
+}
+
+export interface PdfImages {
+  images: PdfImageInfo[];
+  placements: PdfImagePlacement[];
+}
+
+/** An image of the PDF as a file of its own (`PdfDocument.extractImage`). */
+export interface ExtractedImage {
+  mime: "image/jpeg" | "image/png";
+  width: number;
+  height: number;
+  bytes: Uint8Array;
+}
+
 export interface PageAnnotation {
   id: AnnotationId;
   page: PageId;

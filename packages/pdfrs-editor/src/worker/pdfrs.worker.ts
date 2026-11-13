@@ -8,10 +8,12 @@ import init, {
   decrypt_pdf,
   encrypt_pdf,
   is_password_protected,
+  list_images,
   merge_pdfs,
   nup_pdf,
   page_count,
   read_metadata,
+  remove_images,
   rotate_pages,
   split_pdf,
   write_metadata,
@@ -31,16 +33,18 @@ const coreMethods = {
   decrypt_pdf,
   encrypt_pdf,
   is_password_protected,
+  list_images,
   merge_pdfs,
   nup_pdf,
   page_count,
   read_metadata,
+  remove_images,
   rotate_pages,
   split_pdf,
   write_metadata,
 } as const satisfies Record<string, (...args: never[]) => Promise<unknown>>;
 
-const FULL_METHODS = new Set(["render_page_preview", "image_to_pdf"]);
+const FULL_METHODS = new Set(["render_page_preview", "image_to_pdf", "extract_image"]);
 
 // Cached per worker instance: each worker that ends up needing the full
 // build instantiates its own copy, the first time it's asked for. Workers

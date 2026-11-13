@@ -192,6 +192,23 @@ Nota sulla compressione: `save()` non chiama `Document::compress()`, quindi i du
 
 **Nel pannello**, un'immagine si porta sulla pagina trascinandola dalla palette, oppure cliccandola (la mette al centro, ed è il percorso raggiungibile da tastiera). Il drag usa il DnD nativo HTML5, sicuro qui perché questo pannello non ha il riordino delle pagine con cui collide nell'editor; come nell'editor, però, l'id dell'elemento trascinato è tenuto in una variabile e **non** letto dal `dataTransfer`, che il browser riempie con la propria rappresentazione dell'immagine trascinata. Lo smoke test non pilota il drag con il mouse — `dragTo` di Playwright sposta il puntatore sul bersaglio *prima* che il drag inizi, così la sorgente diventa l'immagine della pagina, e i mouse event sintetici non generano affatto eventi drag — ma dispatcha `DragEvent` sintetici, che esercitano comunque la logica di drop del pannello.
 
+### Contenuto delle pagine letto come byte (`src/operations/content_scan.rs`)
+
+`Content::decode` + `encode` di lopdf **perde dati**: le immagini inline (`BI … ID <dati> EI`) con un filtro vengono saltate in lettura, e quelle che sopravvivono vengono riscritte in una sintassi che nessun lettore accetta. Per questo nessuna operazione che modifica una pagina scritta da altri deve ricodificarne il contenuto:
+
+- **`content_scan::scan`** restituisce le operazioni con l'**intervallo di byte** esatto di ciascuna. Conosce quanto basta della sintassi per non scambiare dati per operatori: stringhe con escape e parentesi annidate, stringhe esadecimali, commenti, array e dizionari, e i dati binari delle immagini inline (`EI` preceduto e seguito da spazio, o `/L`/`/Length` se c'è).
+- **`content_scan::cut`** toglie degli intervalli; il resto resta byte per byte com'era.
+- **`content_scan::set_page_content`** dà alla pagina uno stream **nuovo e suo**. Mai `change_page_content`, che riscrive lo stream sul posto: se è condiviso tra pagine, le cambierebbe tutte.
+- `stamp::annotate` (firme, immagini, testo) e `nup`/`booklet` avvolgono i byte originali in `q … Q` invece di ricodificarli (prima corrompevano le pagine con immagini inline).
+
+### Immagini già nel PDF (`src/operations/images.rs`, `image_extract.rs`)
+
+- **`images::list`** segue `q`/`Q`/`cm` fino a ogni `Do` di un'immagine o a ogni `BI`, entrando nei Form XObject con la loro `/Matrix` e le loro risorse (profondità massima 12, anti-ciclo). Le posizioni sono in frazioni della pagina **mostrata**, lo stesso riferimento delle anteprime: CropBox∩MediaBox, `/Rotate` applicato, origine in alto a sinistra. Il ritaglio (clip) non è considerato.
+- **Id di una posizione**: `p<pagina>#<n>` per l'n-esima immagine disegnata dal contenuto della pagina, `f<oggetto>_<gen>#<n>` per una disegnata da un Form, uguale su tutte le pagine che disegnano quel Form (`sharedPages`): toglierla lì la toglie ovunque.
+- **`images::remove`** ritaglia i byte di quelle operazioni. Il contenuto di pagina diventa uno stream nuovo; un Form è riscritto sul posto. Un'immagine che nessuno disegna più viene eliminata (`delete_object` toglie anche i riferimenti dalle risorse, poi `prune_objects`), quindi il file si alleggerisce davvero.
+- **`image_extract::extract`** (build completa): un JPEG semplice (un solo filtro DCT, RGB o grigio, 8 bit, senza maschera) torna così com'è; tutto il resto passa da un `Device` di hayro che intercetta `draw_image` e decodifica con `RasterImage::with_rgba` (ogni formato, spazi colore, SMask) → PNG.
+- **Nel modello** le rimozioni sono una modifica in sospeso (`removeImages`/`restoreImages`, nello snapshot dell'annullamento) applicata per prima, prima delle annotazioni, in `computeCommittedBytes` ed `exportPages`. `insertPages` unisce i file e rinumera gli oggetti, quindi gli id dei Form in sospeso vengono rimappati (stessa pagina, stessa posizione nell'ordine di disegno).
+
 ### Modello logico del PDF: `PdfDocument` / `PdfEditor` (`packages/pdfrs-editor/src/pdf-model/`)
 
 Sopra le funzioni stateless viste finora c'è un livello di modello puro (nessun DOM, nessun riferimento a `window`/`document`), pensato per essere riusato da un front qualsiasi — anche il futuro front Vue in repo separata:

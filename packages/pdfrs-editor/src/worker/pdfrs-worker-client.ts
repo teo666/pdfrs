@@ -3,7 +3,7 @@
 // round-trip to the worker instead of a direct call, wrapped back into a
 // Promise so call sites don't need to know a worker is involved at all.
 import { createPdfrsWorker } from "./create-pdfrs-worker";
-import type { ImagePageOptions } from "../pdf-model/types";
+import type { ExtractedImage, ImagePageOptions, PdfImages } from "../pdf-model/types";
 import type { TextStyle } from "../text/layout";
 import type { WorkerRequest, WorkerResponse } from "./worker-protocol";
 
@@ -104,6 +104,21 @@ export function encrypt_pdf(file: Uint8Array, ownerPassword: string, userPasswor
 
 export function decrypt_pdf(file: Uint8Array, password: string): Promise<Uint8Array> {
   return call("decrypt_pdf", [file, password]);
+}
+
+/** The images already in the PDF and every place one is drawn (positions as fractions of the page shown). */
+export function list_images(file: Uint8Array): Promise<PdfImages> {
+  return call("list_images", [file]);
+}
+
+/** Takes away the images drawn at `placements` (ids from `list_images`); images nothing draws any more leave the file. */
+export function remove_images(file: Uint8Array, placements: string[]): Promise<Uint8Array> {
+  return call("remove_images", [file, placements]);
+}
+
+/** One image of the PDF as a file (JPEG as stored, or PNG); `maxSize` caps the longer side, for thumbnails. Full build. */
+export function extract_image(file: Uint8Array, key: string, maxSize?: number): Promise<ExtractedImage> {
+  return call("extract_image", [file, key, maxSize]);
 }
 
 /** True when the PDF can't be opened without a password (it reads as having no pages until decrypted). */

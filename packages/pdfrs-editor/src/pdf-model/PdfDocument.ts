@@ -3,11 +3,14 @@ import {
   compose_pdf,
   decrypt_pdf,
   encrypt_pdf,
+  extract_image,
   image_to_pdf,
   is_password_protected,
+  list_images,
   merge_pdfs,
   page_count,
   read_metadata,
+  remove_images,
   rotate_pages,
   write_metadata,
 } from "../worker/pdfrs-worker-client";
@@ -16,6 +19,7 @@ import type { TextContent } from "../text/layout";
 import type {
   AnnotationId,
   AssetId,
+  ExtractedImage,
   HistoryEntry,
   ImageAsset,
   PageAnnotation,
@@ -26,6 +30,7 @@ import type {
   PageInfo,
   PagePreview,
   PageRange,
+  PdfImages,
   PdfMetadata,
 } from "./types";
 
@@ -73,6 +78,8 @@ interface DocumentSnapshot {
   pendingMetadata: Map<MetadataField, string | null>;
   baselineMetadata: PdfMetadata | null;
   annotations: Map<AnnotationId, PageAnnotation>;
+  removedImages: Set<string>;
+  baselineImages: PdfImages | null;
 }
 
 /** Italian labels for the history entries, so a step reads "Modifica metadati (titolo)". */
@@ -168,6 +175,13 @@ export class PdfDocument {
   // Invalidated wherever `previewCache` is, since it depends on exactly the
   // same thing: the baseline bytes.
   private baselineMetadata: PdfMetadata | null = null;
+  // The images the baseline holds and where they're drawn: read lazily and
+  // cached like the metadata (`null` = not read yet), invalidated wherever
+  // the baseline bytes change.
+  private baselineImages: PdfImages | null = null;
+  // Image draws to take away (placement ids from `getImages`), not applied
+  // yet: part of the undoable state, like the annotations.
+  private readonly removedImages = new Set<string>();
   private undoStack: DocumentSnapshot[] = [];
   private redoStack: DocumentSnapshot[] = [];
   // Describes how the *current* state was reached; moves onto a snapshot as
@@ -234,6 +248,7 @@ export class PdfDocument {
       this.deletions.size > 0 ||
       this.pendingMetadata.size > 0 ||
       this.annotationsById.size > 0 ||
+      this.removedImages.size > 0 ||
       this.hasPendingReorder()
     );
   }
@@ -330,6 +345,8 @@ export class PdfDocument {
       pendingMetadata: new Map(this.pendingMetadata),
       baselineMetadata: this.baselineMetadata,
       annotations: new Map(this.annotationsById),
+      removedImages: new Set(this.removedImages),
+      baselineImages: this.baselineImages,
     };
   }
 
@@ -355,6 +372,10 @@ export class PdfDocument {
 
     this.annotationsById.clear();
     for (const [id, annotation] of snapshot.annotations) this.annotationsById.set(id, annotation);
+
+    this.removedImages.clear();
+    for (const id of snapshot.removedImages) this.removedImages.add(id);
+    this.baselineImages = snapshot.baselineImages;
   }
 
   /**
@@ -513,9 +534,18 @@ export class PdfDocument {
     let merged = await merge_pdfs([this.bytes, bytes]);
     if (Object.keys(metadata).length > 0) merged = await write_metadata(merged, { ...metadata });
 
+    // Merging renumbers the objects, so a pending removal inside a Form
+    // (whose id names the Form's object) is carried over to its new id.
+    const removals = this.removedImages.size > 0 ? await this.remapRemovals(merged) : null;
+
     const ids = Array.from({ length: added }, (_, index) => this.pageCount + index + 1);
     const index = Math.max(0, Math.min(at ?? this.order.length, this.order.length));
     this.bytes = merged;
+    this.baselineImages = null;
+    if (removals) {
+      this.removedImages.clear();
+      for (const id of removals) this.removedImages.add(id);
+    }
     this.pageCount += added;
     this.order.splice(index, 0, ...ids);
     this.recordSnapshot(before, label ?? `Inserisci ${added === 1 ? "1 pagina" : `${added} pagine`}`);
@@ -533,7 +563,7 @@ export class PdfDocument {
     const pages = this.distinctPages(ids);
     if (pages.length === 0) throw new Error("nessuna pagina da esportare");
     let bytes = await compose_pdf(
-      [await this.annotatedBaseline(new Set(pages))],
+      [await this.editedBaseline(new Set(pages))],
       pages.map((id) => ({ source: 0, page: id })),
     );
     const rotations: PendingRotation[] = [];
@@ -750,18 +780,128 @@ export class PdfDocument {
    * The baseline with the pending annotations drawn in (only those on
    * `pages`, if given). Without any, the baseline itself - no wasm call.
    */
-  private async annotatedBaseline(pages?: Set<PageId>): Promise<Uint8Array> {
+  /**
+   * The baseline with the pending edits that refer to its own page ids and
+   * coordinates applied: image removals first, then annotations (`pages`
+   * limits the annotations to those pages; removals elsewhere change
+   * nothing the caller keeps).
+   */
+  private async editedBaseline(pages?: Set<PageId>): Promise<Uint8Array> {
+    let bytes = this.bytes;
+    if (this.removedImages.size > 0) bytes = await remove_images(bytes, [...this.removedImages]);
+    return this.annotatedBaseline(bytes, pages);
+  }
+
+  // --- Images already in the PDF -------------------------------------------
+
+  /**
+   * The images the document holds and every place one is drawn, as the
+   * baseline has them (pending removals are not taken out: see
+   * `pendingImageRemovals`). Read the first time it's asked for and cached
+   * until the baseline changes, like `getMetadata`.
+   */
+  async getImages(): Promise<PdfImages> {
+    if (!this.baselineImages) this.baselineImages = await list_images(this.bytes);
+    return this.baselineImages;
+  }
+
+  /** The placement ids waiting to be removed. */
+  pendingImageRemovals(): Set<string> {
+    return new Set(this.removedImages);
+  }
+
+  /** Pages a pending removal touches (a Form's on every page that draws it). */
+  pagesWithImageRemovals(): Set<PageId> {
+    const pages = new Set<PageId>();
+    for (const placement of this.baselineImages?.placements ?? []) {
+      if (this.removedImages.has(placement.id)) pages.add(placement.page);
+    }
+    return pages;
+  }
+
+  /**
+   * Takes away the images drawn at `ids` (placement ids from `getImages`),
+   * as a pending edit: one undo step, applied by `commit()`/`exportBytes()`.
+   * An image nothing draws any more after that leaves the file.
+   */
+  removeImages(ids: string[]): void {
+    const fresh = [...new Set(ids)].filter((id) => !this.removedImages.has(id));
+    if (fresh.length === 0) return;
+    this.pushUndo(this.removalLabel("Rimuovi", fresh));
+    for (const id of fresh) this.removedImages.add(id);
+  }
+
+  /** Puts back images `removeImages` took away (one undo step). */
+  restoreImages(ids: string[]): void {
+    const removed = [...new Set(ids)].filter((id) => this.removedImages.has(id));
+    if (removed.length === 0) return;
+    this.pushUndo(this.removalLabel("Ripristina", removed));
+    for (const id of removed) this.removedImages.delete(id);
+  }
+
+  /** "Rimuovi immagine (pagina 3)", "Rimuovi 2 immagini da 12 pagine"... */
+  private removalLabel(verb: string, ids: string[]): string {
+    const wanted = new Set(ids);
+    const pages = new Set(
+      (this.baselineImages?.placements ?? []).filter((p) => wanted.has(p.id)).map((p) => p.page),
+    );
+    const what = ids.length === 1 ? "immagine" : `${ids.length} immagini`;
+    if (pages.size === 1) return `${verb} ${what} (pagina ${[...pages][0]})`;
+    if (pages.size > 1) return `${verb} ${what} da ${pages.size} pagine`;
+    return `${verb} ${what}`;
+  }
+
+  /**
+   * An image of the baseline as a file of its own: the JPEG as stored when
+   * it can be, otherwise a PNG. `maxSize` caps the longer side, for
+   * thumbnails.
+   */
+  async extractImage(key: string, maxSize?: number): Promise<ExtractedImage> {
+    return extract_image(this.bytes, key, maxSize);
+  }
+
+  /**
+   * The pending removals' ids as they'll be in `next` - the same pages, with
+   * more appended, after `merge_pdfs` renumbered every object. A page's own
+   * draws keep their id; a Form's draw is found again by its page and its
+   * place among that page's draws, which merging doesn't change.
+   */
+  private async remapRemovals(next: Uint8Array): Promise<string[]> {
+    const before = (await this.getImages()).placements;
+    const after = (await list_images(next)).placements;
+    const byPage = (placements: PdfImages["placements"]) => {
+      const pages = new Map<PageId, string[]>();
+      for (const p of placements) pages.set(p.page, [...(pages.get(p.page) ?? []), p.id]);
+      return pages;
+    };
+    const oldPages = byPage(before);
+    const newPages = byPage(after);
+    const remapped = new Set<string>();
+    for (const id of this.removedImages) {
+      for (const [page, ids] of oldPages) {
+        const index = ids.indexOf(id);
+        const moved = index === -1 ? undefined : newPages.get(page)?.[index];
+        if (moved) {
+          remapped.add(moved);
+          break;
+        }
+      }
+    }
+    return [...remapped];
+  }
+
+  private async annotatedBaseline(base: Uint8Array, pages?: Set<PageId>): Promise<Uint8Array> {
     const annotations = [...this.annotationsById.values()].filter(
       (annotation) => !pages || pages.has(annotation.page),
     );
-    if (annotations.length === 0) return this.bytes;
+    if (annotations.length === 0) return base;
 
     // Each asset once, however many annotations use it.
     const used = [...new Set(annotations.flatMap((annotation) => (annotation.asset === null ? [] : [annotation.asset])))];
     const index = new Map(used.map((asset, position) => [asset, position]));
     const images = used.map((asset) => this.assets.get(asset) as ImageAsset);
     return annotate_pdf(
-      this.bytes,
+      base,
       images.map((image) => image.pixels),
       images.map(({ width, height }) => ({ width, height })),
       annotations.map(({ page, x, y, width, rotation, height, asset, text }) => ({
@@ -955,8 +1095,10 @@ export class PdfDocument {
     this.deletions.clear();
     this.pendingMetadata.clear();
     this.annotationsById.clear();
+    this.removedImages.clear();
     this.previewCache.clear();
     this.baselineMetadata = null;
+    this.baselineImages = null;
     this.order = identityOrder(this.pageCount);
     // Recorded only once the wasm work has succeeded, so a failed commit
     // leaves no phantom history step. `pushUndo()` would snapshot the
@@ -975,6 +1117,8 @@ export class PdfDocument {
     this.bytes = await encrypt_pdf(this.bytes, ownerPassword, userPassword);
     this.previewCache.clear();
     this.baselineMetadata = null;
+    this.baselineImages = null;
+    this.removedImages.clear();
     this.recordSnapshot(before, "Cifra documento");
   }
 
@@ -985,6 +1129,8 @@ export class PdfDocument {
     this.pageCount = await page_count(this.bytes);
     this.previewCache.clear();
     this.baselineMetadata = null;
+    this.baselineImages = null;
+    this.removedImages.clear();
     this.order = identityOrder(this.pageCount);
     this.recordSnapshot(before, "Decifra documento");
   }
@@ -997,7 +1143,7 @@ export class PdfDocument {
 
     // Annotations first, on the baseline their page ids and coordinates
     // refer to; the page-level steps below then carry them along.
-    let bytes = await this.annotatedBaseline();
+    let bytes = await this.editedBaseline();
 
     // Skip compose_pdf entirely if nothing actually changed the page
     // sequence - no deletions *and* no reordering (surviving ids still run

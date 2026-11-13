@@ -173,10 +173,10 @@ fn fitted_size(image_width: u32, image_height: u32, page_width: f64, page_height
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn sample_jpeg(width: u32, height: u32) -> Vec<u8> {
+    pub(crate) fn sample_jpeg(width: u32, height: u32) -> Vec<u8> {
         let img = image::RgbImage::from_fn(width, height, |x, y| {
             image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
         });

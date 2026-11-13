@@ -1,9 +1,10 @@
-use lopdf::content::Operation;
+use lopdf::content::{Content, Operation};
 use lopdf::{Document, Object, ObjectId, Stream, dictionary};
 use serde::Deserialize;
 
 use std::collections::HashMap;
 
+use super::content_scan;
 use super::text::{self, FontFace, StandardFont, TextAlign};
 use crate::error::{PdfrsError, Result};
 
@@ -87,9 +88,11 @@ pub struct Annotation {
 ///   on fifty pages is one image stream referenced fifty times, not fifty
 ///   copies - the difference between a 1MB file and a 50MB one. Assets no
 ///   annotation refers to are never added at all.
-/// - **One content rewrite per page.** `change_page_content` decodes and
-///   re-encodes a page's whole content stream, so a page with ten
-///   annotations is done in a single pass rather than ten.
+/// - **One content rewrite per page**, and never a re-encode of what was
+///   there: the original bytes are wrapped in q/Q as they are, the new
+///   operations appended, and the result becomes a stream of the page's own
+///   (a page with ten annotations is done in one pass, and a content stream
+///   shared with other pages is left alone).
 ///
 /// Everything is validated before the document is touched, so a list with a
 /// bad entry at the end can't leave a half-annotated PDF behind.
@@ -124,7 +127,11 @@ pub fn annotate(doc: &mut Document, assets: &[ImageAsset], annotations: &[Annota
         // what goes wrong otherwise.
         materialize_inherited_resources(doc, page_id)?;
 
-        let mut content = doc.get_and_decode_page_content(page_id)?;
+        // The page's own content is kept as bytes, never decoded and
+        // re-encoded: that round trip loses inline images (see
+        // content_scan.rs). Only what we add goes through `Content::encode`.
+        let original = doc.get_page_content(page_id);
+        let mut added: Vec<Operation> = Vec::new();
 
         // Wrap whatever was already on the page in its own q/Q before adding
         // anything. A page's content stream is not required to leave the
@@ -135,8 +142,7 @@ pub fn annotate(doc: &mut Document, assets: &[ImageAsset], annotations: &[Annota
         // mirrored, rotated or somewhere else entirely. Our own q/Q around
         // each annotation isn't enough: it restores the state to whatever was
         // current when we started, not to the identity.
-        content.operations.insert(0, Operation::new("q", vec![]));
-        content.operations.push(Operation::new("Q", vec![]));
+        // (The q/Q pair goes around the original bytes, below.)
 
         for annotation in grouped {
             let operations = match &annotation.kind {
@@ -205,13 +211,21 @@ pub fn annotate(doc: &mut Document, assets: &[ImageAsset], annotations: &[Annota
                 }
             };
 
-            content.operations.push(Operation::new("q", vec![]));
-            content.operations.extend(operations);
-            content.operations.push(Operation::new("Q", vec![]));
+            added.push(Operation::new("q", vec![]));
+            added.extend(operations);
+            added.push(Operation::new("Q", vec![]));
         }
 
-        let encoded = content.encode().map_err(|err| PdfrsError::InvalidArgument(err.to_string()))?;
-        doc.change_page_content(page_id, encoded)?;
+        let encoded = Content { operations: added }
+            .encode()
+            .map_err(|err| PdfrsError::InvalidArgument(err.to_string()))?;
+        let mut content = Vec::with_capacity(original.len() + encoded.len() + 8);
+        content.extend_from_slice(b"q\n");
+        content.extend_from_slice(&original);
+        content.extend_from_slice(b"\nQ\n");
+        content.extend_from_slice(&encoded);
+        // A stream of the page's own: the old one may be shared with other pages.
+        content_scan::set_page_content(doc, page_id, content)?;
     }
 
     Ok(())
@@ -641,6 +655,42 @@ mod tests {
             .find(|operation| operation.operator == "cm")
             .expect("the stamp should have written a cm");
         cm.operands.iter().map(|operand| operand.as_float().unwrap() as f64).collect()
+    }
+
+    #[test]
+    fn keeps_an_inline_image_on_the_page_byte_for_byte() {
+        // A Flate-free but filtered (ASCIIHex) inline image: exactly what
+        // lopdf's decode/encode round trip used to drop.
+        let mut doc = multi_page_document(1);
+        let page_id = *doc.get_pages().get(&1).unwrap();
+        let original = b"q 20 0 0 20 100 100 cm BI /W 2 /H 1 /CS /G /BPC 8 /F /AHx ID 00FF> EI Q".to_vec();
+        content_scan::set_page_content(&mut doc, page_id, original.clone()).unwrap();
+
+        stamp(&mut doc, 1).unwrap();
+
+        let content = doc.get_page_content(page_id);
+        assert!(
+            content.windows(original.len()).any(|window| window == original.as_slice()),
+            "the original content should still be there, untouched"
+        );
+        let ops = content_scan::scan(&content);
+        assert!(ops.iter().any(|op| op.operator == "BI"));
+        assert!(ops.iter().any(|op| op.operator == "Do"), "and the stamp drawn after it");
+    }
+
+    #[test]
+    fn leaves_a_content_stream_shared_with_another_page_alone() {
+        let mut doc = multi_page_document(2);
+        let pages = doc.get_pages();
+        let (first, second) = (pages[&1], pages[&2]);
+        let shared = doc.get_page_contents(first)[0];
+        doc.get_object_mut(second).unwrap().as_dict_mut().unwrap().set("Contents", shared);
+        let before = doc.get_page_content(second);
+
+        stamp(&mut doc, 1).unwrap();
+
+        assert_eq!(doc.get_page_content(second), before, "page 2 must not get page 1's stamp");
+        assert_ne!(doc.get_page_contents(first)[0], shared);
     }
 
     fn xobject_ids(doc: &Document, page: u32) -> Vec<ObjectId> {

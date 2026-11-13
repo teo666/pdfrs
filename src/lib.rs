@@ -209,6 +209,48 @@ pub async fn write_metadata(file: Uint8Array, patch: JsValue) -> std::result::Re
     Ok(save(&mut doc)?)
 }
 
+/// The images already in a PDF: `{ images: [...], placements: [...] }` -
+/// each distinct image (key, size in pixels, format, stored bytes, colour
+/// space, mask), and each place one is drawn (placement id, page, image key,
+/// corners and box as fractions of the page shown, other pages sharing the
+/// same Form). See `operations::images`.
+#[wasm_bindgen]
+pub async fn list_images(file: Uint8Array) -> std::result::Result<JsValue, JsValue> {
+    let doc = load(&file.to_vec())?;
+    let report = operations::images::list(&doc)?;
+    serde_wasm_bindgen::to_value(&report).map_err(|err| PdfrsError::Options(err.to_string()).into())
+}
+
+/// Takes away the images drawn at `placements` (an array of placement ids
+/// from `list_images`); an image nothing draws any more is deleted from the
+/// file.
+#[wasm_bindgen]
+pub async fn remove_images(file: Uint8Array, placements: JsValue) -> std::result::Result<Uint8Array, JsValue> {
+    let mut doc = load(&file.to_vec())?;
+    let placements: Vec<String> = parse_options(placements)?;
+    operations::images::remove(&mut doc, &placements)?;
+    Ok(save(&mut doc)?)
+}
+
+/// An image of the PDF (`key` from `list_images`) as a file of its own:
+/// `{ mime, width, height, bytes }` - the JPEG as stored when it can be,
+/// otherwise a PNG. `maxSize`, if given, caps the longer side (thumbnails).
+#[cfg(all(feature = "preview", feature = "image-import"))]
+#[wasm_bindgen]
+pub async fn extract_image(
+    file: Uint8Array,
+    key: String,
+    max_size: Option<u32>,
+) -> std::result::Result<JsValue, JsValue> {
+    let image = operations::image_extract::extract(&file.to_vec(), &key, max_size)?;
+    let out = js_sys::Object::new();
+    js_sys::Reflect::set(&out, &"mime".into(), &image.mime.into())?;
+    js_sys::Reflect::set(&out, &"width".into(), &image.width.into())?;
+    js_sys::Reflect::set(&out, &"height".into(), &image.height.into())?;
+    js_sys::Reflect::set(&out, &"bytes".into(), &Uint8Array::from(image.bytes.as_slice()).into())?;
+    Ok(out.into())
+}
+
 /// Rearranges the pages of a PDF into an N-up layout on newly generated sheets.
 /// `options` is a JS object `{ pageSize?: "a3"|"a4"|"a5"|"letter"|"legal"|"native", orientation?: "portrait"|"landscape"|"auto", layout?: 1|2|4|6|8|9|16|{ rows: number, cols: number }, direction?: "horizontal"|"vertical", margin?: number, spacing?: number, drawBorders?: boolean, autoRotate?: boolean }`
 /// (all fields optional).

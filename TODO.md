@@ -9,7 +9,9 @@ Idee di funzionalità discusse e non ancora implementate.
 - [ ] **Simple pdf viewer**
 - [x] **fascicolatura / booklet** — imposizione a libretto piegato al centro (saddle-stitch), riordino automatico a multipli di 4, supporto fronte/retro e direzione di rilegatura (`booklet_pdf`).
 - [x] **pdf multipagina / N-up** — layout a griglia con $N$ pagine per foglio (1, 2, 4, 6, 8, 9, 16 o custom), margini, spacing, bordi, orientamento e auto-rotazione (`nup_pdf`).
-- [ ] rimozione immagini
+- [x] **rimozione immagini (fase 1)** — elenco delle immagini già nel PDF con posizione, scarico (JPEG originale o PNG), rimozione in sospeso da una pagina o da tutte (`images.rs`, `image_extract.rs`, strumento «Immagini» dell'app).
+- [ ] **Immagini, fase 2** — sostituire un'immagine mantenendone posizione e dimensione (riusando `stamp::add_image_object`); ricomprimere/ridurre le immagini per alleggerire il file (decodifica via hayro, ricodifica JPEG; JBIG2/JPX da saltare o convertire).
+- [ ] **Immagini, fase 3** — spostare e ridimensionare un'immagine esistente (riscrivere la `cm` che la precede; attenzione a trasformazioni annidate e ritagli).
 - [ ] rimozione firma digitale
 - [ ] creazione firma digitale
 
@@ -26,6 +28,7 @@ In ordine di priorità suggerito.
   - Modello: `PdfDocument.getOutline()`, letto solo quando serve e tenuto in cache come i metadati (invalidato con la baseline); le pagine di destinazione come page id, così una voce resta giusta anche dopo un riordino, e segnala quelle che puntano a pagine da eliminare.
   - App: pannello "Indice" con le voci rientrate per livello; un clic porta alla pagina nella griglia o la apre nel visualizzatore.
   - **Poi: non perdere l'indice.** Oggi `compose` (`src/operations/compose.rs`) toglie `/Outlines` dal catalogo, e così `merge`, `nup` e `booklet`: un'eliminazione o un riordino applicato (o scaricato), un'unione, una divisione o un'estrazione producono un PDF senza indice. Rotazioni, firme e testo lo conservano. Va ricostruito con le pagine rinumerate, togliendo le voci che puntano a pagine eliminate (per l'unione: un ramo per documento).
+- [ ] **`stamp.rs` usa la MediaBox, le anteprime la CropBox** — su una pagina con CropBox diversa, una firma posizionata sull'anteprima finisce spostata nel PDF. `images.rs` usa già CropBox∩MediaBox: allineare `stamp_matrix` a quello.
 - [ ] **Permessi del PDF protetto** (stampa, copia del testo, modifica) — questo richiede prima il motore: `encrypt` in `src/operations/crypto.rs` usa `Permissions::default()`, cioè tutto consentito.
 
 ## Ottimizzazioni future

@@ -58,7 +58,7 @@ hayro = { version = "0.7", default-features = false, features = ["embed-fonts"],
 # no re-encoding of real input images. `default-features = false` + `jpeg`
 # only pulls in the JPEG codec (zune-jpeg/jpeg-encoder, both pure Rust), not
 # the dozen other image formats `image` supports by default.
-image = { version = "0.25", default-features = false, features = ["jpeg"], optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"
