@@ -91,6 +91,19 @@ export interface ImageAsset {
  * attached to the content when the page is rotated. `x`/`y` are the box's
  * top-left corner; its height follows from `width` and the image's aspect.
  */
+/** One entry of a PDF's outline (bookmarks), in a flat list where `level` gives the nesting. */
+export interface OutlineEntry {
+  title: string;
+  /** 1 for the top level; an entry's children follow it with its level + 1. */
+  level: number;
+  /** The page it points to: a page id (`PdfDocument.getOutline`) or a page number (the raw operations). Absent when it points outside the document. */
+  page?: PageId | null;
+  /** Where on the page, in PDF units from the bottom, when the PDF says. */
+  top?: number | null;
+  /** Whether its children show when the document opens. */
+  open: boolean;
+}
+
 /** One distinct image already in the PDF (see `PdfDocument.getImages`). */
 export interface PdfImageInfo {
   /** Identifies the image: `"12 0"` for an image object, `"inline:…"` for an inline one. */

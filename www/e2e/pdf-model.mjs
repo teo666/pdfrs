@@ -548,6 +548,73 @@ async function main() {
     [photoJpgBytes, fourPagesBytes],
   );
 
+  // --- The outline: read, and written back wherever the page operations
+  // underneath would drop it - applying deletions and a reorder, exporting
+  // some pages, inserting pages, putting a photo on another page - and
+  // turned into one branch per document in a merge.
+  results["outline is kept through page edits, exports, inserts and merges"] = await page.evaluate(
+    async ([ten, photo]) => {
+      const { PdfEditor, PdfDocument, read_outline, write_outline } = window.__pdfModel;
+      const titled = await write_outline(new Uint8Array(ten), [
+        { title: "Uno", level: 1, page: 1, open: true },
+        { title: "Due", level: 2, page: 2, open: true },
+        { title: "Dentro due", level: 3, page: 3, open: true },
+        { title: "Cinque", level: 1, page: 5, open: false },
+      ]);
+      const editor = new PdfEditor();
+      const id = await editor.addDocument(titled);
+      const doc = editor.getDocument(id);
+      const titles = (entries) => entries.map((e) => `${e.level}:${e.title}@${e.page ?? "-"}`).join(" ");
+
+      const read = titles(await doc.getOutline());
+
+      // Export pages 5 and 2: only their entries, renumbered; "Dentro due" (page 3) moves up under nothing.
+      const exported = titles(await read_outline(await doc.exportPages([5, 2])));
+
+      // Delete page 2, move page 5 first, apply.
+      doc.deletePage(2);
+      doc.movePage(5, 0);
+      const shown = titles(await doc.getOutlineAsShown());
+      await doc.commit();
+      const committed = titles(await doc.getOutline());
+      const inFile = titles(await read_outline(doc.getBytes()));
+      doc.undo();
+      const undone = titles(await doc.getOutline());
+      doc.redo();
+
+      // Inserting pages keeps it.
+      await doc.insertPages(new Uint8Array(ten));
+      const afterInsert = titles(await read_outline(doc.getBytes()));
+
+      // A merge: a branch per document, named.
+      const photoId = await editor.addImage(new Uint8Array(photo), { pageSize: "a4" });
+      const merged = editor.getDocument(await editor.mergeDocuments([photoId, id], { applyPending: true, titles: ["Foto", "Testo"] }));
+      const mergedOutline = titles(await merged.getOutline());
+
+      // The photo put on another page: its entry follows the new page.
+      const replaced = await merged.setPhotoPage(1, { pageSize: "native" });
+      const afterPhoto = titles(await read_outline(merged.getBytes()));
+      const photoExported = titles(await read_outline(await merged.exportBytes()));
+
+      const original = "1:Uno@1 2:Due@2 3:Dentro due@3 1:Cinque@5";
+      // Page 2 gone ("Due" with it, "Dentro due" moving up), page 5 now first.
+      const edited = "1:Uno@2 2:Dentro due@3 1:Cinque@1";
+      return (
+        read === original &&
+        exported === "1:Due@2 1:Cinque@1" &&
+        shown === edited &&
+        committed === edited &&
+        inFile === edited &&
+        undone === original &&
+        afterInsert === edited &&
+        mergedOutline === "1:Foto@1 1:Testo@2 2:Uno@3 3:Dentro due@4 2:Cinque@2" &&
+        afterPhoto === `1:Foto@${replaced} 1:Testo@2 2:Uno@3 3:Dentro due@4 2:Cinque@2` &&
+        photoExported === "1:Foto@1 1:Testo@2 2:Uno@3 3:Dentro due@4 2:Cinque@2"
+      );
+    },
+    [tenPagesBytes, photoJpgBytes],
+  );
+
   // --- PdfEditor.mergeDocuments / splitDocument register new documents with the right page counts ---
   results["PdfEditor.mergeDocuments produces a new document with the summed page count"] = await page.evaluate(
     async ({ bytesA, bytesB }) => {

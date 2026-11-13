@@ -13,10 +13,12 @@ import init, {
   nup_pdf,
   page_count,
   read_metadata,
+  read_outline,
   remove_images,
   rotate_pages,
   split_pdf,
   write_metadata,
+  write_outline,
 } from "pdfrs.js/core";
 import { collectTransferables, type WorkerInitMessage, type WorkerRequest, type WorkerResponse } from "./worker-protocol";
 
@@ -38,10 +40,12 @@ const coreMethods = {
   nup_pdf,
   page_count,
   read_metadata,
+  read_outline,
   remove_images,
   rotate_pages,
   split_pdf,
   write_metadata,
+  write_outline,
 } as const satisfies Record<string, (...args: never[]) => Promise<unknown>>;
 
 const FULL_METHODS = new Set(["render_page_preview", "image_to_pdf", "extract_image"]);

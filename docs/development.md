@@ -216,6 +216,12 @@ Una pagina creata da un JPEG (`PdfDocument.fromImage`, `insertImage`) ricorda la
 - **Quando la foto si perde**: al commit, per le pagine con rotazioni, annotazioni o immagini rimosse, che vengono scritte nella pagina e che una pagina rifatta perderebbe. Unione, estrazione e spostamento di pagine portano la foto con sé solo per le pagine invariate (stessa regola del riuso delle anteprime, `changedPages`).
 - **`PageInfo.originalNumber`**: il numero della pagina nel documento all'ultimo commit (o all'apertura), quello che l'app mostra come «era 4». Prima l'app confrontava l'id con la posizione, che dava risultati sbagliati per le pagine inserite e per quelle rifatte: una pagina rifatta eredita il numero di quella che sostituisce, una pagina inserita non ne ha (`null`).
 
+### Indice del PDF (`src/operations/outline.rs`)
+
+- **Lettura** (`read_outline`): un lettore nostro invece di `lopdf::get_toc`, che salta le voci con destinazione non risolvibile e si ferma al primo errore. Percorre `/Outlines` → `/First`/`/Next` (anti-ciclo, profondità massima) e restituisce voci piatte `{ title, level, page?, top?, open }`. Le destinazioni possono essere `/Dest` (array, nome, stringa) o `/A` con `GoTo`; i nomi si risolvono con `/Dests` del catalogo o con l'albero `/Names` → `/Dests`. Una voce che non porta a una pagina del documento resta, senza `page`.
+- **Scrittura** (`write_outline`): ricostruisce l'albero dalle voci piatte, con `/Count` positivo per i rami aperti e negativo per quelli chiusi e destinazioni `/XYZ` (se c'è `top`) o `/Fit`. Una lista vuota toglie l'indice.
+- **Perché il modello lo riscrive**: `compose` e `merge` tolgono `/Outlines`. `PdfDocument` legge l'indice della baseline solo quando serve e lo riscrive, rimappato con `remapOutline`, dopo ogni `compose` (`computeCommittedBytes`, `exportPages`) e dopo ogni `merge_pdfs` (`insertPages`, `setPhotoPage`). Le voci di pagine che non ci sono più vengono tolte e i loro figli risalgono di un livello. `PdfEditor.mergeDocuments` scrive un ramo per documento (`titles`), con dentro l'indice di ciascuno (`getOutlineAsShown`). N per foglio e libretto restano senza indice.
+
 ### Modello logico del PDF: `PdfDocument` / `PdfEditor` (`packages/pdfrs-editor/src/pdf-model/`)
 
 Sopra le funzioni stateless viste finora c'è un livello di modello puro (nessun DOM, nessun riferimento a `window`/`document`), pensato per essere riusato da un front qualsiasi — anche il futuro front Vue in repo separata:

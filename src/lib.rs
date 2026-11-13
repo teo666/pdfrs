@@ -251,6 +251,26 @@ pub async fn extract_image(
     Ok(out.into())
 }
 
+/// A PDF's outline (bookmarks) as a flat list in reading order: `[{ title,
+/// level, page?, top?, open }]` - `level` 1 for the top, `page` 1-based and
+/// absent for an entry pointing outside the document. Empty when there is none.
+#[wasm_bindgen]
+pub async fn read_outline(file: Uint8Array) -> std::result::Result<JsValue, JsValue> {
+    let doc = load(&file.to_vec())?;
+    let entries = operations::outline::read(&doc);
+    serde_wasm_bindgen::to_value(&entries).map_err(|err| PdfrsError::Options(err.to_string()).into())
+}
+
+/// Replaces a PDF's outline with `entries` (same shape as `read_outline`
+/// returns); an empty array removes it.
+#[wasm_bindgen]
+pub async fn write_outline(file: Uint8Array, entries: JsValue) -> std::result::Result<Uint8Array, JsValue> {
+    let mut doc = load(&file.to_vec())?;
+    let entries: Vec<operations::outline::OutlineEntry> = parse_options(entries)?;
+    operations::outline::write(&mut doc, &entries)?;
+    Ok(save(&mut doc)?)
+}
+
 /// Rearranges the pages of a PDF into an N-up layout on newly generated sheets.
 /// `options` is a JS object `{ pageSize?: "a3"|"a4"|"a5"|"letter"|"legal"|"native", orientation?: "portrait"|"landscape"|"auto", layout?: 1|2|4|6|8|9|16|{ rows: number, cols: number }, direction?: "horizontal"|"vertical", margin?: number, spacing?: number, drawBorders?: boolean, autoRotate?: boolean }`
 /// (all fields optional).

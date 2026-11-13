@@ -3,7 +3,7 @@
 // round-trip to the worker instead of a direct call, wrapped back into a
 // Promise so call sites don't need to know a worker is involved at all.
 import { createPdfrsWorker } from "./create-pdfrs-worker";
-import type { ExtractedImage, ImagePageOptions, PdfImages } from "../pdf-model/types";
+import type { ExtractedImage, ImagePageOptions, OutlineEntry, PdfImages } from "../pdf-model/types";
 import type { TextStyle } from "../text/layout";
 import type { WorkerRequest, WorkerResponse } from "./worker-protocol";
 
@@ -104,6 +104,16 @@ export function encrypt_pdf(file: Uint8Array, ownerPassword: string, userPasswor
 
 export function decrypt_pdf(file: Uint8Array, password: string): Promise<Uint8Array> {
   return call("decrypt_pdf", [file, password]);
+}
+
+/** The PDF's outline (bookmarks), flat, in reading order; `page` is a 1-based page number. Empty when there is none. */
+export function read_outline(file: Uint8Array): Promise<OutlineEntry[]> {
+  return call("read_outline", [file]);
+}
+
+/** Replaces the PDF's outline (`page` as 1-based page numbers); an empty list removes it. */
+export function write_outline(file: Uint8Array, entries: OutlineEntry[]): Promise<Uint8Array> {
+  return call("write_outline", [file, entries]);
 }
 
 /** The images already in the PDF and every place one is drawn (positions as fractions of the page shown). */

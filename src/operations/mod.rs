@@ -10,6 +10,7 @@ pub mod images;
 pub mod merge;
 pub mod metadata;
 pub mod nup;
+pub mod outline;
 #[cfg(feature = "preview")]
 pub mod preview;
 pub mod rotate;

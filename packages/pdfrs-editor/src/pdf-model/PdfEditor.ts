@@ -1,6 +1,6 @@
-import { decrypt_pdf, encrypt_pdf, merge_pdfs, split_pdf } from "../worker/pdfrs-worker-client";
+import { decrypt_pdf, encrypt_pdf, merge_pdfs, split_pdf, write_outline } from "../worker/pdfrs-worker-client";
 import { PdfDocument } from "./PdfDocument";
-import type { DocumentId, ImagePageOptions, PageId } from "./types";
+import type { DocumentId, ImagePageOptions, OutlineEntry, PageId } from "./types";
 
 /**
  * Manages a collection of `PdfDocument`s and the operations that span more
@@ -54,11 +54,21 @@ export class PdfEditor {
    * a page that was already previewed doesn't need rendering again just
    * because it now lives in a different document.
    */
-  async mergeDocuments(ids: DocumentId[], options: { applyPending?: boolean } = {}): Promise<DocumentId> {
+  async mergeDocuments(
+    ids: DocumentId[],
+    options: { applyPending?: boolean; titles?: string[] } = {},
+  ): Promise<DocumentId> {
     const sources = ids.map((id) => this.getDocument(id));
-    if (options.applyPending) return this.mergeAsShown(sources);
+    if (options.applyPending) return this.mergeAsShown(sources, options.titles);
 
-    const merged = await merge_pdfs(sources.map((doc) => doc.getBytes()));
+    let merged = await merge_pdfs(sources.map((doc) => doc.getBytes()));
+    merged = await withBranches(
+      merged,
+      await Promise.all(
+        sources.map(async (doc) => ({ pages: doc.getPageCount(), outline: await doc.getOutline() })),
+      ),
+      options.titles,
+    );
     const mergedId = await this.addDocument(merged);
     const mergedDoc = this.getDocument(mergedId);
 
@@ -82,8 +92,18 @@ export class PdfEditor {
    * (`exportBytes()`: order, rotations and deletions applied). Previews carry
    * over for the pages that come out unchanged - same picture, no rotation.
    */
-  private async mergeAsShown(sources: PdfDocument[]): Promise<DocumentId> {
-    const merged = await merge_pdfs(await Promise.all(sources.map((doc) => doc.exportBytes())));
+  private async mergeAsShown(sources: PdfDocument[], titles?: string[]): Promise<DocumentId> {
+    let merged = await merge_pdfs(await Promise.all(sources.map((doc) => doc.exportBytes())));
+    merged = await withBranches(
+      merged,
+      await Promise.all(
+        sources.map(async (doc) => ({
+          pages: doc.pages().filter((page) => !page.markedForDeletion).length,
+          outline: await doc.getOutlineAsShown(),
+        })),
+      ),
+      titles,
+    );
     const mergedId = await this.addDocument(merged);
     const mergedDoc = this.getDocument(mergedId);
 
@@ -219,6 +239,35 @@ export class WrongPasswordError extends Error {
     super("password errata");
     this.name = "WrongPasswordError";
   }
+}
+
+/**
+ * A merged document's outline: one entry per source, named after it
+ * (`titles`, else "Documento n"), leading to its first page, with the
+ * source's own outline inside - so the outline is also a map of the merge.
+ * `parts` gives each source's page count and outline (page numbers within
+ * it), in merge order.
+ */
+async function withBranches(
+  merged: Uint8Array,
+  parts: { pages: number; outline: OutlineEntry[] }[],
+  titles: string[] = [],
+): Promise<Uint8Array> {
+  const entries: OutlineEntry[] = [];
+  let offset = 0;
+  parts.forEach((part, index) => {
+    entries.push({
+      title: titles[index] ?? `Documento ${index + 1}`,
+      level: 1,
+      page: part.pages > 0 ? offset + 1 : null,
+      open: true,
+    });
+    for (const entry of part.outline) {
+      entries.push({ ...entry, level: entry.level + 1, page: entry.page == null ? null : offset + entry.page });
+    }
+    offset += part.pages;
+  });
+  return write_outline(merged, entries);
 }
 
 /** Pages whose exported picture differs from their cached preview: rotated or annotated. */

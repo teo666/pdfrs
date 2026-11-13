@@ -297,6 +297,11 @@ async function main() {
     return photoButton?.textContent ?? "";
   });
 
+  // The status still says "uniti" from the first merge: wait on the heading
+  // changing instead, or this reads the previous document's.
+  const headingBeforeImageMerge = await page.evaluate(
+    () => document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view").shadowRoot.querySelector("h3").textContent,
+  );
   await page.evaluate(() => {
     const app = document.querySelector("pdf-editor-app");
     const checkboxes = Array.from(app.shadowRoot.querySelectorAll('[data-el="doclist"] li'));
@@ -309,10 +314,10 @@ async function main() {
     }
     app.shadowRoot.querySelector('[data-action="merge"]').click();
   });
-  await page.waitForFunction(() => {
-    const status = document.querySelector("pdf-editor-app").shadowRoot.querySelector('[data-el="status"]');
-    return status?.textContent?.includes("uniti");
-  });
+  await page.waitForFunction((before) => {
+    const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
+    return view.shadowRoot.querySelector("h3").textContent !== before;
+  }, headingBeforeImageMerge);
   const afterImageMerge = await page.evaluate(() => {
     const view = document.querySelector("pdf-editor-app").shadowRoot.querySelector("pdf-document-view");
     return { heading: view.shadowRoot.querySelector("h3").textContent };

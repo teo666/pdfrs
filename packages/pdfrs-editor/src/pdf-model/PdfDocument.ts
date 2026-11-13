@@ -10,9 +10,11 @@ import {
   merge_pdfs,
   page_count,
   read_metadata,
+  read_outline,
   remove_images,
   rotate_pages,
   write_metadata,
+  write_outline,
 } from "../worker/pdfrs-worker-client";
 import { renderPageOnPool, renderPagesInParallel } from "../worker/preview-worker-pool";
 import type { TextContent } from "../text/layout";
@@ -26,6 +28,7 @@ import type {
   ImagePageOptions,
   MetadataField,
   MetadataPatch,
+  OutlineEntry,
   PageId,
   PageInfo,
   PagePreview,
@@ -83,6 +86,7 @@ interface DocumentSnapshot {
   photos: Map<PageId, PhotoSource>;
   appliedPageCount: number;
   replacedFrom: Map<PageId, PageId>;
+  baselineOutline: OutlineEntry[] | null;
 }
 
 /** The JPEG a page was made from, and the page it was put on: kept so the page can be made again on another one. */
@@ -95,6 +99,31 @@ const samePageOptions = (a: ImagePageOptions, b: ImagePageOptions) =>
   (a.pageSize ?? "native") === (b.pageSize ?? "native") &&
   (a.orientation ?? "auto") === (b.orientation ?? "auto") &&
   (a.margin ?? 0) === (b.margin ?? 0);
+
+/**
+ * Outline entries with their pages renumbered by `pages` (old → new). An
+ * entry whose page isn't in the map goes, and its children move up a level
+ * into its place; one that points nowhere stays as it is.
+ */
+export function remapOutline(entries: OutlineEntry[], pages: Map<PageId, number>): OutlineEntry[] {
+  const result: OutlineEntry[] = [];
+  // Levels of the entries dropped above the current one.
+  const dropped: number[] = [];
+  for (const entry of entries) {
+    while (dropped.length > 0 && dropped[dropped.length - 1]! >= entry.level) dropped.pop();
+    const page = entry.page ?? null;
+    if (page !== null && !pages.has(page)) {
+      dropped.push(entry.level);
+      continue;
+    }
+    result.push({
+      ...entry,
+      level: Math.max(1, entry.level - dropped.length),
+      page: page === null ? null : pages.get(page)!,
+    });
+  }
+  return result;
+}
 
 const PAGE_NAMES: Record<NonNullable<ImagePageOptions["pageSize"]>, string> = {
   a4: "su A4",
@@ -199,6 +228,10 @@ export class PdfDocument {
   // cached like the metadata (`null` = not read yet), invalidated wherever
   // the baseline bytes change.
   private baselineImages: PdfImages | null = null;
+  // The baseline's outline, its pages as page ids: read lazily and cached
+  // like the metadata (`null` = not read yet). Page operations that rebuild
+  // the file (compose, merge) drop the outline; it's written back from this.
+  private baselineOutline: OutlineEntry[] | null = null;
   // Image draws to take away (placement ids from `getImages`), not applied
   // yet: part of the undoable state, like the annotations.
   private readonly removedImages = new Set<string>();
@@ -312,12 +345,18 @@ export class PdfDocument {
     const metadata = await this.ensureBaselineMetadata();
     let merged = await merge_pdfs([this.bytes, pdf]);
     if (Object.keys(metadata).length > 0) merged = await write_metadata(merged, { ...metadata });
+    const replacement = this.pageCount + 1;
+    // Merging drops the outline: written back, entries for the old page now on the new one.
+    const outline = (await this.ensureBaselineOutline()).map((entry) =>
+      entry.page === page ? { ...entry, page: replacement } : entry,
+    );
+    if (outline.length > 0) merged = await write_outline(merged, outline);
     const removals = this.removedImages.size > 0 ? await this.remapRemovals(merged) : null;
 
-    const replacement = this.pageCount + 1;
     this.bytes = merged;
     this.pageCount += 1;
     this.baselineImages = null;
+    this.baselineOutline = outline;
     // The old page stays in the baseline, out of the order: the next commit drops it.
     this.order[position] = replacement;
     const rotation = this.rotations.get(page);
@@ -459,6 +498,7 @@ export class PdfDocument {
       photos: new Map(this.photos),
       appliedPageCount: this.appliedPageCount,
       replacedFrom: new Map(this.replacedFrom),
+      baselineOutline: this.baselineOutline,
     };
   }
 
@@ -492,6 +532,7 @@ export class PdfDocument {
     this.photos.clear();
     for (const [page, photo] of snapshot.photos) this.photos.set(page, photo);
     this.appliedPageCount = snapshot.appliedPageCount;
+    this.baselineOutline = snapshot.baselineOutline;
     this.replacedFrom.clear();
     for (const [page, old] of snapshot.replacedFrom) this.replacedFrom.set(page, old);
   }
@@ -651,6 +692,9 @@ export class PdfDocument {
     const metadata = await this.ensureBaselineMetadata();
     let merged = await merge_pdfs([this.bytes, bytes]);
     if (Object.keys(metadata).length > 0) merged = await write_metadata(merged, { ...metadata });
+    // So is the outline: the existing pages keep their numbers, so it goes back as it was.
+    const outline = await this.ensureBaselineOutline();
+    if (outline.length > 0) merged = await write_outline(merged, outline);
 
     // Merging renumbers the objects, so a pending removal inside a Form
     // (whose id names the Form's object) is carried over to its new id.
@@ -684,6 +728,12 @@ export class PdfDocument {
       [await this.editedBaseline(new Set(pages))],
       pages.map((id) => ({ source: 0, page: id })),
     );
+    // The outline entries of the pages exported, pointing at their new numbers.
+    const outline = remapOutline(
+      await this.ensureBaselineOutline(),
+      new Map(pages.map((id, index) => [id, index + 1])),
+    );
+    if (outline.length > 0) bytes = await write_outline(bytes, outline);
     const rotations: PendingRotation[] = [];
     pages.forEach((id, index) => {
       const degrees = this.rotations.get(id) ?? 0;
@@ -1067,6 +1117,35 @@ export class PdfDocument {
   }
 
   /** Reads the baseline's /Info once and caches it; every later call is free until the baseline changes. */
+  // --- Outline ---------------------------------------------------------------
+
+  /** Reads the baseline's outline once; every later call is free until the baseline changes. */
+  private async ensureBaselineOutline(): Promise<OutlineEntry[]> {
+    if (!this.baselineOutline) this.baselineOutline = await read_outline(this.bytes);
+    return this.baselineOutline;
+  }
+
+  /**
+   * The document's outline (bookmarks), in reading order, each entry's
+   * `page` a page id of this document (absent when it points elsewhere).
+   * Read the first time it's asked for. Kept through page edits: applying
+   * them, exporting pages and inserting some write it back where the
+   * operations underneath would lose it.
+   */
+  async getOutline(): Promise<OutlineEntry[]> {
+    return (await this.ensureBaselineOutline()).map((entry) => ({ ...entry }));
+  }
+
+  /**
+   * The outline as the document looks now: pages numbered by their place
+   * among the pages not marked for deletion, entries for those dropped
+   * (their children move up a level). What `exportBytes()` would write.
+   */
+  async getOutlineAsShown(): Promise<OutlineEntry[]> {
+    const shown = this.allPageIds().filter((id) => !this.deletions.has(id));
+    return remapOutline(await this.ensureBaselineOutline(), new Map(shown.map((id, index) => [id, index + 1])));
+  }
+
   private async ensureBaselineMetadata(): Promise<PdfMetadata> {
     if (!this.baselineMetadata) {
       this.baselineMetadata = (await read_metadata(this.bytes)) as PdfMetadata;
@@ -1236,6 +1315,7 @@ export class PdfDocument {
     this.previewCache.clear();
     this.baselineMetadata = null;
     this.baselineImages = null;
+    this.baselineOutline = null;
     this.order = identityOrder(this.pageCount);
     // Recorded only once the wasm work has succeeded, so a failed commit
     // leaves no phantom history step. `pushUndo()` would snapshot the
@@ -1255,6 +1335,7 @@ export class PdfDocument {
     this.previewCache.clear();
     this.baselineMetadata = null;
     this.baselineImages = null;
+    this.baselineOutline = null;
     this.removedImages.clear();
     this.photos.clear();
     this.recordSnapshot(before, "Cifra documento");
@@ -1270,6 +1351,7 @@ export class PdfDocument {
     this.previewCache.clear();
     this.baselineMetadata = null;
     this.baselineImages = null;
+    this.baselineOutline = null;
     this.removedImages.clear();
     this.photos.clear();
     this.order = identityOrder(this.pageCount);
@@ -1293,6 +1375,12 @@ export class PdfDocument {
     if (!isUnchangedOrder) {
       const layout = survivingIds.map((id) => ({ source: 0, page: id }));
       bytes = await compose_pdf([bytes], layout);
+      // compose_pdf leaves the outline behind: written back, following the pages.
+      const outline = remapOutline(
+        await this.ensureBaselineOutline(),
+        new Map(survivingIds.map((id, index) => [id, index + 1])),
+      );
+      if (outline.length > 0) bytes = await write_outline(bytes, outline);
     }
 
     // Rotations are keyed by the *new* position, not the original id: deleting
