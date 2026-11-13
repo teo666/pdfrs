@@ -46,6 +46,10 @@ impl Default for Orientation {
 pub struct ImagePageOptions {
     pub page_size: PageSize,
     pub orientation: Orientation,
+    /// White space kept around the image on an A4/Letter page, in PDF points
+    /// (28.35 is one centimetre). Ignored for `PageSize::Native`. Default 0:
+    /// the image reaches the page's nearer edges.
+    pub margin: f64,
 }
 
 /// Builds a one-page PDF with `bytes` (a JPEG file) drawn on it, sized/oriented
@@ -94,7 +98,15 @@ pub fn image_to_pdf(bytes: &[u8], options: ImagePageOptions) -> Result<Vec<u8>> 
 
     // Scale the unit square (`cm`'s implicit 1x1 image space) up to the
     // drawn size, and translate to center it on the page.
-    let (draw_width, draw_height) = fitted_size(image_width, image_height, page_width, page_height);
+    // The margin only applies to a page of a set size, and never eats more
+    // than half of it.
+    let margin = if options.page_size == PageSize::Native {
+        0.0
+    } else {
+        options.margin.max(0.0).min(page_width.min(page_height) * 0.25)
+    };
+    let (draw_width, draw_height) =
+        fitted_size(image_width, image_height, page_width - 2.0 * margin, page_height - 2.0 * margin);
     let tx = (page_width - draw_width) / 2.0;
     let ty = (page_height - draw_height) / 2.0;
 
@@ -205,7 +217,7 @@ pub(crate) mod tests {
         let jpeg = sample_jpeg(400, 100); // wide -> landscape
         let pdf = image_to_pdf(
             &jpeg,
-            ImagePageOptions { page_size: PageSize::A4, orientation: Orientation::Auto },
+            ImagePageOptions { page_size: PageSize::A4, orientation: Orientation::Auto, margin: 0.0 },
         )
         .unwrap();
 
@@ -216,6 +228,31 @@ pub(crate) mod tests {
         let height = media_box[3].as_float().unwrap();
 
         assert!(width > height, "expected a landscape A4 page, got {}x{}", width, height);
+    }
+
+    /// The `cm` the image is drawn with: (width, height, x, y).
+    fn drawn(pdf: &[u8]) -> (f64, f64, f64, f64) {
+        let doc = Document::load_mem(pdf).unwrap();
+        let (_, page_id) = doc.get_pages().into_iter().next().unwrap();
+        let content = doc.get_and_decode_page_content(page_id).unwrap();
+        let cm = content.operations.iter().find(|op| op.operator == "cm").unwrap();
+        let n = |i: usize| cm.operands[i].as_float().unwrap() as f64;
+        (n(0), n(3), n(4), n(5))
+    }
+
+    #[test]
+    fn keeps_a_margin_around_the_image_on_an_a4_page() {
+        let jpeg = sample_jpeg(100, 400); // tall: portrait page, the height decides
+        let options = ImagePageOptions { page_size: PageSize::A4, orientation: Orientation::Auto, margin: 28.35 };
+        let (width, height, x, y) = drawn(&image_to_pdf(&jpeg, options).unwrap());
+        assert!((height - (A4_HEIGHT - 2.0 * 28.35)).abs() < 0.01, "{}", height);
+        assert!((y - 28.35).abs() < 0.01, "{}", y);
+        assert!((width - height / 4.0).abs() < 0.01);
+        assert!((x - (A4_WIDTH - width) / 2.0).abs() < 0.01, "centred");
+
+        // A native page has no margin to keep: the image is the page.
+        let native = ImagePageOptions { margin: 28.35, ..ImagePageOptions::default() };
+        assert_eq!(drawn(&image_to_pdf(&jpeg, native).unwrap()), (100.0, 400.0, 0.0, 0.0));
     }
 
     #[test]

@@ -60,6 +60,8 @@ export interface ImagePageOptions {
   pageSize?: "native" | "a4" | "letter";
   /** Ignored for pageSize "native" (always matches the image's own aspect ratio). Default "auto": matches the image's aspect ratio. */
   orientation?: "portrait" | "landscape" | "auto";
+  /** White space around the image on an A4/Letter page, in PDF points (28.35 = 1 cm). Ignored for "native". Default 0. */
+  margin?: number;
 }
 
 /** An image registered with a document for annotations (`PdfDocument.addAsset`). */

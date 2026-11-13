@@ -296,7 +296,8 @@ pub async fn render_page_preview(file: Uint8Array, page: u32, scale: f32) -> std
 }
 
 /// Builds a one-page PDF with `file` (a JPEG) drawn on it. `options` is a JS
-/// object `{ pageSize?: "native"|"a4"|"letter", orientation?: "portrait"|"landscape"|"auto" }`
+/// object `{ pageSize?: "native"|"a4"|"letter", orientation?: "portrait"|"landscape"|"auto", margin?: number }`
+/// (`margin`: points of white space around the image on an A4/Letter page)
 /// (all fields optional; pass `undefined`/`null`/`{}` for the default - a
 /// page exactly the size of the image).
 ///
