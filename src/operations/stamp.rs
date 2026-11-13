@@ -1568,7 +1568,7 @@ mod render_tests {
             dict.set("CropBox", vec![Object::from(100), 200.into(), 500.into(), 700.into()]);
             dict.set("Rotate", rotation);
 
-            let pixels = vec![255u8, 0, 0, 255].repeat(16 * 16);
+            let pixels = [255u8, 0, 0, 255].repeat(16 * 16);
             annotate(
                 &mut doc,
                 &[ImageAsset { pixels: &pixels, width: 16, height: 16 }],

@@ -283,7 +283,9 @@ pub(crate) fn create_page_form_xobject(
     page_id: ObjectId,
     page_num: u32,
 ) -> Result<SourcePageInfo> {
-    let (media_x, media_y, width, height) = get_page_box(doc, page_id, page_num)?;
+    // The part of the page that is shown (CropBox within MediaBox): the
+    // Form's BBox clips to it, so what the page hides stays hidden on the sheet.
+    let (media_x, media_y, width, height) = get_visible_box(doc, page_id, page_num)?;
     let rotation = get_page_rotation(doc, page_id);
 
     // Gather page resources (materializing inherited ones if needed)
@@ -685,5 +687,88 @@ mod tests {
 
         let result = nup(&doc, options).expect("nup custom grid should succeed");
         assert_eq!(result.get_pages().len(), 1);
+    }
+}
+
+/// Pages cut down with /CropBox, as N-up sheets and booklets: only what the
+/// page shows may reach the sheet, scaled as the page shown.
+#[cfg(all(test, feature = "preview"))]
+mod crop_box_tests {
+    use super::*;
+    use crate::operations::booklet::{booklet, BookletOptions};
+    use crate::operations::preview::render_page_preview;
+    use crate::operations::test_support::multi_page_document;
+    use hayro::vello_cpu::Pixmap;
+
+    /// One page, A4, cropped to [100 200 500 700]: red everywhere, blue
+    /// exactly on the crop box - so a sheet with any red on it shows what
+    /// the page hides.
+    fn cropped_document() -> Document {
+        let mut doc = multi_page_document(1);
+        let page_id = *doc.get_pages().get(&1).unwrap();
+        let content = b"1 0 0 rg 0 0 595 842 re f 0 0 1 rg 100 200 400 500 re f".to_vec();
+        crate::operations::content_scan::set_page_content(&mut doc, page_id, content).unwrap();
+        let dict = doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap();
+        dict.set("CropBox", vec![Object::from(100), 200.into(), 500.into(), 700.into()]);
+        doc
+    }
+
+    /// (red, blue) pixel counts of a sheet as rendered.
+    fn colours(doc: &mut Document, page: u32) -> (usize, usize) {
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        let png = render_page_preview(&bytes, page, 0.5).unwrap();
+        let pixmap = Pixmap::from_png(std::io::Cursor::new(png)).unwrap();
+        let (mut red, mut blue) = (0, 0);
+        for y in 0..pixmap.height() {
+            for x in 0..pixmap.width() {
+                let p = pixmap.sample(x, y);
+                if p.r > 200 && p.g < 60 && p.b < 60 {
+                    red += 1;
+                }
+                if p.b > 200 && p.r < 60 && p.g < 60 {
+                    blue += 1;
+                }
+            }
+        }
+        (red, blue)
+    }
+
+    #[test]
+    fn a_native_one_up_sheet_is_the_crop_box() {
+        let doc = cropped_document();
+        let options = NUpOptions {
+            layout: NUpLayout::Preset(1),
+            page_size: PageSize::Native,
+            margin: 0.0,
+            ..Default::default()
+        };
+        let mut sheet = nup(&doc, options).unwrap();
+
+        let page_id = *sheet.get_pages().get(&1).unwrap();
+        let (_, _, width, height) = get_page_box(&sheet, page_id, 1).unwrap();
+        assert_eq!((width.round(), height.round()), (400.0, 500.0), "the sheet is the size of the page shown");
+        let (red, blue) = colours(&mut sheet, 1);
+        assert_eq!(red, 0, "nothing the page hides reaches the sheet");
+        assert!(blue > 0);
+    }
+
+    #[test]
+    fn an_n_up_sheet_shows_only_the_crop_box() {
+        let doc = cropped_document();
+        let mut sheet = nup(&doc, NUpOptions { layout: NUpLayout::Preset(4), ..Default::default() }).unwrap();
+        let (red, blue) = colours(&mut sheet, 1);
+        assert_eq!(red, 0, "nothing the page hides reaches the sheet");
+        assert!(blue > 0);
+    }
+
+    #[test]
+    fn a_booklet_shows_only_the_crop_box() {
+        let doc = cropped_document();
+        let mut sheets = booklet(&doc, BookletOptions::default()).unwrap();
+        // Page 1 of a one-page booklet is on the first side of the first sheet.
+        let (red, blue) = colours(&mut sheets, 1);
+        assert_eq!(red, 0, "nothing the page hides reaches the sheet");
+        assert!(blue > 0);
     }
 }
