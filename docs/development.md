@@ -9,16 +9,31 @@ cargo test
 # verifica che compili per il target wasm
 cargo check --target wasm32-unknown-unknown
 
-# build "core" in pkg/ (merge/split/rotate/compose/encrypt/decrypt, ~650KB - usato da www/, o da un frontend esterno)
+# build "core" in pkg/ (merge/split/rotate/compose/encrypt/decrypt, ~1,2MB - usato da www/, o da un frontend esterno)
 wasm-pack build --target web --out-dir pkg --no-default-features --features console_error_panic_hook
 
-# build "full" in pkg-full/ (tutto, incluse preview/import immagini, ~4.3MB)
+# build "full" in pkg-full/ (tutto, incluse preview/import immagini, ~5,9MB)
 wasm-pack build --target web --out-dir pkg-full
 ```
 
 Vedi docs/architecture.md ("Build \"core\" e \"full\"") per il perché dello split: entrambe le feature `preview`/`image-import` sono nel `default`, quindi vanno esplicitamente disattivate per ottenere il binario piccolo - un `wasm-pack build --target web` senza flag produce comunque il binario "full" completo.
 
 `wasm-pack test --headless --firefox` (o `--chrome`) esegue i test in `tests/web.rs` in un vero browser, ma richiede `geckodriver`/`chromedriver` installati — non presenti in tutti gli ambienti di sviluppo. (Nota: la funzione di start del crate si chiama `start`, non `main`, proprio perché wasm-bindgen rifiuta di linkare l'harness di test quando entrambi esportano un `main` — "the name `main` is exported by multiple crates in this build".) Se disponibili, è il modo per validare i binding `#[wasm_bindgen]` end-to-end lato Rust; altrimenti la pagina di test in `www/` (sotto) copre lo stesso confine JS↔wasm.
+
+### Pubblicare `pdfrs.js` su npm
+
+La versione è quella di `Cargo.toml`: `./scripts/build-npm-package.sh` la copia in `pkg-npm/package.json`, insieme a descrizione, licenza e repository. Il README mostrato su npm è `scripts/npm-package/README.md`, in inglese; le licenze sono `LICENSE-MIT` e `LICENSE-APACHE`.
+
+```bash
+# 1. alza "version" in Cargo.toml, poi:
+./scripts/build-npm-package.sh
+cd pkg-npm
+npm publish --dry-run   # controlla file e dimensioni senza pubblicare
+npm login               # una volta per macchina
+npm publish
+```
+
+`pdfrs-editor` non è pubblicato: è `private` e usa `pdfrs.js` tramite `link:`.
 
 ### Fixture PDF (e JPEG)
 

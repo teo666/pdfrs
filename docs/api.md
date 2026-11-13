@@ -1,14 +1,16 @@
 # API esposta
 
-Tutte le funzioni sono esportate da `pkg/pdfrs.js` (generato da `wasm-pack build --target web`) e sono `async`: ritornano una `Promise` che si risolve con i byte del PDF risultante, o viene rigettata con un `Error` leggibile in caso di problema (range di pagina invalido, password sbagliata, ecc.).
+Tutte le funzioni sono esportate dal pacchetto npm `pdfrs.js` (`pdfrs.js/core` e `pdfrs.js/full`, assemblato da `./scripts/build-npm-package.sh`) e sono `async`: ritornano una `Promise` che si risolve con i byte del PDF risultante, o viene rigettata con un `Error` leggibile in caso di problema (range di pagina invalido, password sbagliata, ecc.).
 
 Prima di chiamarle va inizializzato il modulo wasm una sola volta:
 
 ```ts
 import init, {
   merge_pdfs, split_pdf, rotate_pages, compose_pdf, encrypt_pdf, decrypt_pdf,
-  page_count, nup_pdf, booklet_pdf, render_page_preview, image_to_pdf,
-} from "pdfrs";
+  is_password_protected, page_count, read_metadata, write_metadata,
+  read_outline, write_outline, list_images, remove_images, annotate_pdf,
+  nup_pdf, booklet_pdf, render_page_preview, image_to_pdf, extract_image,
+} from "pdfrs.js/full"; // oppure "pdfrs.js/core", senza le tre funzioni della build "full"
 
 await init();
 ```
@@ -69,6 +71,14 @@ Decifra un PDF usando la password owner o user. Se il file non è cifrato, la fu
 
 ```ts
 const decrypted = await decrypt_pdf(encryptedBytes, "user-secret");
+```
+
+## `is_password_protected(file: Uint8Array): Promise<boolean>`
+
+`true` se il PDF non si apre senza password, cioè se ha una password user. Un PDF così risulta senza pagine finché non lo si decifra con `decrypt_pdf`. Un PDF con la sola password owner risulta `false`.
+
+```ts
+if (await is_password_protected(bytes)) bytes = await decrypt_pdf(bytes, password);
 ```
 
 ## `page_count(file: Uint8Array): Promise<number>`
@@ -143,6 +153,52 @@ const updated = await write_metadata(bytes, { title: "Relazione", author: null }
 ```
 
 Il testo non ASCII viene codificato in UTF-16BE (ASCII resta in PDFDocEncoding), quindi accenti e alfabeti non latini sopravvivono al giro completo.
+
+## `read_outline(file: Uint8Array): Promise<OutlineEntry[]>`
+
+L'indice (segnalibri) del PDF come **lista piatta in ordine di lettura**, vuota se il documento non ne ha. Ogni voce è `{ title, level, page?, top?, open }`:
+
+- `level` vale 1 per il primo livello; i figli di una voce la seguono con `level + 1`;
+- `page` è 1-based, ed è assente se la voce punta fuori dal documento;
+- `top` è la posizione sulla pagina, in unità PDF dal basso, se la destinazione la indica;
+- `open` dice se i figli si vedono aperti all'apertura del documento.
+
+## `write_outline(file: Uint8Array, entries: OutlineEntry[]): Promise<Uint8Array>`
+
+Sostituisce l'indice con `entries`, nella stessa forma restituita da `read_outline`. Un array vuoto toglie l'indice.
+
+```ts
+const outline = await read_outline(bytes);
+const updated = await write_outline(bytes, [{ title: "Copertina", level: 1, page: 1, open: true }, ...outline]);
+```
+
+## `list_images(file: Uint8Array): Promise<{ images, placements }>`
+
+Le immagini già presenti nel PDF:
+
+- `images`: ogni immagine distinta, con `{ key, width, height, format, bytes, colorSpace?, bitsPerComponent?, hasMask, inline }`. `format` vale `jpeg`, `jpx`, `jbig2`, `ccitt`, `flate`, `lzw`, `rle`, `raw` o `other`; `bytes` è la dimensione dei dati compressi.
+- `placements`: ogni punto in cui un'immagine è disegnata, con `{ id, page, image, corners, x, y, width, height, sharedPages }`.
+  - Le coordinate sono frazioni della pagina visibile, con l'origine in alto a sinistra.
+  - `image` è la `key` dell'immagine disegnata.
+  - `sharedPages` elenca le altre pagine che disegnano la stessa Form: togliendo l'immagine da una, sparisce anche da quelle.
+
+## `remove_images(file: Uint8Array, placements: string[]): Promise<Uint8Array>`
+
+Toglie le immagini disegnate nei punti indicati, usando gli `id` di `placements` restituiti da `list_images`. Un'immagine che non viene più disegnata da nessuna parte viene eliminata dal file. Il contenuto della pagina viene modificato come byte, senza ricodificarlo, quindi il resto della pagina resta intatto, comprese le immagini inline.
+
+```ts
+const { placements } = await list_images(bytes);
+const lighter = await remove_images(bytes, placements.filter((p) => p.page === 1).map((p) => p.id));
+```
+
+## `extract_image(file: Uint8Array, key: string, maxSize?: number): Promise<{ mime, width, height, bytes }>`
+
+**Solo nella build "full".** Restituisce un'immagine del PDF (`key` da `list_images`) come file a sé: il JPEG così com'è memorizzato quando possibile, altrimenti un PNG. `maxSize`, se indicato, limita il lato più lungo, utile per le miniature.
+
+```ts
+const { mime, bytes: data } = await extract_image(bytes, images[0].key);
+const url = URL.createObjectURL(new Blob([data], { type: mime }));
+```
 
 ## `render_page_preview(file: Uint8Array, page: number, scale: number): Promise<Uint8Array>`
 

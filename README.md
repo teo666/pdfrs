@@ -13,10 +13,10 @@ Documentazione completa in [`docs/`](docs/):
 ## Quick start
 
 ```bash
-# build "core" (merge/split/rotate/compose/encrypt/decrypt, ~650KB, in pkg/)
+# build "core" (merge/split/rotate/compose/encrypt/decrypt…, ~1,2MB, in pkg/)
 wasm-pack build --target web --out-dir pkg --no-default-features --features console_error_panic_hook
 
-# build "full" (tutto, incluse preview/import immagini, ~4.3MB, in pkg-full/)
+# build "full" (tutto, incluse preview/import immagini, ~5,9MB, in pkg-full/)
 wasm-pack build --target web --out-dir pkg-full
 
 # tutte e due le build più il pacchetto npm unico (pkg-npm/, "pdfrs.js"), con
