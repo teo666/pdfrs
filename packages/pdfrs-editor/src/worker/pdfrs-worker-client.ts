@@ -3,7 +3,8 @@
 // round-trip to the worker instead of a direct call, wrapped back into a
 // Promise so call sites don't need to know a worker is involved at all.
 import { createPdfrsWorker } from "./create-pdfrs-worker";
-import type { ImagePageOptions } from "./pdf-model/types";
+import type { ExtractedImage, ImagePageOptions, OutlineEntry, PdfImages } from "../pdf-model/types";
+import type { TextStyle } from "../text/layout";
 import type { WorkerRequest, WorkerResponse } from "./worker-protocol";
 
 const worker = createPdfrsWorker();
@@ -52,7 +53,7 @@ export function compose_pdf(sources: Uint8Array[], layout: unknown): Promise<Uin
 }
 
 /** One thing drawn on one page; `asset` indexes into the `assets` array passed alongside. */
-export interface Annotation {
+export type Annotation = {
   page: number;
   /** Fractions (0..1) of the page as displayed, origin top-left. */
   x: number;
@@ -60,9 +61,12 @@ export interface Annotation {
   width: number;
   /** Degrees, clockwise as the reader sees the page, about the image's own centre. Optional: absent means upright. */
   rotation?: number;
-  kind: "image";
-  asset: number;
-}
+  /** Fraction of the displayed page's height. Absent: from `width` and the image's (or text's) proportions. */
+  height?: number;
+} & (
+  | { kind: "image"; asset: number }
+  | ({ kind: "text" } & Partial<TextStyle> & { text: string })
+);
 
 /**
  * Draws images onto pages, all in one pass.
@@ -100,6 +104,36 @@ export function encrypt_pdf(file: Uint8Array, ownerPassword: string, userPasswor
 
 export function decrypt_pdf(file: Uint8Array, password: string): Promise<Uint8Array> {
   return call("decrypt_pdf", [file, password]);
+}
+
+/** The PDF's outline (bookmarks), flat, in reading order; `page` is a 1-based page number. Empty when there is none. */
+export function read_outline(file: Uint8Array): Promise<OutlineEntry[]> {
+  return call("read_outline", [file]);
+}
+
+/** Replaces the PDF's outline (`page` as 1-based page numbers); an empty list removes it. */
+export function write_outline(file: Uint8Array, entries: OutlineEntry[]): Promise<Uint8Array> {
+  return call("write_outline", [file, entries]);
+}
+
+/** The images already in the PDF and every place one is drawn (positions as fractions of the page shown). */
+export function list_images(file: Uint8Array): Promise<PdfImages> {
+  return call("list_images", [file]);
+}
+
+/** Takes away the images drawn at `placements` (ids from `list_images`); images nothing draws any more leave the file. */
+export function remove_images(file: Uint8Array, placements: string[]): Promise<Uint8Array> {
+  return call("remove_images", [file, placements]);
+}
+
+/** One image of the PDF as a file (JPEG as stored, or PNG); `maxSize` caps the longer side, for thumbnails. Full build. */
+export function extract_image(file: Uint8Array, key: string, maxSize?: number): Promise<ExtractedImage> {
+  return call("extract_image", [file, key, maxSize]);
+}
+
+/** True when the PDF can't be opened without a password (it reads as having no pages until decrypted). */
+export function is_password_protected(file: Uint8Array): Promise<boolean> {
+  return call("is_password_protected", [file]);
 }
 
 export function page_count(file: Uint8Array): Promise<number> {

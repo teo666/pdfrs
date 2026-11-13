@@ -304,7 +304,10 @@ async function main() {
   // lazy, not just cached-after-first-use by the time we'd check. A second
   // fresh page that does open Preview must fetch it. Both use their own
   // page (not the one above, which already touched Preview earlier). ---
-  const isFullPackageRequest = (url) => url.includes("pkg-full") || url.includes("pdfrs-full");
+  // The full build is served from pkg-npm/full/ (through the linked
+  // pdfrs-editor package). A `?url` (or `?import&url`) request is only Vite resolving the
+  // binary's address for create-pdfrs-worker.ts, not a download of it.
+  const isFullPackageRequest = (url) => url.includes("/full/pdfrs") && !/[?&]url(&|$)/.test(url);
 
   const corePage = await browser.newPage();
   const coreRequests = [];

@@ -104,6 +104,11 @@ pub fn compose(docs: Vec<Document>, layout: &[PageRef]) -> Result<Document> {
     }
 
     document.trailer.set("Root", catalog_id);
+    // Every object of the sources was copied above, those only the pages
+    // left out use too (their contents, images, fonts): without this they'd
+    // stay in the file, unreferenced, and leaving pages out would not make
+    // it any smaller.
+    document.prune_objects();
     document.max_id = document.objects.len() as u32;
     document.renumber_objects();
     document.compress();
@@ -115,6 +120,23 @@ pub fn compose(docs: Vec<Document>, layout: &[PageRef]) -> Result<Document> {
 mod tests {
     use super::*;
     use crate::operations::test_support::multi_page_document;
+
+    #[test]
+    fn leaves_out_what_only_the_pages_left_out_use() {
+        let mut doc = multi_page_document(3);
+        let second = doc.get_pages()[&2];
+        crate::operations::content_scan::set_page_content(&mut doc, second, b"BT (solo la seconda) Tj ET".to_vec())
+            .unwrap();
+
+        let composed = compose(vec![doc], &[PageRef { source: 0, page: 1 }, PageRef { source: 0, page: 3 }]).unwrap();
+
+        let has_second = composed.objects.values().filter_map(|o| o.as_stream().ok()).any(|stream| {
+            let data = stream.decompressed_content().unwrap_or_else(|_| stream.content.clone());
+            data.windows(15).any(|w| w == b"solo la seconda")
+        });
+        assert!(!has_second, "page 2's content must not be in the file");
+        assert_eq!(composed.get_pages().len(), 2);
+    }
 
     #[test]
     fn reorders_and_interleaves_pages() {

@@ -98,6 +98,14 @@ pub async fn decrypt_pdf(file: Uint8Array, password: String) -> std::result::Res
     Ok(save(&mut doc)?)
 }
 
+/// True when the PDF can't be opened without a password (it has a user
+/// password). Such a PDF reads as having no pages: decrypt it first with
+/// `decrypt_pdf`. A PDF with only an owner password reads as `false`.
+#[wasm_bindgen]
+pub async fn is_password_protected(file: Uint8Array) -> std::result::Result<bool, JsValue> {
+    Ok(operations::crypto::needs_password(&file.to_vec())?)
+}
+
 /// Returns the number of pages in a PDF file (useful to know how many
 /// preview thumbnails to request from `render_page_preview`).
 #[wasm_bindgen]
@@ -201,6 +209,68 @@ pub async fn write_metadata(file: Uint8Array, patch: JsValue) -> std::result::Re
     Ok(save(&mut doc)?)
 }
 
+/// The images already in a PDF: `{ images: [...], placements: [...] }` -
+/// each distinct image (key, size in pixels, format, stored bytes, colour
+/// space, mask), and each place one is drawn (placement id, page, image key,
+/// corners and box as fractions of the page shown, other pages sharing the
+/// same Form). See `operations::images`.
+#[wasm_bindgen]
+pub async fn list_images(file: Uint8Array) -> std::result::Result<JsValue, JsValue> {
+    let doc = load(&file.to_vec())?;
+    let report = operations::images::list(&doc)?;
+    serde_wasm_bindgen::to_value(&report).map_err(|err| PdfrsError::Options(err.to_string()).into())
+}
+
+/// Takes away the images drawn at `placements` (an array of placement ids
+/// from `list_images`); an image nothing draws any more is deleted from the
+/// file.
+#[wasm_bindgen]
+pub async fn remove_images(file: Uint8Array, placements: JsValue) -> std::result::Result<Uint8Array, JsValue> {
+    let mut doc = load(&file.to_vec())?;
+    let placements: Vec<String> = parse_options(placements)?;
+    operations::images::remove(&mut doc, &placements)?;
+    Ok(save(&mut doc)?)
+}
+
+/// An image of the PDF (`key` from `list_images`) as a file of its own:
+/// `{ mime, width, height, bytes }` - the JPEG as stored when it can be,
+/// otherwise a PNG. `maxSize`, if given, caps the longer side (thumbnails).
+#[cfg(all(feature = "preview", feature = "image-import"))]
+#[wasm_bindgen]
+pub async fn extract_image(
+    file: Uint8Array,
+    key: String,
+    max_size: Option<u32>,
+) -> std::result::Result<JsValue, JsValue> {
+    let image = operations::image_extract::extract(&file.to_vec(), &key, max_size)?;
+    let out = js_sys::Object::new();
+    js_sys::Reflect::set(&out, &"mime".into(), &image.mime.into())?;
+    js_sys::Reflect::set(&out, &"width".into(), &image.width.into())?;
+    js_sys::Reflect::set(&out, &"height".into(), &image.height.into())?;
+    js_sys::Reflect::set(&out, &"bytes".into(), &Uint8Array::from(image.bytes.as_slice()).into())?;
+    Ok(out.into())
+}
+
+/// A PDF's outline (bookmarks) as a flat list in reading order: `[{ title,
+/// level, page?, top?, open }]` - `level` 1 for the top, `page` 1-based and
+/// absent for an entry pointing outside the document. Empty when there is none.
+#[wasm_bindgen]
+pub async fn read_outline(file: Uint8Array) -> std::result::Result<JsValue, JsValue> {
+    let doc = load(&file.to_vec())?;
+    let entries = operations::outline::read(&doc);
+    serde_wasm_bindgen::to_value(&entries).map_err(|err| PdfrsError::Options(err.to_string()).into())
+}
+
+/// Replaces a PDF's outline with `entries` (same shape as `read_outline`
+/// returns); an empty array removes it.
+#[wasm_bindgen]
+pub async fn write_outline(file: Uint8Array, entries: JsValue) -> std::result::Result<Uint8Array, JsValue> {
+    let mut doc = load(&file.to_vec())?;
+    let entries: Vec<operations::outline::OutlineEntry> = parse_options(entries)?;
+    operations::outline::write(&mut doc, &entries)?;
+    Ok(save(&mut doc)?)
+}
+
 /// Rearranges the pages of a PDF into an N-up layout on newly generated sheets.
 /// `options` is a JS object `{ pageSize?: "a3"|"a4"|"a5"|"letter"|"legal"|"native", orientation?: "portrait"|"landscape"|"auto", layout?: 1|2|4|6|8|9|16|{ rows: number, cols: number }, direction?: "horizontal"|"vertical", margin?: number, spacing?: number, drawBorders?: boolean, autoRotate?: boolean }`
 /// (all fields optional).
@@ -246,7 +316,8 @@ pub async fn render_page_preview(file: Uint8Array, page: u32, scale: f32) -> std
 }
 
 /// Builds a one-page PDF with `file` (a JPEG) drawn on it. `options` is a JS
-/// object `{ pageSize?: "native"|"a4"|"letter", orientation?: "portrait"|"landscape"|"auto" }`
+/// object `{ pageSize?: "native"|"a4"|"letter", orientation?: "portrait"|"landscape"|"auto", margin?: number }`
+/// (`margin`: points of white space around the image on an A4/Letter page)
 /// (all fields optional; pass `undefined`/`null`/`{}` for the default - a
 /// page exactly the size of the image).
 ///

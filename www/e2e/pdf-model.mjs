@@ -129,6 +129,42 @@ async function main() {
     return previews.length === 10 && previews.every((p, index) => p.id === index + 1 && p.png.length > 0);
   }, tenPagesBytes);
 
+  // --- The pool's workers hold the document: its bytes go to each worker at
+  // most once, not with every page - not even at a new scale, or for a
+  // single page. And what they render from what they hold is the right
+  // document: the same pixels as a fresh copy of its bytes.
+  results["pool workers are sent a document once each, not once per page"] = await page.evaluate(
+    async ([ten, photo]) => {
+      const { PdfDocument } = window.__pdfModel;
+      const sent = () => window.__pdfrsPreviewBytesSent ?? 0;
+      const doc = await PdfDocument.open(new Uint8Array(ten));
+      const before = sent();
+      await doc.getPreviews(0.35);
+      await doc.getPreviews(0.45);
+      const afterTwenty = sent() - before;
+      await doc.getPreview(7, 0.55);
+      const afterOne = sent() - before - afterTwenty;
+      const pool = window.__pdfrsLastPreviewPoolSize ?? 0;
+
+      // Two documents in turn, then each checked against a fresh copy.
+      const other = await PdfDocument.fromImage(new Uint8Array(photo));
+      const mixed = [await other.getPreview(1, 0.33), await doc.getPreview(1, 0.33)];
+      const fresh = [
+        await (await PdfDocument.fromImage(new Uint8Array(photo))).getPreview(1, 0.33),
+        await (await PdfDocument.open(new Uint8Array(ten))).getPreview(1, 0.33),
+      ];
+      const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+      return (
+        afterTwenty >= 1 &&
+        afterTwenty <= pool &&
+        afterOne === 0 &&
+        mixed.every((preview, i) => same(preview.png, fresh[i].png)) &&
+        !same(mixed[0].png, mixed[1].png)
+      );
+    },
+    [tenPagesBytes, photoJpgBytes],
+  );
+
   // --- Preview cache: same (page, scale) on an unchanged baseline returns
   // the identical PNG reference the second time - proof no re-render
   // happened, not just that the bytes look the same. ---
@@ -346,6 +382,268 @@ async function main() {
     await doc.exportBytes();
     return doc.hasPendingChanges() === true && doc.getPageCount() === 4;
   }, fourPagesBytes);
+
+  // --- protectDocument: a locked copy (no pages, encrypted bytes), the
+  // source untouched; unlockDocument: a readable copy with either password,
+  // a wrong one rejected as such. The protected copy is the document as it
+  // looks now (pending deletion applied).
+  results["protectDocument / unlockDocument round trip, as new documents"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfEditor } = window.__pdfModel;
+      const editor = new PdfEditor();
+      const sourceId = await editor.addDocument(new Uint8Array(bytes));
+      const source = editor.getDocument(sourceId);
+      source.deletePage(2);
+
+      const lockedId = await editor.protectDocument(sourceId, "segreta", "padrone");
+      const locked = editor.getDocument(lockedId);
+      const text = new TextDecoder("latin1").decode(locked.getBytes());
+
+      let wrong = "";
+      try {
+        await editor.unlockDocument(lockedId, "sbagliata");
+      } catch (err) {
+        wrong = err.name;
+      }
+      const byUser = editor.getDocument(await editor.unlockDocument(lockedId, "segreta"));
+      const byOwner = editor.getDocument(await editor.unlockDocument(lockedId, "padrone"));
+      const preview = await byUser.getPreview(1, 0.3);
+
+      let twice = false;
+      try {
+        await editor.protectDocument(lockedId, "ancora");
+      } catch {
+        twice = true;
+      }
+      return (
+        locked.isLocked() &&
+        locked.getPageCount() === 0 &&
+        text.includes("/Encrypt") &&
+        source.getPageCount() === 4 &&
+        source.hasPendingChanges() &&
+        !source.isLocked() &&
+        wrong === "WrongPasswordError" &&
+        !byUser.isLocked() &&
+        byUser.getPageCount() === 3 &&
+        byOwner.getPageCount() === 3 &&
+        preview.png.length > 0 &&
+        twice
+      );
+    },
+    fourPagesBytes,
+  );
+
+  // --- Images already in the PDF: listed with where they're drawn,
+  // extracted (the JPEG byte for byte, or a scaled PNG thumbnail), removed
+  // as a pending, undoable edit that leaves the exported file lighter -
+  // and still applied after pages are inserted meanwhile.
+  results["getImages / extractImage / removeImages, through commit and insertPages"] = await page.evaluate(
+    async ([photo, four]) => {
+      const { PdfEditor, PdfDocument } = window.__pdfModel;
+      const editor = new PdfEditor();
+      const imageId = await editor.addImage(new Uint8Array(photo));
+      const textId = await editor.addDocument(new Uint8Array(four));
+      const doc = editor.getDocument(await editor.mergeDocuments([imageId, textId]));
+
+      const { images, placements } = await doc.getImages();
+      const [placement] = placements;
+      const fullPage = placement.x < 0.01 && placement.y < 0.01 && placement.width > 0.99 && placement.height > 0.99;
+
+      const jpeg = await doc.extractImage(images[0].key);
+      const same = jpeg.mime === "image/jpeg" && jpeg.bytes.length === photo.length && jpeg.bytes.every((b, i) => b === photo[i]);
+      const thumb = await doc.extractImage(images[0].key, 16);
+
+      doc.removeImages([placement.id]);
+      const label = doc.history().at(-1).label;
+      const pending = doc.hasPendingChanges() && doc.pendingImageRemovals().has(placement.id);
+      doc.undo();
+      const undone = !doc.hasPendingChanges();
+      doc.redo();
+
+      const baselineSize = doc.getBytes().length;
+      const exported = await doc.exportBytes();
+      const after = await (await PdfDocument.open(exported)).getImages();
+
+      // Pages inserted while the removal waits: still applied at commit.
+      await doc.insertPages(new Uint8Array(four));
+      await doc.commit();
+      const committed = await doc.getImages();
+
+      return (
+        images.length === 1 &&
+        images[0].format === "jpeg" &&
+        placements.length === 1 &&
+        placement.page === 1 &&
+        fullPage &&
+        same &&
+        thumb.mime === "image/png" &&
+        Math.max(thumb.width, thumb.height) <= 16 &&
+        label === "Rimuovi immagine (pagina 1)" &&
+        pending &&
+        undone &&
+        after.images.length === 0 &&
+        exported.length < baselineSize - photo.length / 2 &&
+        committed.images.length === 0 &&
+        doc.getPageCount() === 9
+      );
+    },
+    [photoJpgBytes, fourPagesBytes],
+  );
+
+  // --- Photo pages remember their JPEG: put on another page later (one
+  // undo step, pending edits following the new page), kept through a
+  // commit, an insertion and a merge.
+  results["setPhotoPage remakes a photo page on another page size, undoably"] = await page.evaluate(
+    async ([photo, four]) => {
+      const { PdfEditor, PdfDocument } = window.__pdfModel;
+      const pngWidth = (png) => new DataView(png.buffer, png.byteOffset).getUint32(16);
+      const a4 = { pageSize: "a4", orientation: "auto", margin: 28.35 };
+      const editor = new PdfEditor();
+      const id = await editor.addImage(new Uint8Array(photo), a4);
+      const doc = editor.getDocument(id);
+      const startsOnA4 = doc.photoPages().get(1)?.pageSize === "a4";
+      const a4Width = pngWidth((await doc.getPreview(1, 1)).png);
+
+      doc.rotatePage(1, 90);
+      const replaced = await doc.setPhotoPage(1, { pageSize: "native" });
+      const [shown] = doc.pages();
+      const followed =
+        shown.id === replaced && shown.pendingRotation === 90 && shown.originalNumber === 1 && doc.pages().length === 1;
+      const label = doc.history().at(-1).label;
+      const imagesOnShown = (await doc.getImages()).placements.every((p) => p.page === replaced);
+      const nativeWidth = pngWidth((await doc.getPreview(replaced, 1)).png);
+
+      doc.undo();
+      const undone = doc.pages()[0].id === 1 && doc.photoPages().get(1)?.pageSize === "a4";
+      doc.redo();
+      doc.rotatePage(replaced, -90); // back upright: the commit keeps the photo
+      await doc.commit();
+      const kept = doc.getPageCount() === 1 && doc.photoPages().get(1)?.pageSize === "native";
+
+      const otherId = await editor.addDocument(new Uint8Array(four));
+      const other = editor.getDocument(otherId);
+      const inserted = await other.insertImage(new Uint8Array(photo), { pageSize: "letter" }, 0);
+      const insertedOk =
+        other.pages()[0].id === inserted &&
+        other.pages()[0].originalNumber === null &&
+        other.pages()[1].originalNumber === 1 &&
+        other.photoPages().get(inserted)?.pageSize === "letter";
+
+      const merged = editor.getDocument(await editor.mergeDocuments([id, otherId], { applyPending: true }));
+      const carried = merged.photoPages().size === 2;
+
+      return (
+        startsOnA4 &&
+        a4Width > 800 &&
+        followed &&
+        label === "Foto a dimensione reale (pagina 1)" &&
+        imagesOnShown &&
+        nativeWidth === 400 &&
+        undone &&
+        kept &&
+        insertedOk &&
+        carried
+      );
+    },
+    [photoJpgBytes, fourPagesBytes],
+  );
+
+  // --- The outline: read, and written back wherever the page operations
+  // underneath would drop it - applying deletions and a reorder, exporting
+  // some pages, inserting pages, putting a photo on another page - and
+  // turned into one branch per document in a merge.
+  results["outline is kept through page edits, exports, inserts and merges"] = await page.evaluate(
+    async ([ten, photo]) => {
+      const { PdfEditor, PdfDocument, read_outline, write_outline } = window.__pdfModel;
+      const titled = await write_outline(new Uint8Array(ten), [
+        { title: "Uno", level: 1, page: 1, open: true },
+        { title: "Due", level: 2, page: 2, open: true },
+        { title: "Dentro due", level: 3, page: 3, open: true },
+        { title: "Cinque", level: 1, page: 5, open: false },
+      ]);
+      const editor = new PdfEditor();
+      const id = await editor.addDocument(titled);
+      const doc = editor.getDocument(id);
+      const titles = (entries) => entries.map((e) => `${e.level}:${e.title}@${e.page ?? "-"}`).join(" ");
+
+      const read = titles(await doc.getOutline());
+
+      // Export pages 5 and 2: only their entries, renumbered; "Dentro due" (page 3) moves up under nothing.
+      const exported = titles(await read_outline(await doc.exportPages([5, 2])));
+
+      // Delete page 2, move page 5 first, apply.
+      doc.deletePage(2);
+      doc.movePage(5, 0);
+      const shown = titles(await doc.getOutlineAsShown());
+      await doc.commit();
+      const committed = titles(await doc.getOutline());
+      const inFile = titles(await read_outline(doc.getBytes()));
+      doc.undo();
+      const undone = titles(await doc.getOutline());
+      doc.redo();
+
+      // Inserting pages keeps it.
+      await doc.insertPages(new Uint8Array(ten));
+      const afterInsert = titles(await read_outline(doc.getBytes()));
+
+      // A merge: a branch per document, named.
+      const photoId = await editor.addImage(new Uint8Array(photo), { pageSize: "a4" });
+      const merged = editor.getDocument(await editor.mergeDocuments([photoId, id], { applyPending: true, titles: ["Foto", "Testo"] }));
+      const mergedOutline = titles(await merged.getOutline());
+
+      // The photo put on another page: its entry follows the new page.
+      const replaced = await merged.setPhotoPage(1, { pageSize: "native" });
+      const afterPhoto = titles(await read_outline(merged.getBytes()));
+      const photoExported = titles(await read_outline(await merged.exportBytes()));
+
+      const original = "1:Uno@1 2:Due@2 3:Dentro due@3 1:Cinque@5";
+      // Page 2 gone ("Due" with it, "Dentro due" moving up), page 5 now first.
+      const edited = "1:Uno@2 2:Dentro due@3 1:Cinque@1";
+      return (
+        read === original &&
+        exported === "1:Due@2 1:Cinque@1" &&
+        shown === edited &&
+        committed === edited &&
+        inFile === edited &&
+        undone === original &&
+        afterInsert === edited &&
+        mergedOutline === "1:Foto@1 1:Testo@2 2:Uno@3 3:Dentro due@4 2:Cinque@2" &&
+        afterPhoto === `1:Foto@${replaced} 1:Testo@2 2:Uno@3 3:Dentro due@4 2:Cinque@2` &&
+        photoExported === "1:Foto@1 1:Testo@2 2:Uno@3 3:Dentro due@4 2:Cinque@2"
+      );
+    },
+    [tenPagesBytes, photoJpgBytes],
+  );
+
+  // --- Each history step also comes as data (type + params), for a UI to
+  // put in its own language; the empty document error is recognisable.
+  results["history steps carry a structured action; emptying a document throws EmptyDocumentError"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfDocument } = window.__pdfModel;
+      const doc = await PdfDocument.open(new Uint8Array(bytes));
+      doc.rotatePage(2, 90);
+      doc.deletePages([1, 3]);
+      await doc.setMetadata({ title: "T", author: "A" });
+      const actions = doc.history().map((step) => step.action);
+      doc.deletePages([2, 4]);
+      let emptyError = "";
+      try {
+        await doc.commit();
+      } catch (err) {
+        emptyError = err.name;
+      }
+      const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+      return (
+        same(actions, [
+          { type: "open", params: {} },
+          { type: "rotatePage", params: { page: 2, degrees: 90 } },
+          { type: "deletePages", params: { count: 2 } },
+          { type: "metadata", params: { fields: "title,author" } },
+        ]) && emptyError === "EmptyDocumentError"
+      );
+    },
+    fourPagesBytes,
+  );
 
   // --- PdfEditor.mergeDocuments / splitDocument register new documents with the right page counts ---
   results["PdfEditor.mergeDocuments produces a new document with the summed page count"] = await page.evaluate(
@@ -600,7 +898,7 @@ async function main() {
     const doc = await PdfDocument.open(new Uint8Array(bytes));
     doc.deletePage(2);
     await doc.commit();
-    const labelled = doc.history().at(-1)?.label === "Conferma modifiche (3 pagine)";
+    const labelled = doc.history().at(-1)?.label === "Applica modifiche (3 pagine)";
     doc.goToHistoryIndex(0);
     return labelled && doc.getPageCount() === 4 && !doc.hasPendingChanges();
   }, fourPagesBytes);
@@ -682,6 +980,521 @@ async function main() {
 
     return doc.getPageCount() === 3 && (await doc.getMetadata()).title === "Relazione";
   }, fourPagesBytes);
+
+  // --- Group edits: one undo step for many pages ---
+  results["rotatePages/deletePages/restorePages are one history step each"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.rotatePages([1, 3, 3], 90); // the repeated id counts once
+    doc.deletePages([2, 4]);
+    doc.deletePages([2, 4]); // already marked: no new step
+    const labels = doc.history().map((h) => h.label);
+    const pages = doc.pages();
+    const edited =
+      pages[0].pendingRotation === 90 &&
+      pages[2].pendingRotation === 90 &&
+      pages[1].pendingRotation === 0 &&
+      pages[1].markedForDeletion &&
+      pages[3].markedForDeletion;
+    doc.restorePages([1, 2, 4]); // page 1 isn't marked: skipped
+    const restored = doc.pages().every((p) => !p.markedForDeletion);
+    doc.undo(); // back to both marked
+    const undoneRestore = doc.pages()[1].markedForDeletion && doc.pages()[3].markedForDeletion;
+    doc.undo(); // undoes both deletions at once
+    const undoneDelete = doc.pages().every((p) => !p.markedForDeletion);
+    return (
+      edited &&
+      restored &&
+      undoneRestore &&
+      undoneDelete &&
+      labels.length === 3 &&
+      labels[1] === "Ruota 2 pagine di +90\u00b0" &&
+      labels[2] === "Elimina 2 pagine"
+    );
+  }, tenPagesBytes);
+
+  results["a group edit on a single page reads like the single-page edit"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.rotatePages([2], -90);
+    doc.deletePages([3]);
+    doc.movePages([4], 0);
+    const labels = doc.history().map((h) => h.label);
+    return (
+      labels[1] === "Ruota pagina 2 di -90\u00b0" &&
+      labels[2] === "Elimina pagina 3" &&
+      labels[3] === "Sposta pagina 4 in posizione 1"
+    );
+  }, fourPagesBytes);
+
+  results["movePages moves a non-contiguous selection as one block"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    // 3 and 1 (given out of order) keep their display order 1, 3; the other
+    // pages are [2, 4, 5, 6, 7, 8, 9, 10]; index 4 is in front of 6.
+    doc.movePages([3, 1], 4);
+    const moved = doc.pages().map((p) => p.id).join(",") === "2,4,5,6,1,3,7,8,9,10";
+    doc.movePages([1, 3], 4); // already there: no step
+    const steps = doc.history().length;
+    doc.movePages([9, 10], 999); // clamped to the end: already there too
+    doc.movePages([1, 3], 0);
+    const front = doc.pages().map((p) => p.id).slice(0, 3).join(",") === "1,3,2";
+    doc.undo();
+    const undone = doc.pages().map((p) => p.id).join(",") === "2,4,5,6,1,3,7,8,9,10";
+    return moved && steps === 2 && front && undone;
+  }, tenPagesBytes);
+
+  results["exportPages builds a PDF of those pages, in that order, rotations applied"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfDocument } = window.__pdfModel;
+      const doc = await PdfDocument.open(new Uint8Array(bytes));
+      doc.rotatePage(3, 90);
+      doc.deletePage(4); // deletions don't matter to an export
+      const exported = await PdfDocument.open(await doc.exportPages([3, 1, 4]));
+      // The source is untouched.
+      const sourceIntact = doc.getPageCount() === 4 && doc.pages()[2].pendingRotation === 90;
+      // Page 1 of the export is the old page 3, rotated: rendered landscape.
+      const first = await exported.getPreview(1, 0.2);
+      const second = await exported.getPreview(2, 0.2);
+      const size = async (png) => {
+        const bitmap = await createImageBitmap(new Blob([png], { type: "image/png" }));
+        return { w: bitmap.width, h: bitmap.height };
+      };
+      const a = await size(first.png);
+      const b = await size(second.png);
+      let rejectsEmpty = false;
+      try {
+        await doc.exportPages([]);
+      } catch {
+        rejectsEmpty = true;
+      }
+      return exported.getPageCount() === 3 && sourceIntact && a.w > a.h && b.h > b.w && rejectsEmpty;
+    },
+    fourPagesBytes,
+  );
+
+  results["PdfEditor.extractPages adds a new document and carries over unrotated previews"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfEditor } = window.__pdfModel;
+      const editor = new PdfEditor();
+      const id = await editor.addDocument(new Uint8Array(bytes));
+      const source = editor.getDocument(id);
+      const preview5 = await source.getPreview(5, 0.3);
+      await source.getPreview(2, 0.3);
+      source.rotatePage(2, 180);
+      const extractedId = await editor.extractPages(id, [5, 2, 7]);
+      const extracted = editor.getDocument(extractedId);
+      const carried = extracted.cachedEntriesForPage(1).some(([, png]) => png === preview5.png);
+      const notCarried = extracted.cachedEntriesForPage(2).length === 0; // page 2 was rotated
+      return (
+        extracted.getPageCount() === 3 &&
+        editor.listDocuments().length === 2 &&
+        source.getPageCount() === 10 &&
+        carried &&
+        notCarried
+      );
+    },
+    tenPagesBytes,
+  );
+
+  // --- Moving pages between documents ---
+  results["insertPages adds pages to the baseline, keeping pending edits and previews"] = await page.evaluate(
+    async ([fourBytes, twoBytes]) => {
+      const { PdfDocument } = window.__pdfModel;
+      const doc = await PdfDocument.open(new Uint8Array(fourBytes));
+      await doc.setMetadata({ title: "Contratto" });
+      await doc.commit(); // the title is now in the baseline
+      const preview1 = await doc.getPreview(1, 0.2);
+      doc.rotatePage(2, 90);
+
+      const ids = await doc.insertPages(new Uint8Array(twoBytes), 1);
+      const order = doc.pages().map((p) => p.id).join(",");
+      const rotationKept = doc.pages().find((p) => p.id === 2).pendingRotation === 90;
+      const cacheKept = (await doc.getPreview(1, 0.2)).png === preview1.png;
+      const label = doc.history().at(-1).label;
+      const titleKept = (await doc.getMetadata()).title === "Contratto";
+
+      doc.undo();
+      const undone = doc.getPageCount() === 4 && doc.pages().map((p) => p.id).join(",") === "1,2,3,4";
+      const rotationSurvivesUndo = doc.pages()[1].pendingRotation === 90;
+      doc.redo();
+      await doc.commit();
+
+      return (
+        ids.join(",") === "5,6" &&
+        order === "1,5,6,2,3,4" &&
+        rotationKept &&
+        cacheKept &&
+        label === "Inserisci 2 pagine" &&
+        titleKept &&
+        undone &&
+        rotationSurvivesUndo &&
+        doc.getPageCount() === 6 &&
+        (await doc.getMetadata()).title === "Contratto"
+      );
+    },
+    [fourPagesBytes, twoPagesBytes],
+  );
+
+  results["transferPages copies or moves pages into another document"] = await page.evaluate(
+    async ([tenBytes, fourBytes]) => {
+      const { PdfEditor } = window.__pdfModel;
+      const editor = new PdfEditor();
+      const a = await editor.addDocument(new Uint8Array(tenBytes));
+      const b = await editor.addDocument(new Uint8Array(fourBytes));
+      const source = editor.getDocument(a);
+      const target = editor.getDocument(b);
+      const preview5 = await source.getPreview(5, 0.3);
+      await source.getPreview(3, 0.3);
+      source.rotatePage(3, 90);
+
+      const moved = await editor.transferPages(a, [5, 3], b, { move: true });
+      const targetOk =
+        target.getPageCount() === 6 &&
+        moved.join(",") === "5,6" &&
+        target.pages().map((p) => p.id).join(",") === "1,2,3,4,5,6" &&
+        target.history().at(-1).label === "Inserisci 2 pagine da un altro documento";
+      const previewCarried = target.cachedEntriesForPage(5).some(([, png]) => png === preview5.png);
+      const rotatedNotCarried = target.cachedEntriesForPage(6).length === 0;
+      const sourceMarked = source
+        .pages()
+        .filter((p) => p.markedForDeletion)
+        .map((p) => p.id)
+        .join(",") === "3,5";
+
+      // A copy at the front leaves the source alone.
+      await editor.transferPages(a, [1], b, { at: 0 });
+      const copied = target.pages()[0].id === 7 && !source.pages()[0].markedForDeletion;
+
+      let rejectsSame = false;
+      try {
+        await editor.transferPages(a, [1], a);
+      } catch {
+        rejectsSame = true;
+      }
+      return targetOk && previewCarried && rotatedNotCarried && sourceMarked && copied && rejectsSame;
+    },
+    [tenPagesBytes, fourPagesBytes],
+  );
+
+  results["mergeDocuments with applyPending merges what each document looks like now"] = await page.evaluate(
+    async ([fourBytes, twoBytes]) => {
+      const { PdfEditor } = window.__pdfModel;
+      const editor = new PdfEditor();
+      const a = await editor.addDocument(new Uint8Array(fourBytes));
+      const b = await editor.addDocument(new Uint8Array(twoBytes));
+      const docA = editor.getDocument(a);
+      const preview3 = await docA.getPreview(3, 0.3);
+      docA.deletePage(2);
+      docA.movePage(4, 0); // shown: 4, 1, 3
+      const mergedId = await editor.mergeDocuments([a, b], { applyPending: true });
+      const merged = editor.getDocument(mergedId);
+      // Page 3 of A is the third page shown, so the third of the result.
+      const carried = merged.cachedEntriesForPage(3).some(([, png]) => png === preview3.png);
+      return merged.getPageCount() === 5 && carried && docA.getPageCount() === 4;
+    },
+    [fourPagesBytes, twoPagesBytes],
+  );
+
+  // --- Annotations (signatures): pending, undoable, applied on export ---
+  // Helpers shared by the annotation tests, defined once in the page.
+  await page.evaluate(() => {
+    window.__redSquare = (size = 8) => {
+      const pixels = new Uint8Array(size * size * 4);
+      for (let i = 0; i < pixels.length; i += 4) pixels.set([220, 0, 0, 255], i);
+      return { pixels, width: size, height: size };
+    };
+    // RGBA of the pixel at (fx, fy) - fractions of the page - in a rendered PNG.
+    window.__pixelAt = async (png, fx, fy) => {
+      const bitmap = await createImageBitmap(new Blob([png], { type: "image/png" }));
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const context = canvas.getContext("2d");
+      context.drawImage(bitmap, 0, 0);
+      const x = Math.floor(fx * bitmap.width);
+      const y = Math.floor(fy * bitmap.height);
+      return Array.from(context.getImageData(x, y, 1, 1).data);
+    };
+    window.__isRed = ([r, g, b]) => r > 180 && g < 60 && b < 60;
+    // Share of red pixels in a rectangle given in fractions of the page.
+    window.__redShare = async (png, x0, y0, x1, y1) => {
+      const bitmap = await createImageBitmap(new Blob([png], { type: "image/png" }));
+      const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const context = canvas.getContext("2d");
+      context.drawImage(bitmap, 0, 0);
+      const left = Math.floor(x0 * bitmap.width);
+      const top = Math.floor(y0 * bitmap.height);
+      const width = Math.max(1, Math.floor((x1 - x0) * bitmap.width));
+      const height = Math.max(1, Math.floor((y1 - y0) * bitmap.height));
+      const { data } = context.getImageData(left, top, width, height);
+      let red = 0;
+      for (let i = 0; i < data.length; i += 4) if (window.__isRed([data[i], data[i + 1], data[i + 2]])) red += 1;
+      return red / (width * height);
+    };
+  });
+
+  results["annotations are pending, undoable edits with readable history labels"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfDocument } = window.__pdfModel;
+      const doc = await PdfDocument.open(new Uint8Array(bytes));
+      const asset = doc.addAsset(window.__redSquare());
+      const id = doc.addAnnotation({ page: 2, asset, x: 0.1, y: 0.1, width: 0.3 });
+      const pending = doc.hasPendingChanges() && doc.pagesWithAnnotations().has(2);
+      doc.updateAnnotation(id, { x: 0.2 });
+      doc.updateAnnotation(id, { width: 0.4 });
+      doc.updateAnnotation(id, { width: 0.4 }); // unchanged: no step
+      const labels = doc.history().map((h) => h.label).slice(1);
+      doc.undo();
+      const undone = doc.annotations()[0].width === 0.3;
+      doc.removeAnnotation(id);
+      const removed = doc.annotations().length === 0 && !doc.hasPendingChanges();
+      doc.undo();
+      const back = doc.annotations().length === 1;
+
+      let rejects = 0;
+      for (const bad of [
+        () => doc.addAnnotation({ page: 9, asset, x: 0, y: 0, width: 0.2 }),
+        () => doc.addAnnotation({ page: 1, asset: 42, x: 0, y: 0, width: 0.2 }),
+        () => doc.addAnnotation({ page: 1, asset, x: 0, y: 0, width: 0 }),
+        () => doc.addAsset({ pixels: new Uint8Array(3), width: 1, height: 1 }),
+      ]) {
+        try {
+          bad();
+        } catch {
+          rejects += 1;
+        }
+      }
+      return (
+        pending &&
+        labels.join(" | ") ===
+          "Aggiungi firma a pagina 2 | Sposta firma a pagina 2 | Ridimensiona firma a pagina 2" &&
+        undone &&
+        removed &&
+        back &&
+        rejects === 4
+      );
+    },
+    fourPagesBytes,
+  );
+
+  results["commit draws the annotation where it was placed and clears it"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    const asset = doc.addAsset(window.__redSquare());
+    doc.addAnnotation({ page: 1, asset, x: 0.5, y: 0.5, width: 0.4 });
+    const before = await doc.getPreview(1, 0.3); // previews show the baseline: not red yet
+    const notYet = !window.__isRed(await window.__pixelAt(before.png, 0.7, 0.55));
+    await doc.commit();
+    const after = await doc.getPreview(1, 0.3);
+    const inside = window.__isRed(await window.__pixelAt(after.png, 0.7, 0.55));
+    const outside = !window.__isRed(await window.__pixelAt(after.png, 0.3, 0.3));
+    return notYet && inside && outside && doc.annotations().length === 0 && !doc.hasPendingChanges();
+  }, fourPagesBytes);
+
+  results["annotations follow their page through reorder, deletion and extraction"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfEditor } = window.__pdfModel;
+      const editor = new PdfEditor();
+      const id = await editor.addDocument(new Uint8Array(bytes));
+      const doc = editor.getDocument(id);
+      const asset = doc.addAsset(window.__redSquare());
+      // Top-left area of page 3, then page 3 moved first; page 4 deleted with its own annotation.
+      doc.addAnnotation({ page: 3, asset, x: 0.05, y: 0.05, width: 0.3 });
+      doc.addAnnotation({ page: 4, asset, x: 0.5, y: 0.5, width: 0.3 });
+      const cached3 = await doc.getPreview(3, 0.3);
+      doc.movePage(3, 0);
+      doc.deletePage(4);
+
+      const extractedId = await editor.extractPages(id, [3]);
+      const extracted = editor.getDocument(extractedId);
+      const notCarried = extracted.cachedEntriesForPage(1).length === 0; // annotated: a new picture
+      const extractedPng = (await extracted.getPreview(1, 0.3)).png;
+      const extractedRed = window.__isRed(await window.__pixelAt(extractedPng, 0.15, 0.08));
+
+      await doc.commit();
+      const first = (await doc.getPreview(1, 0.3)).png;
+      const red = window.__isRed(await window.__pixelAt(first, 0.15, 0.08));
+      return (
+        notCarried &&
+        extractedRed &&
+        red &&
+        doc.getPageCount() === 3 &&
+        cached3.png !== first // the committed page is a new render
+      );
+    },
+    fourPagesBytes,
+  );
+
+  results["a rotated annotation is drawn turned about its centre"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    // A wide red bar (5:1) across the middle of page 1.
+    const pixels = new Uint8Array(40 * 8 * 4);
+    for (let i = 0; i < pixels.length; i += 4) pixels.set([220, 0, 0, 255], i);
+    const asset = doc.addAsset({ pixels, width: 40, height: 8 });
+    const id = doc.addAnnotation({ page: 1, asset, x: 0.3, y: 0.5, width: 0.4 });
+    const defaultsUpright = doc.annotations()[0].rotation === 0;
+    doc.updateAnnotation(id, { rotation: 450 }); // normalised to 90
+    const label = doc.history().at(-1).label;
+    const normalised = doc.annotations()[0].rotation === 90;
+    doc.updateAnnotation(id, { rotation: 90 }); // same angle: no step
+    const steps = doc.history().length;
+
+    await doc.commit();
+    const png = (await doc.getPreview(1, 0.3)).png;
+    // Standing upright now: red above the centre, not at the bar's old left end.
+    const above = window.__isRed(await window.__pixelAt(png, 0.5, 0.45));
+    const oldEnd = window.__isRed(await window.__pixelAt(png, 0.33, 0.52));
+    return defaultsUpright && label === "Ruota firma a pagina 1" && normalised && steps === 3 && above && !oldEnd;
+  }, fourPagesBytes);
+
+  results["a signature on all pages moves together; an unlinked copy is edited on its own"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfDocument } = window.__pdfModel;
+      const doc = await PdfDocument.open(new Uint8Array(bytes));
+      const asset = doc.addAsset(window.__redSquare());
+      const id = doc.addAnnotation({ page: 2, asset, x: 0.6, y: 0.8, width: 0.2 });
+      const copies = doc.applyAnnotationToAllPages(id);
+      const onAll = doc.annotations().map((a) => a.page).sort().join(",") === "1,2,3,4";
+      const allLinked = doc.annotations().every((a) => a.linked && a.group === doc.annotations()[0].group);
+      const again = doc.applyAnnotationToAllPages(copies[0]).length === 0; // already everywhere
+
+      // Editing any linked copy edits them all, in one step.
+      doc.updateAnnotation(copies[1], { x: 0.1, rotation: 30 });
+      const together = doc.annotations().every((a) => a.x === 0.1 && a.rotation === 30);
+      const moveLabel = doc.history().at(-1).label;
+
+      // Page 3's copy unlinked and moved: only it moves; the others follow
+      // their own edits without dragging it along.
+      const page3 = () => doc.annotations().find((a) => a.page === 3);
+      doc.detachAnnotation(page3().id);
+      doc.updateAnnotation(page3().id, { y: 0.1 });
+      doc.updateAnnotation(id, { width: 0.3 });
+      const others = doc.annotations().filter((a) => a.page !== 3);
+      const independent =
+        page3().y === 0.1 && page3().width === 0.2 && others.every((a) => a.y === 0.8 && a.width === 0.3);
+      const onlyLabel = doc.history().at(-2).label;
+
+      // Linking it back puts it where the others are.
+      doc.applyAnnotationToAllPages(page3().id);
+      const relinked = page3().linked && page3().y === 0.8 && page3().width === 0.3;
+
+      // Pages inserted later get a copy when applying again.
+      await doc.insertPages(new Uint8Array(bytes));
+      const added = doc.applyAnnotationToAllPages(id).length === 4;
+
+      // Removing a linked copy removes the linked ones, not an unlinked one.
+      doc.detachAnnotation(page3().id);
+      doc.removeAnnotation(id);
+      const kept = doc.annotations();
+      const removed = kept.length === 1 && kept[0].page === 3;
+
+      // A commit draws every copy.
+      doc.undo();
+      await doc.commit();
+      const png = (await doc.getPreview(8, 0.3)).png;
+      const drawn = window.__isRed(await window.__pixelAt(png, 0.2, 0.87));
+
+      return (
+        copies.length === 3 &&
+        onAll &&
+        allLinked &&
+        again &&
+        together &&
+        moveLabel === "Ruota firma su 4 pagine" &&
+        independent &&
+        onlyLabel === "Sposta firma a pagina 3" &&
+        relinked &&
+        added &&
+        removed &&
+        drawn
+      );
+    },
+    fourPagesBytes,
+  );
+
+  results["an asset's noun names its annotations in the history"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    const logo = doc.addAsset(window.__redSquare(), "immagine");
+    const id = doc.addAnnotation({ page: 1, asset: logo, x: 0.1, y: 0.1, width: 0.2 });
+    doc.updateAnnotation(id, { rotation: 15 });
+    doc.applyAnnotationToAllPages(id);
+    doc.removeAnnotation(id);
+    const signature = doc.addAsset(window.__redSquare()); // default noun
+    doc.addAnnotation({ page: 2, asset: signature, x: 0.1, y: 0.1, width: 0.2 });
+    return (
+      doc.history().slice(1).map((h) => h.label).join(" | ") ===
+      "Aggiungi immagine a pagina 1 | Ruota immagine a pagina 1 | Immagine su tutte le pagine (4) | " +
+        "Rimuovi immagine da 4 pagine | Aggiungi firma a pagina 2"
+    );
+  }, fourPagesBytes);
+
+  results["an annotation with an explicit height is drawn stretched"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    const asset = doc.addAsset(window.__redSquare());
+    // A square image at 40% of the width: naturally ~28% of an A4's height.
+    const id = doc.addAnnotation({ page: 1, asset, x: 0.3, y: 0.3, width: 0.4 });
+    const natural = doc.annotations()[0].height === null;
+    doc.updateAnnotation(id, { height: 0.05 }); // squashed into a thin bar
+    const label = doc.history().at(-1).label;
+    let rejects = false;
+    try {
+      doc.updateAnnotation(id, { height: -1 });
+    } catch {
+      rejects = true;
+    }
+    await doc.commit();
+    const png = (await doc.getPreview(1, 0.3)).png;
+    const inBar = window.__isRed(await window.__pixelAt(png, 0.5, 0.32));
+    const belowBar = window.__isRed(await window.__pixelAt(png, 0.5, 0.45)); // red if it were square
+    return natural && label === "Ridimensiona firma a pagina 1" && rejects && inBar && !belowBar;
+  }, fourPagesBytes);
+
+  results["text annotations are real text in a standard font, drawn in their box"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfDocument } = window.__pdfModel;
+      const doc = await PdfDocument.open(new Uint8Array(bytes));
+      const style = { font: "helvetica", bold: true, italic: false, color: "#dc0000", align: "left" };
+      const id = doc.addTextAnnotation({ page: 1, x: 0.1, y: 0.6, width: 0.5, text: { text: "MMMMMM", ...style } });
+      doc.applyAnnotationToAllPages(id);
+      doc.updateAnnotation(id, { text: { text: "MMMMMMMM", ...style } }); // every linked copy follows
+      const labels = doc.history().slice(1).map((h) => h.label);
+      const allEdited = doc.annotations().every((a) => a.text.text === "MMMMMMMM");
+      let rejectsBlank = false;
+      try {
+        doc.addTextAnnotation({ page: 1, x: 0, y: 0, width: 0.2, text: { text: "  ", ...style } });
+      } catch {
+        rejectsBlank = true;
+      }
+
+      const exported = await doc.exportBytes();
+      const raw = new TextDecoder("latin1").decode(exported);
+      const standardFont = /\/BaseFont\s*\/Helvetica-Bold/.test(raw) && !/FontFile/.test(raw);
+
+      await doc.commit();
+      const png = (await doc.getPreview(3, 0.3)).png;
+      // Inside the box (x 0.1..0.6, starting at y 0.6): plenty of red ink.
+      // Right of it and above it: none.
+      const inside = (await window.__redShare(png, 0.1, 0.6, 0.6, 0.66)) > 0.15;
+      const right = (await window.__redShare(png, 0.62, 0.58, 0.9, 0.7)) > 0;
+      const above = (await window.__redShare(png, 0.05, 0.5, 0.65, 0.595)) > 0;
+      const checks = {
+        labels:
+          labels.join(" | ") === "Aggiungi testo a pagina 1 | Testo su tutte le pagine (4) | Modifica testo su 4 pagine",
+        allEdited,
+        rejectsBlank,
+        standardFont,
+        inside,
+        notRight: !right,
+        notAbove: !above,
+      };
+      const failed = Object.entries(checks).filter(([, ok]) => !ok).map(([name]) => name);
+      if (failed.length) console.error("text annotation checks failed:", failed.join(", "), labels.join(" | "));
+      return failed.length === 0;
+    },
+    fourPagesBytes,
+  );
 
   results["no console/page errors"] = consoleErrors.length === 0;
 

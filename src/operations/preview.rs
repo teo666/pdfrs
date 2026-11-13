@@ -3,7 +3,7 @@ use std::sync::Arc;
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::Pdf;
 use hayro::vello_cpu::color::palette::css::WHITE;
-use hayro::{RenderCache, RenderSettings, render};
+use hayro::{PixmapSettings, RenderCache, RenderSettings, render};
 
 use crate::error::{PdfrsError, Result};
 
@@ -29,11 +29,11 @@ pub fn render_page_preview(bytes: &[u8], page: u32, scale: f32) -> Result<Vec<u8
         page_obj,
         &cache,
         &InterpreterSettings::default(),
-        &RenderSettings {
+        &RenderSettings::default(),
+        &PixmapSettings {
             x_scale: scale,
             y_scale: scale,
             bg_color: WHITE,
-            ..Default::default()
         },
     );
 

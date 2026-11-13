@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Assembles a single npm-publishable package (pkg-npm/) with two subpath
-# exports, "pdfrs/core" and "pdfrs/full", from the two wasm-pack builds.
+# Assembles a single npm-publishable package (pkg-npm/, published as
+# "pdfrs.js") with two subpath exports, "pdfrs.js/core" and "pdfrs.js/full",
+# from the two wasm-pack builds. The .wasm binaries are exported too, so a
+# consumer can resolve them from the same package as the JS glue (see
+# packages/pdfrs-editor/src/worker/create-pdfrs-worker.ts).
 # See docs/development.md ("Build 'core' e 'full'") for why the split exists.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -19,21 +22,52 @@ for variant in core full; do
   cp "$src"/pdfrs.js "$src"/pdfrs.d.ts "$src"/pdfrs_bg.wasm "$src"/pdfrs_bg.wasm.d.ts "pkg-npm/$variant/"
 done
 
+# README and licences: npm shows the README on the package page. The
+# licences go in "files" below, as npm only picks up a bare LICENSE on its own.
+cp scripts/npm-package/README.md LICENSE-MIT LICENSE-APACHE pkg-npm/
+
 cat > pkg-npm/package.json <<EOF
 {
-  "name": "pdfrs",
+  "name": "pdfrs.js",
   "type": "module",
   "version": "$PKG_VERSION",
+  "description": "PDF manipulation in the browser (Rust/WebAssembly): merge, split, rotate, compose, N-up, booklet, AES-256 encryption, metadata, bookmarks, images and page previews.",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/teo666/pdfrs.git"
+  },
+  "homepage": "https://github.com/teo666/pdfrs#readme",
+  "bugs": "https://github.com/teo666/pdfrs/issues",
+  "keywords": [
+    "pdf",
+    "wasm",
+    "webassembly",
+    "merge",
+    "split",
+    "encrypt",
+    "browser"
+  ],
   "collaborators": [
     "Teo Basili <basili.teo@gmail.com>"
   ],
   "files": [
     "core",
-    "full"
+    "full",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
   ],
   "exports": {
-    "./core": "./core/pdfrs.js",
-    "./full": "./full/pdfrs.js"
+    "./core": {
+      "types": "./core/pdfrs.d.ts",
+      "default": "./core/pdfrs.js"
+    },
+    "./full": {
+      "types": "./full/pdfrs.d.ts",
+      "default": "./full/pdfrs.js"
+    },
+    "./core/pdfrs_bg.wasm": "./core/pdfrs_bg.wasm",
+    "./full/pdfrs_bg.wasm": "./full/pdfrs_bg.wasm"
   },
   "sideEffects": [
     "./core/snippets/*",

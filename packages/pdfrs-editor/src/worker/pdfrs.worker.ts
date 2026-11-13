@@ -7,18 +7,23 @@ import init, {
   compose_pdf,
   decrypt_pdf,
   encrypt_pdf,
+  is_password_protected,
+  list_images,
   merge_pdfs,
   nup_pdf,
   page_count,
   read_metadata,
+  read_outline,
+  remove_images,
   rotate_pages,
   split_pdf,
   write_metadata,
-} from "pdfrs";
+  write_outline,
+} from "pdfrs.js/core";
 import { collectTransferables, type WorkerInitMessage, type WorkerRequest, type WorkerResponse } from "./worker-protocol";
 
 // Only the "core" build's functions - merge/split/rotate/compose/encrypt/
-// decrypt/page_count/nup/booklet - are imported statically from "pdfrs". The "full"
+// decrypt/page_count/nup/booklet - are imported statically from "pdfrs.js/core". The "full"
 // build (`render_page_preview`, `image_to_pdf` - the two functions that pull
 // in `hayro`/`image`, ~4MB extra) is loaded lazily below, only the first
 // time one of those two is actually requested - see docs/development.md for
@@ -29,36 +34,51 @@ const coreMethods = {
   compose_pdf,
   decrypt_pdf,
   encrypt_pdf,
+  is_password_protected,
+  list_images,
   merge_pdfs,
   nup_pdf,
   page_count,
   read_metadata,
+  read_outline,
+  remove_images,
   rotate_pages,
   split_pdf,
   write_metadata,
+  write_outline,
 } as const satisfies Record<string, (...args: never[]) => Promise<unknown>>;
 
-const FULL_METHODS = new Set(["render_page_preview", "image_to_pdf"]);
+const FULL_METHODS = new Set(["render_page_preview", "image_to_pdf", "extract_image"]);
 
-// Cached per worker instance (not shared/compiled-once across workers like
-// the core module - see create-pdfrs-worker.ts): each worker that ends up
-// needing the full build fetches and inits its own copy, the first time
-// it's asked for. Simpler than extending the shared-module machinery to a
-// second binary, and the pool in preview-worker-pool.ts only ever asks for
-// render_page_preview, so this is exactly one lazy load per pool worker.
+// Cached per worker instance: each worker that ends up needing the full
+// build instantiates its own copy, the first time it's asked for. Workers
+// created with `withFull` (the preview pool, see create-pdfrs-worker.ts)
+// receive the binary already compiled in their init message, so they skip
+// the fetch + compile; any other worker fetches it itself.
 let fullModule: Promise<Record<string, (...args: unknown[]) => Promise<unknown>>> | null = null;
+let precompiledFull: WebAssembly.Module | undefined;
 
 function loadFull(): Promise<Record<string, (...args: unknown[]) => Promise<unknown>>> {
   if (!fullModule) {
-    fullModule = import("pdfrs-full").then(async (mod) => {
-      await mod.default();
+    fullModule = import("pdfrs.js/full").then(async (mod) => {
+      await mod.default(precompiledFull ? { module_or_path: precompiledFull } : undefined);
       return mod as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
     });
   }
   return fullModule;
 }
 
+// Documents held for the preview pool (see preview-worker-pool.ts), by the
+// key the pool gave them: sent once, then named in every page request.
+const heldDocuments = new Map<number, Uint8Array>();
+
 async function callMethod(method: string, args: unknown[]): Promise<unknown> {
+  if (method === "render_held_page") {
+    const [key, page, scale] = args as [number, number, number];
+    const bytes = heldDocuments.get(key);
+    if (!bytes) throw new Error(`pdfrs worker: document ${key} not held`);
+    return callMethod("render_page_preview", [bytes, page, scale]);
+  }
   const table = FULL_METHODS.has(method)
     ? (await loadFull())
     : (coreMethods as Record<string, (...a: unknown[]) => Promise<unknown>>);
@@ -85,12 +105,21 @@ self.onmessage = async (event: MessageEvent<WorkerInitMessage | WorkerRequest>) 
   const data = event.data;
 
   if ("type" in data) {
-    if (data.type === "wasm-module") readyResolve(init(data.module));
-    else readyResolve(init());
+    if (data.type === "release") {
+      for (const key of data.keys) heldDocuments.delete(key);
+    } else if (data.type === "wasm-module") {
+      precompiledFull = data.fullModule;
+      readyResolve(init({ module_or_path: data.module }));
+    } else {
+      readyResolve(init());
+    }
     return;
   }
 
   const { id, method, args } = data;
+  // Before anything else: the request may be about the document it carries.
+  for (const key of data.release ?? []) heldDocuments.delete(key);
+  if (data.hold) heldDocuments.set(data.hold.key, data.hold.bytes);
 
   try {
     await ready;

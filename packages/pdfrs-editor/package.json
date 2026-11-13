@@ -1,0 +1,25 @@
+{
+  "name": "pdfrs-editor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Modello documento (PdfDocument/PdfEditor) e client Web Worker sopra il motore wasm pdfrs, indipendente dal framework UI.",
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "exports": {
+    ".": "./src/index.ts",
+    "./operations": "./src/worker/pdfrs-worker-client.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "pdfrs.js": "link:../../pkg-npm"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}

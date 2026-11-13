@@ -1,5 +1,5 @@
 // Every call below goes through a Web Worker (see pdfrs-worker-client.ts /
-// pdfrs.worker.ts), not the "pdfrs" wasm package directly - the actual CPU
+// pdfrs.worker.ts in packages/pdfrs-editor), not the wasm package directly - the actual CPU
 // work happens off this thread, so the UI never freezes while it runs. The
 // heartbeat counter further down is the visible proof of that.
 import {
@@ -22,17 +22,17 @@ import {
   type FlowDirection,
   type BindingEdge,
   type DuplexMode,
-} from "./pdfrs-worker-client";
+} from "pdfrs-editor/operations";
 import { bytesToObjectUrl, downloadBytes, fileToUint8Array, setupFileInput } from "./pdf-io";
 import { parseLayout, parseRanges, parseRotations } from "./parsers";
-import { renderPagesInParallel } from "./preview-worker-pool";
+import { renderPagesInParallel } from "pdfrs-editor";
 import { hasTransparency, imageToRgba, type DecodedImage } from "./image-io";
 // Side-effect import: registers <pdf-editor-app> (and the components it uses
 // internally) for the "Editor" tab. See src/webcomponents/index.ts.
 import "./webcomponents";
 
 // Above this many pages, Preview spreads rendering across a pool of workers
-// (see preview-worker-pool.ts) instead of one page at a time on the single
+// (see preview-worker-pool.ts in packages/pdfrs-editor) instead of one page at a time on the single
 // shared worker - each pool worker carries its own copy of the wasm module,
 // so it's only worth it once there's enough pages to amortize that cost.
 const PARALLEL_PREVIEW_THRESHOLD = 6;

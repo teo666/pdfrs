@@ -1,16 +1,23 @@
 pub mod booklet;
 pub mod compose;
+pub mod content_scan;
 pub mod crypto;
 #[cfg(feature = "image-import")]
 pub mod image;
+#[cfg(all(feature = "preview", feature = "image-import"))]
+pub mod image_extract;
+pub mod images;
 pub mod merge;
 pub mod metadata;
 pub mod nup;
+pub mod outline;
 #[cfg(feature = "preview")]
 pub mod preview;
 pub mod rotate;
 pub mod split;
 pub mod stamp;
+pub mod text;
+mod text_metrics;
 
 #[cfg(test)]
 pub mod test_support {

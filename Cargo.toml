@@ -1,6 +1,6 @@
 [package]
 name = "pdfrs"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Teo Basili <teo.basili@movesolutions.it>"]
 edition = "2018"
 description = "Motore di manipolazione PDF in Rust/WebAssembly: merge, split, rotazione, composizione, cifratura AES-256 e preview delle pagine."
@@ -34,7 +34,7 @@ thiserror = "2.0"
 # and `chrono-clock` (reads the system timezone, not meaningful in a wasm
 # sandbox). `wasm_js` selects getrandom's wasm_js backend, required since
 # lopdf 0.36 to build for wasm32-unknown-unknown (used for RNG in encryption).
-lopdf = { version = "0.44", default-features = false, features = ["wasm_js"] }
+lopdf = { version = "0.47", default-features = false, features = ["wasm_js"] }
 # Must track the `rand` major version lopdf itself depends on, since we use
 # it directly to generate the AES-256 file encryption key (see operations::crypto).
 rand = "0.10"
@@ -50,7 +50,7 @@ console_error_panic_hook = { version = "0.1.7", optional = true }
 # pdfium.wasm binary). `embed-cmaps` (CJK CMaps, ~250KB) is dropped since we
 # don't need CJK support for previews; `simd` is a no-op on wasm32 targets so
 # it's dropped too, both to keep the wasm bundle smaller.
-hayro = { version = "0.7", default-features = false, features = ["embed-fonts"], optional = true }
+hayro = { version = "0.9", default-features = false, features = ["embed-fonts"], optional = true }
 
 # Used only to read a JPEG's dimensions/color type (header parse, no full
 # pixel decode) and to encode JPEGs for the fixture generator - the JPEG
@@ -58,7 +58,7 @@ hayro = { version = "0.7", default-features = false, features = ["embed-fonts"],
 # no re-encoding of real input images. `default-features = false` + `jpeg`
 # only pulls in the JPEG codec (zune-jpeg/jpeg-encoder, both pure Rust), not
 # the dozen other image formats `image` supports by default.
-image = { version = "0.25", default-features = false, features = ["jpeg"], optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"], optional = true }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"

@@ -5,7 +5,7 @@
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::Pdf;
 use hayro::vello_cpu::color::palette::css::WHITE;
-use hayro::{RenderCache, RenderSettings, render};
+use hayro::{PixmapSettings, RenderCache, RenderSettings, render};
 use std::sync::Arc;
 
 fn main() {
@@ -20,16 +20,16 @@ fn main() {
     let pdf = Pdf::new(Arc::new(bytes)).expect("parsing the PDF should succeed");
 
     let interpreter_settings = InterpreterSettings::default();
-    let render_settings = RenderSettings {
+    let render_settings = RenderSettings::default();
+    let pixmap_settings = PixmapSettings {
         x_scale: 2.0,
         y_scale: 2.0,
         bg_color: WHITE,
-        ..Default::default()
     };
     let cache = RenderCache::new();
 
     for (index, page) in pdf.pages().iter().enumerate() {
-        let pixmap = render(page, &cache, &interpreter_settings, &render_settings);
+        let pixmap = render(page, &cache, &interpreter_settings, &render_settings, &pixmap_settings);
         let out_path = format!("{manifest_dir}/preview-page-{index}.png");
         std::fs::write(&out_path, pixmap.into_png().unwrap()).unwrap();
         println!("wrote {out_path}");

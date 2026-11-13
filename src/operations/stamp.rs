@@ -1,7 +1,11 @@
-use lopdf::content::Operation;
+use lopdf::content::{Content, Operation};
 use lopdf::{Document, Object, ObjectId, Stream, dictionary};
 use serde::Deserialize;
 
+use std::collections::HashMap;
+
+use super::content_scan;
+use super::text::{self, FontFace, StandardFont, TextAlign};
 use crate::error::{PdfrsError, Result};
 
 /// How far up the `/Pages` chain to look for an inherited attribute before
@@ -19,13 +23,28 @@ pub struct ImageAsset<'a> {
     pub height: u32,
 }
 
-/// What an annotation draws. An enum from the start so that adding text later
-/// is a new variant rather than a rewrite of everything around it.
-#[derive(Debug, Clone, Copy, Deserialize)]
+/// What an annotation draws.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum AnnotationKind {
     /// Index into the `assets` slice passed alongside the annotations.
     Image { asset: usize },
+    /// Real text in a PDF standard font (see `operations::text`), laid out
+    /// at its natural size and then scaled into the box like an image is.
+    Text {
+        text: String,
+        #[serde(default)]
+        font: StandardFont,
+        #[serde(default)]
+        bold: bool,
+        #[serde(default)]
+        italic: bool,
+        /// `#rrggbb`; black when absent.
+        #[serde(default)]
+        color: String,
+        #[serde(default)]
+        align: TextAlign,
+    },
 }
 
 /// One thing drawn on one page.
@@ -36,9 +55,10 @@ pub enum AnnotationKind {
 /// (bottom-left, `/Rotate` not applied). Converting between the two is this
 /// module's job; see `stamp_matrix`.
 ///
-/// There is no height: it follows from `width` and the image's aspect ratio,
-/// so a signature can't be stretched out of shape.
-#[derive(Debug, Clone, Copy, Deserialize)]
+/// The height normally follows from `width` and the image's (or the laid out
+/// text's) aspect ratio, so a signature keeps its proportions. `height`, when given, sets it instead -
+/// for an image deliberately stretched to fill a box.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Annotation {
     /// 1-indexed, like every other page number in this crate.
@@ -52,6 +72,10 @@ pub struct Annotation {
     /// written before this field existed still work.
     #[serde(default)]
     pub rotation: f64,
+    /// Fraction (0..1) of the displayed page's height. Absent: from `width`
+    /// and the image's own proportions.
+    #[serde(default)]
+    pub height: Option<f64>,
     #[serde(flatten)]
     pub kind: AnnotationKind,
 }
@@ -64,9 +88,11 @@ pub struct Annotation {
 ///   on fifty pages is one image stream referenced fifty times, not fifty
 ///   copies - the difference between a 1MB file and a 50MB one. Assets no
 ///   annotation refers to are never added at all.
-/// - **One content rewrite per page.** `change_page_content` decodes and
-///   re-encodes a page's whole content stream, so a page with ten
-///   annotations is done in a single pass rather than ten.
+/// - **One content rewrite per page**, and never a re-encode of what was
+///   there: the original bytes are wrapped in q/Q as they are, the new
+///   operations appended, and the result becomes a stream of the page's own
+///   (a page with ten annotations is done in one pass, and a content stream
+///   shared with other pages is left alone).
 ///
 /// Everything is validated before the document is touched, so a list with a
 /// bad entry at the end can't leave a half-annotated PDF behind.
@@ -90,6 +116,8 @@ pub fn annotate(doc: &mut Document, assets: &[ImageAsset], annotations: &[Annota
 
     // Built lazily, so an asset nobody placed doesn't end up in the file.
     let mut image_ids: Vec<Option<ObjectId>> = vec![None; assets.len()];
+    // One font object per face, shared by every page that uses it.
+    let mut font_ids: HashMap<FontFace, ObjectId> = HashMap::new();
 
     for (page, page_id, grouped) in targets {
         let (media_x, media_y, page_width, page_height) = page_box(doc, page_id, page)?;
@@ -99,7 +127,11 @@ pub fn annotate(doc: &mut Document, assets: &[ImageAsset], annotations: &[Annota
         // what goes wrong otherwise.
         materialize_inherited_resources(doc, page_id)?;
 
-        let mut content = doc.get_and_decode_page_content(page_id)?;
+        // The page's own content is kept as bytes, never decoded and
+        // re-encoded: that round trip loses inline images (see
+        // content_scan.rs). Only what we add goes through `Content::encode`.
+        let original = doc.get_page_content(page_id);
+        let mut added: Vec<Operation> = Vec::new();
 
         // Wrap whatever was already on the page in its own q/Q before adding
         // anything. A page's content stream is not required to leave the
@@ -110,54 +142,90 @@ pub fn annotate(doc: &mut Document, assets: &[ImageAsset], annotations: &[Annota
         // mirrored, rotated or somewhere else entirely. Our own q/Q around
         // each annotation isn't enough: it restores the state to whatever was
         // current when we started, not to the identity.
-        content.operations.insert(0, Operation::new("q", vec![]));
-        content.operations.push(Operation::new("Q", vec![]));
+        // (The q/Q pair goes around the original bytes, below.)
 
         for annotation in grouped {
-            let AnnotationKind::Image { asset } = annotation.kind;
-            let image = assets[asset];
+            let operations = match &annotation.kind {
+                AnnotationKind::Image { asset } => {
+                    let image = assets[*asset];
+                    let image_id = match image_ids[*asset] {
+                        Some(id) => id,
+                        None => {
+                            let id = add_image_object(doc, image.pixels, image.width, image.height)?;
+                            image_ids[*asset] = Some(id);
+                            id
+                        }
+                    };
 
-            let image_id = match image_ids[asset] {
-                Some(id) => id,
-                None => {
-                    let id = add_image_object(doc, image.pixels, image.width, image.height)?;
-                    image_ids[asset] = Some(id);
-                    id
+                    // The resource name only has to be unique within the page,
+                    // and the object number already is unique within the
+                    // document - so the same asset keeps the same name
+                    // everywhere, which makes the output easier to read.
+                    let name = format!("An{}", image_id.0);
+                    doc.add_xobject(page_id, name.as_bytes(), image_id)?;
+
+                    let matrix = stamp_matrix(
+                        annotation,
+                        image.height as f64 / image.width as f64,
+                        page_width,
+                        page_height,
+                        rotation,
+                        media_x,
+                        media_y,
+                    );
+                    // Same shape as lopdf's own `Document::insert_image`, but
+                    // writing the full matrix ourselves: that helper only takes
+                    // a position and a size, which can't express the rotation a
+                    // page with /Rotate needs.
+                    vec![cm(matrix), Operation::new("Do", vec![Object::Name(name.into_bytes())])]
+                }
+                AnnotationKind::Text { text: content, font, bold, italic, color, align } => {
+                    let face = FontFace { family: *font, bold: *bold, italic: *italic };
+                    let font_id = match font_ids.get(&face) {
+                        Some(id) => *id,
+                        None => {
+                            let id = doc.add_object(dictionary! {
+                                "Type" => "Font",
+                                "Subtype" => "Type1",
+                                "BaseFont" => face.base_font(),
+                                "Encoding" => "WinAnsiEncoding",
+                            });
+                            font_ids.insert(face, id);
+                            id
+                        }
+                    };
+                    let name = format!("Tx{}", font_id.0);
+                    add_font_resource(doc, page_id, name.as_bytes(), font_id)?;
+
+                    let layout = text::layout(content, face);
+                    let matrix = stamp_matrix(
+                        annotation,
+                        layout.height / layout.width,
+                        page_width,
+                        page_height,
+                        rotation,
+                        media_x,
+                        media_y,
+                    );
+                    text_operations(&layout, &name, *align, text::parse_color(color), matrix)
                 }
             };
 
-            // The resource name only has to be unique within the page, and the
-            // object number already is unique within the document - so the
-            // same asset keeps the same name everywhere, which makes the
-            // output easier to read.
-            let name = format!("An{}", image_id.0);
-            doc.add_xobject(page_id, name.as_bytes(), image_id)?;
-
-            let matrix = stamp_matrix(
-                *annotation,
-                image.height as f64 / image.width as f64,
-                page_width,
-                page_height,
-                rotation,
-                media_x,
-                media_y,
-            );
-
-            // Same shape as lopdf's own `Document::insert_image`, but writing
-            // the full matrix ourselves: that helper only takes a position and
-            // a size, which can't express the rotation a page with /Rotate
-            // needs.
-            content.operations.push(Operation::new("q", vec![]));
-            content.operations.push(Operation::new(
-                "cm",
-                matrix.iter().map(|value| Object::Real(*value as f32)).collect::<Vec<_>>(),
-            ));
-            content.operations.push(Operation::new("Do", vec![Object::Name(name.into_bytes())]));
-            content.operations.push(Operation::new("Q", vec![]));
+            added.push(Operation::new("q", vec![]));
+            added.extend(operations);
+            added.push(Operation::new("Q", vec![]));
         }
 
-        let encoded = content.encode().map_err(|err| PdfrsError::InvalidArgument(err.to_string()))?;
-        doc.change_page_content(page_id, encoded)?;
+        let encoded = Content { operations: added }
+            .encode()
+            .map_err(|err| PdfrsError::InvalidArgument(err.to_string()))?;
+        let mut content = Vec::with_capacity(original.len() + encoded.len() + 8);
+        content.extend_from_slice(b"q\n");
+        content.extend_from_slice(&original);
+        content.extend_from_slice(b"\nQ\n");
+        content.extend_from_slice(&encoded);
+        // A stream of the page's own: the old one may be shared with other pages.
+        content_scan::set_page_content(doc, page_id, content)?;
     }
 
     Ok(())
@@ -187,12 +255,23 @@ fn validate_asset(index: usize, asset: &ImageAsset) -> Result<()> {
 }
 
 fn validate_annotation(annotation: &Annotation, asset_count: usize) -> Result<()> {
-    let AnnotationKind::Image { asset } = annotation.kind;
-    if asset >= asset_count {
-        return Err(PdfrsError::InvalidArgument(format!(
-            "l'annotazione sulla pagina {} usa l'immagine {asset}, ma ne sono state passate {asset_count}",
-            annotation.page
-        )));
+    match &annotation.kind {
+        AnnotationKind::Image { asset } => {
+            if *asset >= asset_count {
+                return Err(PdfrsError::InvalidArgument(format!(
+                    "l'annotazione sulla pagina {} usa l'immagine {asset}, ma ne sono state passate {asset_count}",
+                    annotation.page
+                )));
+            }
+        }
+        AnnotationKind::Text { text, .. } => {
+            if text.trim().is_empty() {
+                return Err(PdfrsError::InvalidArgument(format!(
+                    "il testo sulla pagina {} è vuoto",
+                    annotation.page
+                )));
+            }
+        }
     }
 
     if !annotation.width.is_finite() || annotation.width <= 0.0 {
@@ -203,6 +282,13 @@ fn validate_annotation(annotation: &Annotation, asset_count: usize) -> Result<()
     }
     if !annotation.x.is_finite() || !annotation.y.is_finite() {
         return Err(PdfrsError::InvalidArgument("posizione dell'annotazione non valida".to_string()));
+    }
+    if let Some(height) = annotation.height {
+        if !height.is_finite() || height <= 0.0 {
+            return Err(PdfrsError::InvalidArgument(format!(
+                "altezza dell'annotazione non valida: {height}"
+            )));
+        }
     }
     if !annotation.rotation.is_finite() {
         return Err(PdfrsError::InvalidArgument(format!(
@@ -364,6 +450,68 @@ fn page_rotation(doc: &Document, page_id: ObjectId) -> i64 {
     if normalized % 90 == 0 { normalized } else { 0 }
 }
 
+fn cm(matrix: [f64; 6]) -> Operation {
+    Operation::new("cm", matrix.iter().map(|value| Object::Real(*value as f32)).collect::<Vec<_>>())
+}
+
+/// The content-stream operations that draw laid-out text into its box. The
+/// box matrix maps the unit square onto the annotation's rectangle; a second
+/// scale makes that square `layout.width` x `layout.height` em, so the text
+/// is set at a font size of 1 and the box decides how big it comes out.
+fn text_operations(
+    layout: &text::TextLayout,
+    font_name: &str,
+    align: TextAlign,
+    [r, g, b]: [f64; 3],
+    matrix: [f64; 6],
+) -> Vec<Operation> {
+    let real = |value: f64| Object::Real(value as f32);
+    let mut operations = vec![
+        cm(matrix),
+        cm([1.0 / layout.width, 0.0, 0.0, 1.0 / layout.height, 0.0, 0.0]),
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec![Object::Name(font_name.as_bytes().to_vec()), real(1.0)]),
+        Operation::new("rg", vec![real(r), real(g), real(b)]),
+    ];
+    for (index, line) in layout.lines.iter().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let (x, y) = layout.line_origin(index, align);
+        operations.push(Operation::new("Tm", vec![real(1.0), real(0.0), real(0.0), real(1.0), real(x), real(y)]));
+        operations.push(Operation::new("Tj", vec![Object::String(line.clone(), lopdf::StringFormat::Hexadecimal)]));
+    }
+    operations.push(Operation::new("ET", vec![]));
+    operations
+}
+
+/// Adds a font to the page's /Resources /Font - the same steps as lopdf's
+/// `add_xobject`, for fonts: create the dictionary if missing, follow it if
+/// it's a reference.
+fn add_font_resource(doc: &mut Document, page_id: ObjectId, name: &[u8], font_id: ObjectId) -> Result<()> {
+    let fonts_ref = {
+        let resources = doc.get_or_create_resources(page_id).and_then(Object::as_dict_mut)?;
+        if !resources.has(b"Font") {
+            resources.set("Font", lopdf::Dictionary::new());
+        }
+        match resources.get(b"Font")? {
+            Object::Reference(id) => Some(*id),
+            _ => None,
+        }
+    };
+    let fonts = match fonts_ref {
+        Some(mut id) => {
+            while let Object::Reference(next) = doc.get_object(id)? {
+                id = *next;
+            }
+            doc.get_object_mut(id)?
+        }
+        None => doc.get_or_create_resources(page_id).and_then(Object::as_dict_mut)?.get_mut(b"Font")?,
+    };
+    fonts.as_dict_mut()?.set(name.to_vec(), Object::Reference(font_id));
+    Ok(())
+}
+
 /// Composes the `cm` matrix that puts the image where the user dropped it.
 ///
 /// Two steps, because there are two coordinate systems. The viewer applies
@@ -380,7 +528,7 @@ fn page_rotation(doc: &Document, page_id: ObjectId) -> i64 {
 ///    rotation is what also makes the signature come out upright on screen
 ///    rather than lying on its side.
 fn stamp_matrix(
-    placement: Annotation,
+    placement: &Annotation,
     aspect_ratio: f64,
     page_width: f64,
     page_height: f64,
@@ -395,7 +543,10 @@ fn stamp_matrix(
     };
 
     let stamp_width = placement.width * view_width;
-    let stamp_height = stamp_width * aspect_ratio;
+    let stamp_height = match placement.height {
+        Some(height) => height * view_height,
+        None => stamp_width * aspect_ratio,
+    };
     let left = placement.x * view_width;
     // The UI's y grows downwards from the top edge; PDF's grows upwards from
     // the bottom, and the rectangle is anchored by its top-left corner.
@@ -459,7 +610,7 @@ mod tests {
     }
 
     pub(super) fn at(page: u32, x: f64, y: f64, width: f64, asset: usize) -> Annotation {
-        Annotation { page, x, y, width, rotation: 0.0, kind: AnnotationKind::Image { asset } }
+        Annotation { page, x, y, width, rotation: 0.0, height: None, kind: AnnotationKind::Image { asset } }
     }
 
     /// `at`, turned by `rotation` degrees clockwise as the reader sees it.
@@ -504,6 +655,42 @@ mod tests {
             .find(|operation| operation.operator == "cm")
             .expect("the stamp should have written a cm");
         cm.operands.iter().map(|operand| operand.as_float().unwrap() as f64).collect()
+    }
+
+    #[test]
+    fn keeps_an_inline_image_on_the_page_byte_for_byte() {
+        // A Flate-free but filtered (ASCIIHex) inline image: exactly what
+        // lopdf's decode/encode round trip used to drop.
+        let mut doc = multi_page_document(1);
+        let page_id = *doc.get_pages().get(&1).unwrap();
+        let original = b"q 20 0 0 20 100 100 cm BI /W 2 /H 1 /CS /G /BPC 8 /F /AHx ID 00FF> EI Q".to_vec();
+        content_scan::set_page_content(&mut doc, page_id, original.clone()).unwrap();
+
+        stamp(&mut doc, 1).unwrap();
+
+        let content = doc.get_page_content(page_id);
+        assert!(
+            content.windows(original.len()).any(|window| window == original.as_slice()),
+            "the original content should still be there, untouched"
+        );
+        let ops = content_scan::scan(&content);
+        assert!(ops.iter().any(|op| op.operator == "BI"));
+        assert!(ops.iter().any(|op| op.operator == "Do"), "and the stamp drawn after it");
+    }
+
+    #[test]
+    fn leaves_a_content_stream_shared_with_another_page_alone() {
+        let mut doc = multi_page_document(2);
+        let pages = doc.get_pages();
+        let (first, second) = (pages[&1], pages[&2]);
+        let shared = doc.get_page_contents(first)[0];
+        doc.get_object_mut(second).unwrap().as_dict_mut().unwrap().set("Contents", shared);
+        let before = doc.get_page_content(second);
+
+        stamp(&mut doc, 1).unwrap();
+
+        assert_eq!(doc.get_page_content(second), before, "page 2 must not get page 1's stamp");
+        assert_ne!(doc.get_page_contents(first)[0], shared);
     }
 
     fn xobject_ids(doc: &Document, page: u32) -> Vec<ObjectId> {
@@ -644,7 +831,7 @@ mod tests {
         // Top-left-ish, deliberately asymmetric so the rotations differ.
         let placement = at(1, 0.1, 0.1, 0.2, 0);
         for rotation in [0, 90, 180, 270] {
-            let matrix = stamp_matrix(placement, 0.5, 595.0, 842.0, rotation, 0.0, 0.0);
+            let matrix = stamp_matrix(&placement, 0.5, 595.0, 842.0, rotation, 0.0, 0.0);
             // The unit square's corners, mapped through the matrix.
             for (x, y) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
                 let px = matrix[0] * x + matrix[2] * y + matrix[4];
@@ -660,23 +847,54 @@ mod tests {
 
     #[test]
     fn a_media_box_origin_offsets_the_stamp() {
-        let shifted = stamp_matrix(centered(), 1.0, 595.0, 842.0, 0, 20.0, 30.0);
-        let plain = stamp_matrix(centered(), 1.0, 595.0, 842.0, 0, 0.0, 0.0);
+        let shifted = stamp_matrix(&centered(), 1.0, 595.0, 842.0, 0, 20.0, 30.0);
+        let plain = stamp_matrix(&centered(), 1.0, 595.0, 842.0, 0, 0.0, 0.0);
         assert_eq!(shifted[4] - plain[4], 20.0);
         assert_eq!(shifted[5] - plain[5], 30.0);
+    }
+
+    /// An explicit height stretches the image: its own proportions no longer
+    /// count, on an upright page and on one turned a quarter.
+    #[test]
+    fn an_explicit_height_stretches_the_image() {
+        let natural = stamp_matrix(&at(1, 0.1, 0.1, 0.5, 0), 0.5, 600.0, 800.0, 0, 0.0, 0.0);
+        assert_eq!(natural[3], 0.5 * 600.0 * 0.5);
+
+        let stretched = Annotation { height: Some(0.25), ..at(1, 0.1, 0.1, 0.5, 0) };
+        let matrix = stamp_matrix(&stretched, 0.5, 600.0, 800.0, 0, 0.0, 0.0);
+        assert_eq!(matrix[0], 0.5 * 600.0, "the width is untouched");
+        assert_eq!(matrix[3], 0.25 * 800.0, "the height is a quarter of the page's");
+        // Still anchored by its top-left corner: the top edge doesn't move.
+        assert_eq!(matrix[5] + matrix[3], 800.0 - 0.1 * 800.0);
+
+        // On a page shown turned a quarter, "height" is the displayed one,
+        // i.e. the page's width; the quarter turn moves the vertical scale
+        // into the matrix's `c` entry.
+        let turned_page = stamp_matrix(&stretched, 0.5, 600.0, 800.0, 90, 0.0, 0.0);
+        assert!((turned_page[2].abs() - 0.25 * 600.0).abs() < 1e-9);
+        assert!((turned_page[1].abs() - 0.5 * 800.0).abs() < 1e-9, "the width, the displayed one");
+    }
+
+    #[test]
+    fn rejects_a_height_that_is_not_a_positive_number() {
+        let mut doc = multi_page_document(1);
+        let pixels = vec![0u8; 4];
+        let bad = Annotation { height: Some(0.0), ..at(1, 0.1, 0.1, 0.2, 0) };
+        let result = annotate(&mut doc, &[ImageAsset { pixels: &pixels, width: 1, height: 1 }], &[bad]);
+        assert!(result.is_err());
     }
 
     /// A rotation of zero must produce exactly the matrix it produced before
     /// rotation existed - a pure scale and translate, no rotation terms.
     #[test]
     fn a_zero_rotation_changes_nothing() {
-        let upright = stamp_matrix(at(1, 0.2, 0.3, 0.4, 0), 0.5, 595.0, 842.0, 0, 0.0, 0.0);
+        let upright = stamp_matrix(&at(1, 0.2, 0.3, 0.4, 0), 0.5, 595.0, 842.0, 0, 0.0, 0.0);
         assert_eq!(upright[1], 0.0);
         assert_eq!(upright[2], 0.0);
         assert!(upright[0] > 0.0 && upright[3] > 0.0);
 
         // ...and a full turn comes back to the same place.
-        let full_turn = stamp_matrix(turned(1, 0.2, 0.3, 0.4, 0, 360.0), 0.5, 595.0, 842.0, 0, 0.0, 0.0);
+        let full_turn = stamp_matrix(&turned(1, 0.2, 0.3, 0.4, 0, 360.0), 0.5, 595.0, 842.0, 0, 0.0, 0.0);
         for (index, (a, b)) in upright.iter().zip(full_turn.iter()).enumerate() {
             assert!((a - b).abs() < 1e-6, "matrix entry {} differs: {} vs {}", index, a, b);
         }
@@ -686,7 +904,7 @@ mod tests {
     #[test]
     fn rotation_keeps_the_centre_where_it_was() {
         let centre_of = |rotation: f64| {
-            let matrix = stamp_matrix(turned(1, 0.2, 0.3, 0.4, 0, rotation), 0.5, 595.0, 842.0, 0, 0.0, 0.0);
+            let matrix = stamp_matrix(&turned(1, 0.2, 0.3, 0.4, 0, rotation), 0.5, 595.0, 842.0, 0, 0.0, 0.0);
             // The unit square's centre, mapped through the matrix.
             (
                 matrix[0] * 0.5 + matrix[2] * 0.5 + matrix[4],
@@ -956,6 +1174,84 @@ mod render_tests {
         assert!(y < 0.4, "expected the stamp near the top, centroid y was {}", y);
     }
 
+    fn text_at(page: u32, x: f64, y: f64, width: f64, content: &str) -> Annotation {
+        Annotation {
+            kind: AnnotationKind::Text {
+                text: content.to_string(),
+                font: StandardFont::Helvetica,
+                bold: true,
+                italic: false,
+                color: "#ff0000".to_string(),
+                align: TextAlign::Left,
+            },
+            ..at(page, x, y, width, 0)
+        }
+    }
+
+    /// The `Tx...` fonts (ours) in a page's /Resources /Font.
+    fn our_fonts(doc: &Document, page: u32) -> Vec<ObjectId> {
+        let page_id = *doc.get_pages().get(&page).unwrap();
+        let resources = doc.get_dictionary(page_id).unwrap().get(b"Resources").unwrap();
+        let resources = doc.dereference(resources).unwrap().1.as_dict().unwrap();
+        let fonts = doc.dereference(resources.get(b"Font").unwrap()).unwrap().1.as_dict().unwrap();
+        assert!(fonts.has(b"F1"), "the page keeps its own fonts");
+        fonts
+            .iter()
+            .filter(|(name, _)| name.starts_with(b"Tx"))
+            .map(|(_, value)| value.as_reference().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn writes_text_as_text_in_a_standard_font() {
+        let mut doc = multi_page_document(2);
+        annotate(&mut doc, &[], &[text_at(1, 0.1, 0.1, 0.5, "Ciao è"), text_at(2, 0.1, 0.1, 0.5, "Ancora")]).unwrap();
+
+        // Our font is a Type1 standard font: nothing embedded.
+        let ours = our_fonts(&doc, 1);
+        assert_eq!(ours.len(), 1);
+        let font = doc.get_dictionary(ours[0]).unwrap();
+        assert_eq!(font.get(b"BaseFont").unwrap().as_name().unwrap(), b"Helvetica-Bold");
+        assert_eq!(font.get(b"Encoding").unwrap().as_name().unwrap(), b"WinAnsiEncoding");
+        assert!(!font.has(b"FontDescriptor"), "nothing embedded");
+
+        // The text is in the content stream, encoded in WinAnsi ("è" = 0xE8).
+        let page_id = *doc.get_pages().get(&1).unwrap();
+        let content = doc.get_and_decode_page_content(page_id).unwrap();
+        let shown: Vec<Vec<u8>> = content
+            .operations
+            .iter()
+            .filter(|op| op.operator == "Tj")
+            .map(|op| op.operands[0].as_str().unwrap().to_vec())
+            .collect();
+        assert!(shown.contains(&vec![b'C', b'i', b'a', b'o', b' ', 0xE8]), "got {:?}", shown);
+
+        // The same face on two pages is one font object.
+        assert_eq!(our_fonts(&doc, 2), ours);
+    }
+
+    #[test]
+    fn rejects_blank_text() {
+        let mut doc = multi_page_document(1);
+        assert!(annotate(&mut doc, &[], &[text_at(1, 0.1, 0.1, 0.5, "  \n ")]).is_err());
+    }
+
+    #[test]
+    fn text_lands_where_it_was_placed_upright_and_on_a_rotated_page() {
+        // Bottom-right area of the page, as displayed.
+        let placement = text_at(1, 0.55, 0.75, 0.4, "PDFRS");
+        for rotation in [None, Some(90)] {
+            let (x, y) = red_centroid(&stamped_preview(rotation, placement.clone()));
+            assert!(
+                x > 0.55 && y > 0.7,
+                "/Rotate {:?}: expected the text bottom-right as displayed, centroid was ({}, {})",
+                rotation,
+                x,
+                y
+            );
+        }
+    }
+
     /// The payoff of all the `/Rotate` arithmetic: the viewer rotates the
     /// page, so the stamp has to be written rotated the other way to still
     /// show up where the user dropped it.
@@ -963,7 +1259,7 @@ mod render_tests {
     fn lands_where_it_was_placed_on_rotated_pages() {
         let placement = at(1, 0.05, 0.05, 0.2, 0);
         for rotation in [90, 180, 270] {
-            let (x, y) = red_centroid(&stamped_preview(Some(rotation), placement));
+            let (x, y) = red_centroid(&stamped_preview(Some(rotation), placement.clone()));
             assert!(
                 x < 0.4 && y < 0.4,
                 "/Rotate {}: expected the stamp near the top-left as displayed, centroid was ({}, {})",

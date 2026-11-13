@@ -9,16 +9,31 @@ cargo test
 # verifica che compili per il target wasm
 cargo check --target wasm32-unknown-unknown
 
-# build "core" in pkg/ (merge/split/rotate/compose/encrypt/decrypt, ~650KB - usato da www/, o da un frontend esterno)
+# build "core" in pkg/ (merge/split/rotate/compose/encrypt/decrypt, ~1,2MB - usato da www/, o da un frontend esterno)
 wasm-pack build --target web --out-dir pkg --no-default-features --features console_error_panic_hook
 
-# build "full" in pkg-full/ (tutto, incluse preview/import immagini, ~4.3MB)
+# build "full" in pkg-full/ (tutto, incluse preview/import immagini, ~5,9MB)
 wasm-pack build --target web --out-dir pkg-full
 ```
 
 Vedi docs/architecture.md ("Build \"core\" e \"full\"") per il perché dello split: entrambe le feature `preview`/`image-import` sono nel `default`, quindi vanno esplicitamente disattivate per ottenere il binario piccolo - un `wasm-pack build --target web` senza flag produce comunque il binario "full" completo.
 
 `wasm-pack test --headless --firefox` (o `--chrome`) esegue i test in `tests/web.rs` in un vero browser, ma richiede `geckodriver`/`chromedriver` installati — non presenti in tutti gli ambienti di sviluppo. (Nota: la funzione di start del crate si chiama `start`, non `main`, proprio perché wasm-bindgen rifiuta di linkare l'harness di test quando entrambi esportano un `main` — "the name `main` is exported by multiple crates in this build".) Se disponibili, è il modo per validare i binding `#[wasm_bindgen]` end-to-end lato Rust; altrimenti la pagina di test in `www/` (sotto) copre lo stesso confine JS↔wasm.
+
+### Pubblicare `pdfrs.js` su npm
+
+La versione è quella di `Cargo.toml`: `./scripts/build-npm-package.sh` la copia in `pkg-npm/package.json`, insieme a descrizione, licenza e repository. Il README mostrato su npm è `scripts/npm-package/README.md`, in inglese; le licenze sono `LICENSE-MIT` e `LICENSE-APACHE`.
+
+```bash
+# 1. alza "version" in Cargo.toml, poi:
+./scripts/build-npm-package.sh
+cd pkg-npm
+npm publish --dry-run   # controlla file e dimensioni senza pubblicare
+npm login               # una volta per macchina
+npm publish
+```
+
+`pdfrs-editor` non è pubblicato: è `private` e usa `pdfrs.js` tramite `link:`.
 
 ### Fixture PDF (e JPEG)
 
@@ -40,7 +55,31 @@ cargo run --example render_preview [percorso/al/file.pdf]   # default: tests/fix
 
 ## Pagina di test TypeScript (`www/`)
 
-Piccolo progetto Vite + TypeScript puro (nessun framework), con un pannello per ciascuna operazione esposta dal wasm. Consuma **due** pacchetti locali: `"pdfrs": "file:../pkg"` (core) e `"pdfrs-full": "file:../pkg-full"` (full) in `www/package.json` — vanno quindi rigenerati (entrambi i comandi `wasm-pack build` sopra) ogni volta che cambia l'API Rust, seguiti da `pnpm install` (vedi sotto per il perché).
+Piccolo progetto Vite + TypeScript puro (nessun framework), con un pannello per ciascuna operazione esposta dal wasm. Non dipende direttamente dal wasm, ma da **`pdfrs-editor`** (`"pdfrs-editor": "link:../packages/pdfrs-editor"`), lo stesso pacchetto usato dall'app Vue (repo `pdfrs-app`). Vedi "Pacchetto `pdfrs-editor`" più sotto.
+
+## Pacchetto `pdfrs-editor` (`packages/pdfrs-editor/`)
+
+Il codice TypeScript indipendente dal framework sta tutto qui, così `www/` e `pdfrs-app` ne usano una sola copia:
+
+- il modello `PdfDocument` / `PdfEditor` (`src/pdf-model/`);
+- il worker e il suo client (`src/worker/`);
+- il pool di worker per le anteprime.
+
+Il pacchetto viene distribuito come sorgente TypeScript, senza un passo di build: `exports` punta ai `.ts` e il bundler del consumatore (Vite) li compila. Ha due punti d'ingresso:
+
+- `pdfrs-editor`: modello, tipi, `renderPagesInParallel`;
+- `pdfrs-editor/operations`: le operazioni di basso livello (`merge_pdfs`, `nup_pdf`, ...), sempre eseguite nel worker.
+
+Il pacchetto usa il wasm tramite `"pdfrs.js": "link:../../pkg-npm"`, cioè la cartella prodotta da `./scripts/build-npm-package.sh`, con i sottopercorsi `pdfrs.js/core` e `pdfrs.js/full`. Il ciclo di sviluppo diventa:
+
+```bash
+./scripts/build-npm-package.sh          # dopo ogni modifica al Rust: rigenera pkg/, pkg-full/ e pkg-npm/
+(cd packages/pdfrs-editor && pnpm install)   # solo la prima volta
+```
+
+Tutti i collegamenti usano `link:`, cioè symlink veri: pnpm non copia nulla in `node_modules/.pnpm/`. In più Vite serve come sorgente i pacchetti collegati che stanno fuori da `node_modules`, senza pre-bundling. Quindi dopo una nuova build del wasm **non serve `pnpm install`**: basta ricaricare la pagina.
+
+Anche i `.wasm` vengono letti dallo stesso pacchetto della glue JS: `pkg-npm/package.json` esporta `./core/pdfrs_bg.wasm` e `./full/pdfrs_bg.wasm`, e `create-pdfrs-worker.ts` li importa con `?url`. Glue e binario arrivano così sempre dalla stessa build. Se fossero di due build diverse, l'avvio fallirebbe con "import object field … is not a Function", perché wasm-bindgen mette un hash nei nomi degli import.
 
 ### Il modulo wasm gira in un Web Worker, non sul thread principale
 
@@ -48,28 +87,31 @@ Le funzioni `async`/`Promise` di per sé **non bastano** a evitare che la UI si 
 
 Per questo `www/src/main.ts` non importa mai `"pdfrs"` direttamente. La catena è:
 
-- `src/pdfrs.worker.ts` — gira **dentro un Web Worker**, importa il pacchetto wasm vero (`"pdfrs"`), inizializza il modulo (vedi sotto) e risponde ai messaggi `{ id, method, args }` eseguendo la funzione corrispondente.
-- `src/pdfrs-worker-client.ts` — lato thread principale, espone le stesse firme (`merge_pdfs`, `split_pdf`, ...) ma ogni chiamata è in realtà un giro di `postMessage` verso il worker, incapsulato in una `Promise` tramite una mappa `id -> {resolve, reject}`. I call site (`main.ts`) non sanno che c'è un worker di mezzo.
-- `src/worker-protocol.ts` — le forme dei messaggi (`WorkerRequest`/`WorkerResponse`/`WorkerInitMessage`) condivise tra le parti, così non possono disallinearsi.
-- `src/create-pdfrs-worker.ts` — punto unico di creazione per **ogni** istanza di `pdfrs.worker.ts` nell'app (sia il worker singolo condiviso di `pdfrs-worker-client.ts`, sia ciascuno del pool descritto sotto). Vedi "Modulo wasm compilato una volta" più sotto.
+- `packages/pdfrs-editor/src/worker/pdfrs.worker.ts` — gira **dentro un Web Worker**, importa il pacchetto wasm vero (`"pdfrs"`), inizializza il modulo (vedi sotto) e risponde ai messaggi `{ id, method, args }` eseguendo la funzione corrispondente.
+- `packages/pdfrs-editor/src/worker/pdfrs-worker-client.ts` — lato thread principale, espone le stesse firme (`merge_pdfs`, `split_pdf`, ...) ma ogni chiamata è in realtà un giro di `postMessage` verso il worker, incapsulato in una `Promise` tramite una mappa `id -> {resolve, reject}`. I call site (`main.ts`) non sanno che c'è un worker di mezzo.
+- `packages/pdfrs-editor/src/worker/worker-protocol.ts` — le forme dei messaggi (`WorkerRequest`/`WorkerResponse`/`WorkerInitMessage`) condivise tra le parti, così non possono disallinearsi.
+- `packages/pdfrs-editor/src/worker/create-pdfrs-worker.ts` — punto unico di creazione per **ogni** istanza di `pdfrs.worker.ts` nell'app (sia il worker singolo condiviso di `pdfrs-worker-client.ts`, sia ciascuno del pool descritto sotto). Vedi "Modulo wasm compilato una volta" più sotto.
 
 **Prova visibile che funziona**: in cima alla pagina c'è un contatore ("UI thread libero — tick: N") che incrementa a ogni `requestAnimationFrame`. Se il thread principale fosse bloccato da una chiamata wasm, si fermerebbe; nello smoke test (`www/e2e/smoke.mjs`) questo è verificato esplicitamente confrontando il valore del contatore prima e dopo un'operazione.
 
 ### Modulo wasm compilato una volta, condiviso tra tutti i worker
 
-Ogni worker (singolo o del pool) userebbe, se lasciato al comportamento di default di wasm-bindgen, il proprio `fetch` + `WebAssembly.compile` del binario — ripetuto per ogni worker creato. `create-pdfrs-worker.ts` centralizza questo: la prima volta che un worker viene creato, compila il binario una sola volta (`WebAssembly.compileStreaming`, con fallback a `fetch` + `WebAssembly.compile` se lo streaming non è disponibile) e tiene il risultato come una `Promise<WebAssembly.Module>` a livello di modulo. Ogni worker successivo riceve lo stesso `WebAssembly.Module` già compilato via `postMessage` (i moduli wasm sono clonabili in structured clone), e deve solo instanziarlo (`init(module)`), non ricompilarlo da zero.
+Ogni worker (singolo o del pool) userebbe, se lasciato al comportamento di default di wasm-bindgen, il proprio `fetch` + `WebAssembly.compile` del binario — ripetuto per ogni worker creato. `create-pdfrs-worker.ts` centralizza questo: la prima volta che un worker viene creato, compila il binario una sola volta (`WebAssembly.compileStreaming`, con fallback a `fetch` + `WebAssembly.compile` se lo streaming non è disponibile) e tiene il risultato come una `Promise<WebAssembly.Module>` a livello di modulo. Ogni worker successivo riceve lo stesso `WebAssembly.Module` già compilato via `postMessage` (i moduli wasm sono clonabili in structured clone), e deve solo instanziarlo (`init({ module_or_path: module })`), non ricompilarlo da zero.
+
+Lo stesso vale per la build "full" (~4,6MB) nei worker del pool delle anteprime. Questi la useranno di sicuro, quindi vengono creati con `createPdfrsWorker({ withFull: true })` e ricevono nello stesso messaggio di init anche il binario full già compilato (`fullModule`). Il worker condiviso, che le anteprime le fa solo di rado, la carica invece da solo la prima volta che gli serve. Prima, ogni worker del pool scaricava e compilava per conto suo una copia della build full.
 
 Lato worker (`pdfrs.worker.ts`), l'inizializzazione non parte più eagerly a livello di modulo: il worker aspetta il primo `WorkerInitMessage` (`{type: "wasm-module", module}` nel percorso normale, `{type: "wasm-init-fallback"}` se la compilazione condivisa fallisce per qualche motivo, nel qual caso il worker si auto-inizializza con `init()` come prima) prima di processare qualunque `WorkerRequest`.
 
 ### Preview su documenti grandi: pool di worker persistente con coda dinamica
 
-Un solo worker rende le pagine una alla volta — non blocca la UI, ma per un documento con molte pagine il rendering totale resta comunque lento in wall-clock, perché una sola pagina alla volta gira su un solo core. `src/preview-worker-pool.ts` risolve questo caso specifico: sopra `PARALLEL_PREVIEW_THRESHOLD` pagine (6, in `main.ts`), il rendering si distribuisce su un piccolo pool di worker (dimensione tipica `Math.min(navigator.hardwareConcurrency, pageCount, 8)`, tutti creati tramite `createPdfrsWorker()` e quindi tutti a condividere lo stesso modulo wasm già compilato) e le pagine vengono assegnate da una **coda condivisa**: ogni worker libero prende la pagina successiva, invece di ricevere in anticipo un blocco fisso di pagine. Questo evita che un worker resti bloccato su un blocco di pagine pesanti mentre un altro, con pagine leggere, ha già finito ed è inattivo — il bilanciamento del carico è automatico.
+Un solo worker rende le pagine una alla volta — non blocca la UI, ma per un documento con molte pagine il rendering totale resta comunque lento in wall-clock, perché una sola pagina alla volta gira su un solo core. `packages/pdfrs-editor/src/worker/preview-worker-pool.ts` risolve questo caso specifico: `PdfDocument` lo usa per ogni anteprima (anche per una sola pagina, vedi sotto i documenti tenuti dai worker; il pannello Preview di `main.ts` lo usa invece sopra la sua `PARALLEL_PREVIEW_THRESHOLD`, 6 pagine), e il rendering si distribuisce su un piccolo pool di worker (dimensione tipica `Math.min(navigator.hardwareConcurrency, pageCount, 8)`, tutti creati tramite `createPdfrsWorker()` e quindi tutti a condividere lo stesso modulo wasm già compilato) e le pagine vengono assegnate da una **coda condivisa**: ogni worker libero prende la pagina successiva, invece di ricevere in anticipo un blocco fisso di pagine. Questo evita che un worker resti bloccato su un blocco di pagine pesanti mentre un altro, con pagine leggere, ha già finito ed è inattivo — il bilanciamento del carico è automatico.
 
 Conseguenze pratiche di questo design:
 
 - **`onPage` completa fuori ordine**: le pagine finiscono nell'ordine in cui i worker le processano, non nell'ordine 1, 2, 3... Per questo il pannello Preview crea prima una card segnaposto per ogni pagina (`cardImages: Map<number, HTMLImageElement>` in `main.ts`) e riempie l'immagine giusta quando arriva, invece di fare `appendChild` man mano — se aggiungi un altro consumatore di `renderPagesInParallel`, tienilo a mente.
 - **Ciclo di vita — persistente, non ricreato per chiamata**: il pool vive a livello di modulo (array `workers`/`idleWorkers` in `preview-worker-pool.ts`) e cresce solo verso l'alto (`ensurePoolSize`), non viene mai smontato tra una chiamata a `renderPagesInParallel` e la successiva. Una seconda preview su un documento grande non ripaga il costo di avvio worker/wasm se il pool è già caldo dalla prima. La coda (`queue`) è anch'essa condivisa tra chiamate diverse, non ricreata ogni volta.
 - **Dispatcher**: `pump()` assegna job in coda a ogni worker che si libera (chiamato sia subito dopo aver accodato nuovi job, sia da dentro il completamento di ogni job, per continuare a svuotare la coda). Un dettaglio facile da sbagliare: accodare i job e poi aspettare la loro `Promise.all` **prima** di chiamare `pump()` produce un deadlock — nulla viene mai assegnato ai worker se `pump()` non viene invocato esplicitamente subito dopo l'accodamento.
+- **Documenti tenuti dai worker**: i byte di un documento arrivano a un worker del pool una volta sola, la prima volta che gli tocca una sua pagina; le pagine successive lo nominano con una chiave numerica (`render_held_page`). Spedire i byte è un clone strutturato fatto in modo sincrono sul main thread: con una scansione da 40 MB sono circa 10 ms di UI ferma per pagina, che un documento intero di miniature trasforma in secondi. Il documento è identificato dall'identità del `Uint8Array` (una `WeakMap`), quindi un buffer già passato a `renderPagesInParallel` non va modificato sul posto — `PdfDocument` non lo fa mai, una nuova baseline è un nuovo buffer. Il main thread decide cosa tiene ogni worker (al più 2 documenti, il meno usato di recente esce, comunicato nella richiesta stessa con `release`), `pump()` preferisce un worker libero che ha già il documento, e dopo 20 s senza lavoro tutti i worker lasciano andare tutto. `window.__pdfrsPreviewBytesSent` conta gli invii, per i test.
 - **Verifica nello smoke test**: `tests/fixtures/ten_pages.pdf` (10 pagine, sopra soglia) esercita il pool; `preview-worker-pool.ts` espone `window.__pdfrsLastPreviewPoolSize` proprio per permettere allo smoke test di verificare concretamente che siano stati usati più worker (`previewPoolSize > 1`), invece di dedurlo indirettamente dai tempi.
 
 ### Trabocchetto da evitare — `Transferable` e buffer riusati
@@ -107,11 +149,11 @@ Failed to execute 'postMessage' on 'Worker': An ArrayBuffer is detached and coul
 
 Se in futuro serve ottimizzare per PDF di ingresso molto grandi, la via corretta **non** è tornare al transfer diretto degli argomenti, ma clonare il buffer lato chiamante prima di trasferirlo quando sai che ti servirà ancora (`bytes.slice()` crea una copia indipendente da passare in transfer, lasciando l'originale intatto) — così si guadagna la velocità dello zero-copy senza il rischio del detach a sorpresa.
 
-**Importante**: dopo ogni `wasm-pack build`, rilancia anche `pnpm install` dentro `www/`. A differenza di npm, **pnpm non fa un vero symlink live** per le dipendenze `file:` — ne clona un contenuto in `node_modules/.pnpm/` al momento dell'`install`, e quel contenuto non si aggiorna da solo quando `pkg/` cambia sul disco. Se te ne dimentichi, il frontend continua a chiamare funzioni vecchie/mancanti (es. `wasm.page_count is not a function`) o serializza opzioni in un formato che l'API attuale non si aspetta più, con errori che sembrano bug nel codice Rust ma sono solo un pacchetto stantio.
+Dopo una nuova build del wasm (`./scripts/build-npm-package.sh`) non serve `pnpm install`: il motivo è spiegato in "Pacchetto `pdfrs-editor`" qui sopra.
 
 ```bash
 cd www
-pnpm install
+pnpm install        # solo la prima volta
 pnpm dev            # http://localhost:5173, pagina interattiva
 pnpm run build      # build di produzione (verifica tipi + bundle Vite)
 pnpm test:e2e       # smoke test end-to-end automatico
@@ -165,12 +207,42 @@ Nota sulla compressione: `save()` non chiama `Document::compress()`, quindi i du
 
 **Nel pannello**, un'immagine si porta sulla pagina trascinandola dalla palette, oppure cliccandola (la mette al centro, ed è il percorso raggiungibile da tastiera). Il drag usa il DnD nativo HTML5, sicuro qui perché questo pannello non ha il riordino delle pagine con cui collide nell'editor; come nell'editor, però, l'id dell'elemento trascinato è tenuto in una variabile e **non** letto dal `dataTransfer`, che il browser riempie con la propria rappresentazione dell'immagine trascinata. Lo smoke test non pilota il drag con il mouse — `dragTo` di Playwright sposta il puntatore sul bersaglio *prima* che il drag inizi, così la sorgente diventa l'immagine della pagina, e i mouse event sintetici non generano affatto eventi drag — ma dispatcha `DragEvent` sintetici, che esercitano comunque la logica di drop del pannello.
 
-### Modello logico del PDF: `PdfDocument` / `PdfEditor` (`src/pdf-model/`)
+### Contenuto delle pagine letto come byte (`src/operations/content_scan.rs`)
+
+`Content::decode` + `encode` di lopdf **perde dati**: le immagini inline (`BI … ID <dati> EI`) con un filtro vengono saltate in lettura, e quelle che sopravvivono vengono riscritte in una sintassi che nessun lettore accetta. Per questo nessuna operazione che modifica una pagina scritta da altri deve ricodificarne il contenuto:
+
+- **`content_scan::scan`** restituisce le operazioni con l'**intervallo di byte** esatto di ciascuna. Conosce quanto basta della sintassi per non scambiare dati per operatori: stringhe con escape e parentesi annidate, stringhe esadecimali, commenti, array e dizionari, e i dati binari delle immagini inline (`EI` preceduto e seguito da spazio, o `/L`/`/Length` se c'è).
+- **`content_scan::cut`** toglie degli intervalli; il resto resta byte per byte com'era.
+- **`content_scan::set_page_content`** dà alla pagina uno stream **nuovo e suo**. Mai `change_page_content`, che riscrive lo stream sul posto: se è condiviso tra pagine, le cambierebbe tutte.
+- `stamp::annotate` (firme, immagini, testo) e `nup`/`booklet` avvolgono i byte originali in `q … Q` invece di ricodificarli (prima corrompevano le pagine con immagini inline).
+
+### Immagini già nel PDF (`src/operations/images.rs`, `image_extract.rs`)
+
+- **`images::list`** segue `q`/`Q`/`cm` fino a ogni `Do` di un'immagine o a ogni `BI`, entrando nei Form XObject con la loro `/Matrix` e le loro risorse (profondità massima 12, anti-ciclo). Le posizioni sono in frazioni della pagina **mostrata**, lo stesso riferimento delle anteprime: CropBox∩MediaBox, `/Rotate` applicato, origine in alto a sinistra. Il ritaglio (clip) non è considerato.
+- **Id di una posizione**: `p<pagina>#<n>` per l'n-esima immagine disegnata dal contenuto della pagina, `f<oggetto>_<gen>#<n>` per una disegnata da un Form, uguale su tutte le pagine che disegnano quel Form (`sharedPages`): toglierla lì la toglie ovunque.
+- **`images::remove`** ritaglia i byte di quelle operazioni. Il contenuto di pagina diventa uno stream nuovo; un Form è riscritto sul posto. Un'immagine che nessuno disegna più viene eliminata (`delete_object` toglie anche i riferimenti dalle risorse, poi `prune_objects`), quindi il file si alleggerisce davvero.
+- **`image_extract::extract`** (build completa): un JPEG semplice (un solo filtro DCT, RGB o grigio, 8 bit, senza maschera) torna così com'è; tutto il resto passa da un `Device` di hayro che intercetta `draw_image` e decodifica con `RasterImage::with_rgba` (ogni formato, spazi colore, SMask) → PNG.
+- **Nel modello** le rimozioni sono una modifica in sospeso (`removeImages`/`restoreImages`, nello snapshot dell'annullamento) applicata per prima, prima delle annotazioni, in `computeCommittedBytes` ed `exportPages`. `insertPages` unisce i file e rinumera gli oggetti, quindi gli id dei Form in sospeso vengono rimappati (stessa pagina, stessa posizione nell'ordine di disegno).
+
+### Pagine nate da una foto (`PdfDocument.setPhotoPage`)
+
+Una pagina creata da un JPEG (`PdfDocument.fromImage`, `insertImage`) ricorda la foto e le opzioni di pagina (`photoPages()`), nello stato annullabile. `setPhotoPage(page, options)` la rifà da capo con `image_to_pdf` su un'altra pagina (A4, Letter, dimensione reale): la nuova pagina viene aggiunta alla baseline come in `insertPages` e prende il **posto** della vecchia nell'ordine, con le sue rotazioni, eliminazioni e annotazioni in sospeso. Ha un id nuovo, che il metodo restituisce. La vecchia resta nella baseline, fuori dall'ordine, e il commit successivo la scarta. Per questo `getImages` filtra le pagine fuori dall'ordine.
+
+- **Quando la foto si perde**: al commit, per le pagine con rotazioni, annotazioni o immagini rimosse, che vengono scritte nella pagina e che una pagina rifatta perderebbe. Unione, estrazione e spostamento di pagine portano la foto con sé solo per le pagine invariate (stessa regola del riuso delle anteprime, `changedPages`).
+- **`PageInfo.originalNumber`**: il numero della pagina nel documento all'ultimo commit (o all'apertura), quello che l'app mostra come «era 4». Prima l'app confrontava l'id con la posizione, che dava risultati sbagliati per le pagine inserite e per quelle rifatte: una pagina rifatta eredita il numero di quella che sostituisce, una pagina inserita non ne ha (`null`).
+
+### Indice del PDF (`src/operations/outline.rs`)
+
+- **Lettura** (`read_outline`): un lettore nostro invece di `lopdf::get_toc`, che salta le voci con destinazione non risolvibile e si ferma al primo errore. Percorre `/Outlines` → `/First`/`/Next` (anti-ciclo, profondità massima) e restituisce voci piatte `{ title, level, page?, top?, open }`. Le destinazioni possono essere `/Dest` (array, nome, stringa) o `/A` con `GoTo`; i nomi si risolvono con `/Dests` del catalogo o con l'albero `/Names` → `/Dests`. Una voce che non porta a una pagina del documento resta, senza `page`.
+- **Scrittura** (`write_outline`): ricostruisce l'albero dalle voci piatte, con `/Count` positivo per i rami aperti e negativo per quelli chiusi e destinazioni `/XYZ` (se c'è `top`) o `/Fit`. Una lista vuota toglie l'indice.
+- **Perché il modello lo riscrive**: `compose` e `merge` tolgono `/Outlines`. `PdfDocument` legge l'indice della baseline solo quando serve e lo riscrive, rimappato con `remapOutline`, dopo ogni `compose` (`computeCommittedBytes`, `exportPages`) e dopo ogni `merge_pdfs` (`insertPages`, `setPhotoPage`). Le voci di pagine che non ci sono più vengono tolte e i loro figli risalgono di un livello. `PdfEditor.mergeDocuments` scrive un ramo per documento (`titles`), con dentro l'indice di ciascuno (`getOutlineAsShown`). N per foglio e libretto restano senza indice.
+
+### Modello logico del PDF: `PdfDocument` / `PdfEditor` (`packages/pdfrs-editor/src/pdf-model/`)
 
 Sopra le funzioni stateless viste finora c'è un livello di modello puro (nessun DOM, nessun riferimento a `window`/`document`), pensato per essere riusato da un front qualsiasi — anche il futuro front Vue in repo separata:
 
-- **`PdfDocument`** (`src/pdf-model/PdfDocument.ts`) — modella *un* PDF caricato e le modifiche pagina-per-pagina non ancora confermate. `PdfDocument.open(bytes)` (async, unico modo di costruirne uno) chiama solo `page_count` — **mai** una preview in automatico. `rotatePage(id, degrees)`/`deletePage(id)`/`restorePage(id)`/`resetRotation(id)` aggiornano solo lo stato in memoria (una `Map`/`Set` di modifiche pendenti), nessuna chiamata wasm. `getPreview(id)`/`getPreviews()` renderizzano su richiesta esplicita (quest'ultimo usa internamente `renderPagesInParallel` sopra soglia, la stessa logica prima duplicata nel pannello Preview di `main.ts`). `commit()` applica le modifiche pendenti (muta l'istanza, azzera lo stato pendente); `exportBytes()` fa lo stesso calcolo senza mutare, per un'anteprima del risultato finale prima di confermare.
-- **`PdfEditor`** (`src/pdf-model/PdfEditor.ts`) — registro di più `PdfDocument`, con le operazioni che intrinsecamente coinvolgono più documenti (`mergeDocuments`, `splitDocument`), che non avrebbe senso modellare dentro un singolo documento.
+- **`PdfDocument`** (`src/pdf-model/PdfDocument.ts`) — modella *un* PDF caricato e le modifiche pagina-per-pagina non ancora confermate. `PdfDocument.open(bytes)` (async, unico modo di costruirne uno) chiama solo `page_count` — **mai** una preview in automatico. `rotatePage(id, degrees)`/`deletePage(id)`/`restorePage(id)`/`resetRotation(id)` aggiornano solo lo stato in memoria (una `Map`/`Set` di modifiche pendenti), nessuna chiamata wasm. `getPreview(id)`/`getPreviews()` renderizzano su richiesta esplicita (entrambi passano dal pool con `renderPagesInParallel`, la stessa logica prima duplicata nel pannello Preview di `main.ts`). `commit()` applica le modifiche pendenti (muta l'istanza, azzera lo stato pendente); `exportBytes()` fa lo stesso calcolo senza mutare, per un'anteprima del risultato finale prima di confermare.
+- **`PdfEditor`** (`src/pdf-model/PdfEditor.ts`) — registro di più `PdfDocument`, con le operazioni che intrinsecamente coinvolgono più documenti (`mergeDocuments`, `splitDocument`), che non avrebbe senso modellare dentro un singolo documento. Anche la protezione con password produce nuovi documenti: `protectDocument(id, password)` registra una copia cifrata (AES-256) del documento così com'è ora, `unlockDocument(id, password)` una copia in chiaro (va bene la password di apertura o quella del proprietario; una sbagliata lancia `WrongPasswordError`). Un PDF che richiede la password per essere aperto — da file o creato così — è un `PdfDocument` *bloccato* (`isLocked()`): zero pagine, e `getBytes()`/`exportBytes()` restituiscono il file cifrato com'è. `open()` lo riconosce chiamando `is_password_protected` solo quando `page_count` dà 0, così un PDF normale non viene letto due volte. (I vecchi `PdfDocument.encrypt()`/`decrypt()`, che cifrano la baseline sul posto, lasciano un documento non più modificabile né renderizzabile: per un editor servono le copie.)
 
 **Import di immagini**: `PdfDocument.fromImage(bytes, options)` è una **seconda factory statica** (non una sottoclasse) — converte un JPEG in PDF via `image_to_pdf` e apre il risultato come `PdfDocument` qualunque. Deliberatamente non una gerarchia di classi: una volta convertita l'immagine, non c'è nessun comportamento diverso da un `PdfDocument` aperto da un PDF vero (stesso rotate/delete/preview/commit) — l'unica cosa che cambia è *come nasce* l'istanza, e quando l'unica differenza è la costruzione, è il lavoro di una factory, non di una sottoclasse (che tra l'altro avrebbe richiesto indebolire il costruttore privato di `PdfDocument`). `PdfEditor.addImage(bytes, options)` è l'equivalente lato editor di `addDocument()`. Il vantaggio pratico: `mergeDocuments()` non sa né deve sapere se un documento viene da un PDF o da un'immagine — è la stessa identica classe.
 
@@ -191,7 +263,7 @@ La lettura è **lazy e cachata**: `open()` fa deliberatamente la sola chiamata `
 
 **Trabocchetto risolto qui**: `compose_pdf` (e `merge_pdfs`) costruiscono un `Document` nuovo di zecca e vi riportano solo `/Root` — mai `/Info`. Quindi un commit che passa da `compose_pdf` (cioè con un'eliminazione o un riordino) **cancellava i metadati come effetto collaterale**. `computeCommittedBytes()` ora, quando la sequenza delle pagine cambia, riscrive l'intera baseline dei metadati sopra le modifiche pendenti, non solo le modifiche.
 
-**Timeline navigabile (`history()` / `goToHistoryIndex(index)`)**: ogni snapshot porta con sé un'etichetta che descrive *come si è arrivati a quello stato* ("Elimina pagina 2", "Conferma modifiche (3 pagine)"), non l'azione che ne esce — così la lista è semplicemente `[stati passati…, stato corrente, stati annullati…]`, con lo stato iniziale sempre all'indice 0 ("Documento aperto"). `history()` la restituisce in ordine cronologico con `current: true` su una sola voce; l'etichetta dello stato corrente vive in un campo a parte (`currentLabel`) finché quello stato non diventa passato o futuro. `goToHistoryIndex(index)` salta a qualunque voce **rigiocando `undo()`/`redo()`** finché non ci arriva, invece di avere una propria logica di ripristino: un percorso di codice solo, niente da tenere allineato. Nell'editor questo è il riquadro "Cronologia modifiche (debug)" sotto la toolbar — una riga per passo, quella corrente evidenziata, quelle annullate in grigio, e un click salta direttamente a quello stato per quanti passi siano.
+**Timeline navigabile (`history()` / `goToHistoryIndex(index)`)**: ogni snapshot porta con sé un'etichetta che descrive *come si è arrivati a quello stato* ("Elimina pagina 2", "Applica modifiche (3 pagine)"), non l'azione che ne esce — così la lista è semplicemente `[stati passati…, stato corrente, stati annullati…]`, con lo stato iniziale sempre all'indice 0 ("Documento aperto"). `history()` la restituisce in ordine cronologico con `current: true` su una sola voce; l'etichetta dello stato corrente vive in un campo a parte (`currentLabel`) finché quello stato non diventa passato o futuro. `goToHistoryIndex(index)` salta a qualunque voce **rigiocando `undo()`/`redo()`** finché non ci arriva, invece di avere una propria logica di ripristino: un percorso di codice solo, niente da tenere allineato. Nell'editor questo è il riquadro "Cronologia modifiche (debug)" sotto la toolbar — una riga per passo, quella corrente evidenziata, quelle annullate in grigio, e un click salta direttamente a quello stato per quanti passi siano.
 
 Merge e split restano **fuori** da questa cronologia: creano documenti *nuovi* invece di mutarne uno, quindi non c'è uno stato precedente da ripristinare dentro un singolo `PdfDocument` — annullare un merge sarebbe un'operazione a livello di `PdfEditor` (rimuovere il documento risultante), che è un'altra cosa.
 
@@ -257,10 +329,10 @@ Registrati una sola volta con un side-effect import (`import "./webcomponents"` 
 
 **Verifica** (`www/e2e/editor.mjs`, `pnpm test:editor`): stesso pattern delle altre suite, ma attraversa gli shadow root reali (`el.shadowRoot.querySelector(...)`) invece del DOM normale. Copre il flusso completo: apertura di due documenti, drag & drop reale tramite `locator.dragTo()` di Playwright (non un evento sintetico — un vero `DataTransfer`), rotazione + eliminazione (verificate come stato locale, non come chiamate), commit (il conteggio pagine scende), merge dei due documenti — con la rotazione committata sulla prima pagina ancora visibile nel documento unito finale, prova che sopravvive all'intera pipeline (rotate pendente → commit → merge) — l'import di un JPEG unito a un PDF vero (una pagina in più nella griglia, renderizzata correttamente) — e infine la barra di avanzamento sulla pill: apre `ten_pages.pdf` e verifica che il riempimento della pill cresca durante il rendering (`0% < width < 100%`) e che finisca marcata "done" (riempimento al 100% + `.render-done`) una volta completato. Il test del riordino a livello di modello (rimappatura della rotazione sulla pagina spostata dopo `commit()`) vive invece in `pdf-model.mjs`, più mirato e senza bisogno di un vero drag.
 
-### Nota su Vite e `pkg/`/`pkg-full/`
+### Nota su Vite e i pacchetti collegati
 
-`www/vite.config.ts` imposta `server.fs.allow: [".."]`: senza questa opzione Vite risponde `403` quando la pagina prova a caricare `../pkg/pdfrs_bg.wasm` o `../pkg-full/pdfrs_bg.wasm`, perché quei file stanno fuori dalla root del progetto `www/`.
+`www/vite.config.ts` imposta `server.fs.allow: [".."]`. Senza questa opzione, Vite risponde `403` quando la pagina prova a caricare i sorgenti di `../packages/pdfrs-editor` o i file di `../pkg-npm`, perché stanno fuori dalla root del progetto `www/`.
 
 ## Package manager
 
-Il progetto usa **pnpm** per `www/` (non npm/yarn): `pnpm install`, `pnpm add -D <pacchetto>@latest` per aggiornare le dipendenze. Il lockfile è `www/pnpm-lock.yaml`.
+Il progetto usa **pnpm** (non npm né yarn), sia per `www/` sia per `packages/pdfrs-editor/`: `pnpm install` per installare, `pnpm add -D <pacchetto>@latest` per aggiornare. Ogni cartella ha il suo lockfile.
