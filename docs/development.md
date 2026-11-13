@@ -209,6 +209,13 @@ Nota sulla compressione: `save()` non chiama `Document::compress()`, quindi i du
 - **`image_extract::extract`** (build completa): un JPEG semplice (un solo filtro DCT, RGB o grigio, 8 bit, senza maschera) torna così com'è; tutto il resto passa da un `Device` di hayro che intercetta `draw_image` e decodifica con `RasterImage::with_rgba` (ogni formato, spazi colore, SMask) → PNG.
 - **Nel modello** le rimozioni sono una modifica in sospeso (`removeImages`/`restoreImages`, nello snapshot dell'annullamento) applicata per prima, prima delle annotazioni, in `computeCommittedBytes` ed `exportPages`. `insertPages` unisce i file e rinumera gli oggetti, quindi gli id dei Form in sospeso vengono rimappati (stessa pagina, stessa posizione nell'ordine di disegno).
 
+### Pagine nate da una foto (`PdfDocument.setPhotoPage`)
+
+Una pagina creata da un JPEG (`PdfDocument.fromImage`, `insertImage`) ricorda la foto e le opzioni di pagina (`photoPages()`), nello stato annullabile. `setPhotoPage(page, options)` la rifà da capo con `image_to_pdf` su un'altra pagina (A4, Letter, dimensione reale): la nuova pagina viene aggiunta alla baseline come in `insertPages` e prende il **posto** della vecchia nell'ordine, con le sue rotazioni, eliminazioni e annotazioni in sospeso. Ha un id nuovo, che il metodo restituisce. La vecchia resta nella baseline, fuori dall'ordine, e il commit successivo la scarta. Per questo `getImages` filtra le pagine fuori dall'ordine.
+
+- **Quando la foto si perde**: al commit, per le pagine con rotazioni, annotazioni o immagini rimosse, che vengono scritte nella pagina e che una pagina rifatta perderebbe. Unione, estrazione e spostamento di pagine portano la foto con sé solo per le pagine invariate (stessa regola del riuso delle anteprime, `changedPages`).
+- **`PageInfo.originalNumber`**: il numero della pagina nel documento all'ultimo commit (o all'apertura), quello che l'app mostra come «era 4». Prima l'app confrontava l'id con la posizione, che dava risultati sbagliati per le pagine inserite e per quelle rifatte: una pagina rifatta eredita il numero di quella che sostituisce, una pagina inserita non ne ha (`null`).
+
 ### Modello logico del PDF: `PdfDocument` / `PdfEditor` (`packages/pdfrs-editor/src/pdf-model/`)
 
 Sopra le funzioni stateless viste finora c'è un livello di modello puro (nessun DOM, nessun riferimento a `window`/`document`), pensato per essere riusato da un front qualsiasi — anche il futuro front Vue in repo separata:

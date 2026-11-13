@@ -80,7 +80,27 @@ interface DocumentSnapshot {
   annotations: Map<AnnotationId, PageAnnotation>;
   removedImages: Set<string>;
   baselineImages: PdfImages | null;
+  photos: Map<PageId, PhotoSource>;
+  appliedPageCount: number;
+  replacedFrom: Map<PageId, PageId>;
 }
+
+/** The JPEG a page was made from, and the page it was put on: kept so the page can be made again on another one. */
+export interface PhotoSource {
+  jpeg: Uint8Array;
+  options: ImagePageOptions;
+}
+
+const samePageOptions = (a: ImagePageOptions, b: ImagePageOptions) =>
+  (a.pageSize ?? "native") === (b.pageSize ?? "native") &&
+  (a.orientation ?? "auto") === (b.orientation ?? "auto") &&
+  (a.margin ?? 0) === (b.margin ?? 0);
+
+const PAGE_NAMES: Record<NonNullable<ImagePageOptions["pageSize"]>, string> = {
+  a4: "su A4",
+  letter: "su Letter",
+  native: "a dimensione reale",
+};
 
 /** Italian labels for the history entries, so a step reads "Modifica metadati (titolo)". */
 const METADATA_LABELS: Record<MetadataField, string> = {
@@ -182,6 +202,17 @@ export class PdfDocument {
   // Image draws to take away (placement ids from `getImages`), not applied
   // yet: part of the undoable state, like the annotations.
   private readonly removedImages = new Set<string>();
+  // Pages made from a JPEG (opened as one, or inserted), with the photo and
+  // the page it's on, so `setPhotoPage` can put it on another. Part of the
+  // undoable state. Dropped for a page once it's changed in a way a new
+  // page couldn't carry (see `commit`).
+  private readonly photos = new Map<PageId, PhotoSource>();
+  // How many pages the document had when last applied (or opened): ids up
+  // to it are the pages it had then, numbered as they were (see
+  // `PageInfo.originalNumber`); ids past it were added since.
+  private appliedPageCount: number;
+  // A photo page put on another page (`setPhotoPage`) → the page it replaced.
+  private readonly replacedFrom = new Map<PageId, PageId>();
   private undoStack: DocumentSnapshot[] = [];
   private redoStack: DocumentSnapshot[] = [];
   // Describes how the *current* state was reached; moves onto a snapshot as
@@ -195,6 +226,7 @@ export class PdfDocument {
     this.bytes = bytes;
     this.pageCount = pageCount;
     this.locked = locked;
+    this.appliedPageCount = pageCount;
     this.order = identityOrder(pageCount);
   }
 
@@ -229,7 +261,84 @@ export class PdfDocument {
    */
   static async fromImage(bytes: Uint8Array, options: ImagePageOptions = {}): Promise<PdfDocument> {
     const pdfBytes = await image_to_pdf(bytes, options);
-    return PdfDocument.open(pdfBytes);
+    const doc = await PdfDocument.open(pdfBytes);
+    doc.photos.set(1, { jpeg: bytes, options: { ...options } });
+    return doc;
+  }
+
+  // --- Pages made from a photo ---------------------------------------------
+
+  /** The pages made from a JPEG, with the page options each is on now. */
+  photoPages(): Map<PageId, ImagePageOptions> {
+    return new Map([...this.photos].map(([page, photo]) => [page, { ...photo.options }]));
+  }
+
+  /** @internal What a page was made from, for `PdfEditor` to carry it into another document. */
+  photoSource(page: PageId): PhotoSource | undefined {
+    return this.photos.get(page);
+  }
+
+  /** @internal See `photoSource`: the page `page` here is that photo, as it is. */
+  adoptPhoto(page: PageId, photo: PhotoSource): void {
+    this.photos.set(page, photo);
+  }
+
+  /** Adds a page made from a JPEG (see `insertPages`), remembering the photo so its page can be changed later. */
+  async insertImage(jpeg: Uint8Array, options: ImagePageOptions = {}, at?: number): Promise<PageId> {
+    const pdf = await image_to_pdf(jpeg, options);
+    const [page] = await this.insertPages(pdf, at, "Inserisci foto");
+    if (page === undefined) throw new Error("la foto non ha prodotto alcuna pagina");
+    this.photos.set(page, { jpeg, options: { ...options } });
+    return page;
+  }
+
+  /**
+   * Puts the photo page `page` on another page - A4, Letter, or the photo's
+   * own size - by making it again from its JPEG. The new page takes the old
+   * one's place in the order, and its pending rotation, deletion and
+   * annotations; it has a new id, which is returned (the same id when
+   * nothing changes). One undo step.
+   */
+  async setPhotoPage(page: PageId, options: ImagePageOptions): Promise<PageId> {
+    const photo = this.photos.get(page);
+    if (!photo) throw new Error(`la pagina ${page} non è una foto`);
+    const position = this.order.indexOf(page);
+    if (position === -1) throw new Error(`pagina ${page} inesistente`);
+    if (samePageOptions(photo.options, options)) return page;
+
+    const before = this.snapshot(this.currentLabel);
+    const pdf = await image_to_pdf(photo.jpeg, options);
+    // As in insertPages: merging keeps only /Root, so /Info is written back.
+    const metadata = await this.ensureBaselineMetadata();
+    let merged = await merge_pdfs([this.bytes, pdf]);
+    if (Object.keys(metadata).length > 0) merged = await write_metadata(merged, { ...metadata });
+    const removals = this.removedImages.size > 0 ? await this.remapRemovals(merged) : null;
+
+    const replacement = this.pageCount + 1;
+    this.bytes = merged;
+    this.pageCount += 1;
+    this.baselineImages = null;
+    // The old page stays in the baseline, out of the order: the next commit drops it.
+    this.order[position] = replacement;
+    const rotation = this.rotations.get(page);
+    if (rotation !== undefined) {
+      this.rotations.delete(page);
+      this.rotations.set(replacement, rotation);
+    }
+    if (this.deletions.delete(page)) this.deletions.add(replacement);
+    for (const [id, annotation] of this.annotationsById) {
+      if (annotation.page === page) this.annotationsById.set(id, { ...annotation, page: replacement });
+    }
+    if (removals) {
+      this.removedImages.clear();
+      // Removals on the old page went with it: the new one is a fresh picture.
+      for (const id of removals) if (!id.startsWith(`p${page}#`)) this.removedImages.add(id);
+    }
+    this.photos.delete(page);
+    this.photos.set(replacement, { jpeg: photo.jpeg, options: { ...options } });
+    this.replacedFrom.set(replacement, page);
+    this.recordSnapshot(before, `Foto ${PAGE_NAMES[options.pageSize ?? "native"]} (pagina ${position + 1})`);
+    return replacement;
   }
 
   getPageCount(): number {
@@ -347,6 +456,9 @@ export class PdfDocument {
       annotations: new Map(this.annotationsById),
       removedImages: new Set(this.removedImages),
       baselineImages: this.baselineImages,
+      photos: new Map(this.photos),
+      appliedPageCount: this.appliedPageCount,
+      replacedFrom: new Map(this.replacedFrom),
     };
   }
 
@@ -376,6 +488,12 @@ export class PdfDocument {
     this.removedImages.clear();
     for (const id of snapshot.removedImages) this.removedImages.add(id);
     this.baselineImages = snapshot.baselineImages;
+
+    this.photos.clear();
+    for (const [page, photo] of snapshot.photos) this.photos.set(page, photo);
+    this.appliedPageCount = snapshot.appliedPageCount;
+    this.replacedFrom.clear();
+    for (const [page, old] of snapshot.replacedFrom) this.replacedFrom.set(page, old);
   }
 
   /**
@@ -802,7 +920,11 @@ export class PdfDocument {
    */
   async getImages(): Promise<PdfImages> {
     if (!this.baselineImages) this.baselineImages = await list_images(this.bytes);
-    return this.baselineImages;
+    // A page replaced by `setPhotoPage` is still in the baseline, but not in the document.
+    const shown = new Set(this.order);
+    const placements = this.baselineImages.placements.filter((placement) => shown.has(placement.page));
+    const drawn = new Set(placements.map((placement) => placement.image));
+    return { images: this.baselineImages.images.filter((image) => drawn.has(image.key)), placements };
   }
 
   /** The placement ids waiting to be removed. */
@@ -1089,8 +1211,23 @@ export class PdfDocument {
   async commit(): Promise<void> {
     if (!this.hasPendingChanges()) return;
     const before = this.snapshot(this.currentLabel);
+    // A photo page keeps its photo through the commit only if it comes out
+    // as its photo alone: rotations, annotations and removals get written
+    // into the page, and making it again from the JPEG would lose them.
+    const changed = new Set([...this.pagesWithAnnotations(), ...this.pagesWithImageRemovals(), ...this.rotations.keys()]);
+    const photos = new Map<PageId, PhotoSource>();
+    this.allPageIds()
+      .filter((id) => !this.deletions.has(id))
+      .forEach((id, index) => {
+        const photo = this.photos.get(id);
+        if (photo && !changed.has(id)) photos.set(index + 1, photo);
+      });
     this.bytes = await this.computeCommittedBytes();
+    this.photos.clear();
+    for (const [page, photo] of photos) this.photos.set(page, photo);
+    this.replacedFrom.clear();
     this.pageCount = this.order.length - this.deletions.size;
+    this.appliedPageCount = this.pageCount;
     this.rotations.clear();
     this.deletions.clear();
     this.pendingMetadata.clear();
@@ -1119,6 +1256,7 @@ export class PdfDocument {
     this.baselineMetadata = null;
     this.baselineImages = null;
     this.removedImages.clear();
+    this.photos.clear();
     this.recordSnapshot(before, "Cifra documento");
   }
 
@@ -1127,10 +1265,13 @@ export class PdfDocument {
     const before = this.snapshot(this.currentLabel);
     this.bytes = await decrypt_pdf(this.bytes, password);
     this.pageCount = await page_count(this.bytes);
+    this.appliedPageCount = this.pageCount;
+    this.replacedFrom.clear();
     this.previewCache.clear();
     this.baselineMetadata = null;
     this.baselineImages = null;
     this.removedImages.clear();
+    this.photos.clear();
     this.order = identityOrder(this.pageCount);
     this.recordSnapshot(before, "Decifra documento");
   }
@@ -1198,7 +1339,15 @@ export class PdfDocument {
       id,
       pendingRotation: this.rotations.get(id) ?? 0,
       markedForDeletion: this.deletions.has(id),
+      originalNumber: this.originalNumber(id),
     };
+  }
+
+  /** See `PageInfo.originalNumber`. */
+  private originalNumber(id: PageId): PageId | null {
+    let page = id;
+    for (let hops = 0; this.replacedFrom.has(page) && hops < 1000; hops++) page = this.replacedFrom.get(page)!;
+    return page <= this.appliedPageCount ? page : null;
   }
 
   private allPageIds(): PageId[] {

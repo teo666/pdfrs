@@ -11,6 +11,13 @@ export interface PageInfo {
   /** Degrees not yet committed (multiple of 90, delta on top of whatever rotation the page already has). */
   pendingRotation: number;
   markedForDeletion: boolean;
+  /**
+   * Its number in the document as last applied (or as opened): where it
+   * comes from, for a UI to say "was page 4" after a move. A photo page put
+   * on another page keeps the number of the page it replaced; a page added
+   * since has none (null).
+   */
+  originalNumber: PageId | null;
 }
 
 export interface PagePreview extends PageInfo {

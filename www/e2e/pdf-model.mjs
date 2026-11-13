@@ -490,6 +490,64 @@ async function main() {
     [photoJpgBytes, fourPagesBytes],
   );
 
+  // --- Photo pages remember their JPEG: put on another page later (one
+  // undo step, pending edits following the new page), kept through a
+  // commit, an insertion and a merge.
+  results["setPhotoPage remakes a photo page on another page size, undoably"] = await page.evaluate(
+    async ([photo, four]) => {
+      const { PdfEditor, PdfDocument } = window.__pdfModel;
+      const pngWidth = (png) => new DataView(png.buffer, png.byteOffset).getUint32(16);
+      const a4 = { pageSize: "a4", orientation: "auto", margin: 28.35 };
+      const editor = new PdfEditor();
+      const id = await editor.addImage(new Uint8Array(photo), a4);
+      const doc = editor.getDocument(id);
+      const startsOnA4 = doc.photoPages().get(1)?.pageSize === "a4";
+      const a4Width = pngWidth((await doc.getPreview(1, 1)).png);
+
+      doc.rotatePage(1, 90);
+      const replaced = await doc.setPhotoPage(1, { pageSize: "native" });
+      const [shown] = doc.pages();
+      const followed =
+        shown.id === replaced && shown.pendingRotation === 90 && shown.originalNumber === 1 && doc.pages().length === 1;
+      const label = doc.history().at(-1).label;
+      const imagesOnShown = (await doc.getImages()).placements.every((p) => p.page === replaced);
+      const nativeWidth = pngWidth((await doc.getPreview(replaced, 1)).png);
+
+      doc.undo();
+      const undone = doc.pages()[0].id === 1 && doc.photoPages().get(1)?.pageSize === "a4";
+      doc.redo();
+      doc.rotatePage(replaced, -90); // back upright: the commit keeps the photo
+      await doc.commit();
+      const kept = doc.getPageCount() === 1 && doc.photoPages().get(1)?.pageSize === "native";
+
+      const otherId = await editor.addDocument(new Uint8Array(four));
+      const other = editor.getDocument(otherId);
+      const inserted = await other.insertImage(new Uint8Array(photo), { pageSize: "letter" }, 0);
+      const insertedOk =
+        other.pages()[0].id === inserted &&
+        other.pages()[0].originalNumber === null &&
+        other.pages()[1].originalNumber === 1 &&
+        other.photoPages().get(inserted)?.pageSize === "letter";
+
+      const merged = editor.getDocument(await editor.mergeDocuments([id, otherId], { applyPending: true }));
+      const carried = merged.photoPages().size === 2;
+
+      return (
+        startsOnA4 &&
+        a4Width > 800 &&
+        followed &&
+        label === "Foto a dimensione reale (pagina 1)" &&
+        imagesOnShown &&
+        nativeWidth === 400 &&
+        undone &&
+        kept &&
+        insertedOk &&
+        carried
+      );
+    },
+    [photoJpgBytes, fourPagesBytes],
+  );
+
   // --- PdfEditor.mergeDocuments / splitDocument register new documents with the right page counts ---
   results["PdfEditor.mergeDocuments produces a new document with the summed page count"] = await page.evaluate(
     async ({ bytesA, bytesB }) => {

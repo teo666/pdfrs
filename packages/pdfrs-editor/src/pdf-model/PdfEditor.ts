@@ -68,6 +68,8 @@ export class PdfEditor {
         for (const [scale, png] of source.cachedEntriesForPage(page)) {
           mergedDoc.primeCache(offset + page, scale, png);
         }
+        const photo = source.photoSource(page);
+        if (photo) mergedDoc.adoptPhoto(offset + page, photo);
       }
       offset += source.getPageCount();
     }
@@ -95,6 +97,9 @@ export class PdfEditor {
         for (const [scale, png] of source.cachedEntriesForPage(page.id)) {
           mergedDoc.primeCache(position, scale, png);
         }
+        // A photo page that comes out as its photo alone can still change page there.
+        const photo = source.photoSource(page.id);
+        if (photo) mergedDoc.adoptPhoto(position, photo);
       }
     }
 
@@ -127,6 +132,8 @@ export class PdfEditor {
       const newId = inserted[index];
       if (newId === undefined || changed.has(page)) return;
       for (const [scale, png] of source.cachedEntriesForPage(page)) target.primeCache(newId, scale, png);
+      const photo = source.photoSource(page);
+      if (photo) target.adoptPhoto(newId, photo);
     });
 
     if (options.move) source.deletePages(pages);
@@ -152,6 +159,8 @@ export class PdfEditor {
       for (const [scale, png] of source.cachedEntriesForPage(page)) {
         extracted.primeCache(index + 1, scale, png);
       }
+      const photo = source.photoSource(page);
+      if (photo) extracted.adoptPhoto(index + 1, photo);
     });
 
     return extractedId;
