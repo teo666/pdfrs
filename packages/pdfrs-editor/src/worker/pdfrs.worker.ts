@@ -48,7 +48,13 @@ const coreMethods = {
   write_outline,
 } as const satisfies Record<string, (...args: never[]) => Promise<unknown>>;
 
-const FULL_METHODS = new Set(["render_page_preview", "image_to_pdf", "extract_image"]);
+const FULL_METHODS = new Set([
+  "render_page_preview",
+  "image_to_pdf",
+  "extract_image",
+  "replace_image",
+  "compress_images",
+]);
 
 // Cached per worker instance: each worker that ends up needing the full
 // build instantiates its own copy, the first time it's asked for. Workers

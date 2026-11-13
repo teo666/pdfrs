@@ -251,6 +251,37 @@ pub async fn extract_image(
     Ok(out.into())
 }
 
+/// Puts the picture `image` (a JPEG or a PNG file) in the place of the
+/// image `key` (from `list_images`), wherever that image is drawn. A
+/// picture of other proportions is fitted inside the old one's box, with
+/// transparent margins; the pages themselves don't change.
+#[cfg(all(feature = "preview", feature = "image-import"))]
+#[wasm_bindgen]
+pub async fn replace_image(file: Uint8Array, key: String, image: Uint8Array) -> std::result::Result<Uint8Array, JsValue> {
+    let mut doc = load(&file.to_vec())?;
+    operations::image_edit::replace(&mut doc, &key, &image.to_vec())?;
+    Ok(save(&mut doc)?)
+}
+
+/// Recompresses the PDF's images to make it lighter. `options` is
+/// `{ level?: "high"|"balanced"|"small" }` (default "balanced"). Returns
+/// `{ bytes, considered, recompressed, bytesBefore, bytesAfter }`: the new
+/// PDF, how many images could be recompressed, how many came out lighter
+/// and were put in, and those images' stored size before and after.
+#[cfg(all(feature = "preview", feature = "image-import"))]
+#[wasm_bindgen]
+pub async fn compress_images(file: Uint8Array, options: JsValue) -> std::result::Result<JsValue, JsValue> {
+    let options: operations::image_edit::CompressOptions = if options.is_undefined() || options.is_null() {
+        Default::default()
+    } else {
+        parse_options(options)?
+    };
+    let (bytes, report) = operations::image_edit::compress(&file.to_vec(), options)?;
+    let out = serde_wasm_bindgen::to_value(&report).map_err(|err| PdfrsError::Options(err.to_string()))?;
+    js_sys::Reflect::set(&out, &"bytes".into(), &Uint8Array::from(bytes.as_slice()).into())?;
+    Ok(out)
+}
+
 /// A PDF's outline (bookmarks) as a flat list in reading order: `[{ title,
 /// level, page?, top?, open }]` - `level` 1 for the top, `page` 1-based and
 /// absent for an entry pointing outside the document. Empty when there is none.

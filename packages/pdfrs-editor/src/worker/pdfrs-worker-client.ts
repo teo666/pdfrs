@@ -3,7 +3,7 @@
 // round-trip to the worker instead of a direct call, wrapped back into a
 // Promise so call sites don't need to know a worker is involved at all.
 import { createPdfrsWorker } from "./create-pdfrs-worker";
-import type { ExtractedImage, ImagePageOptions, OutlineEntry, PdfImages } from "../pdf-model/types";
+import type { CompressionLevel, ExtractedImage, ImagePageOptions, OutlineEntry, PdfImages } from "../pdf-model/types";
 import type { TextStyle } from "../text/layout";
 import type { WorkerRequest, WorkerResponse } from "./worker-protocol";
 
@@ -129,6 +129,29 @@ export function remove_images(file: Uint8Array, placements: string[]): Promise<U
 /** One image of the PDF as a file (JPEG as stored, or PNG); `maxSize` caps the longer side, for thumbnails. Full build. */
 export function extract_image(file: Uint8Array, key: string, maxSize?: number): Promise<ExtractedImage> {
   return call("extract_image", [file, key, maxSize]);
+}
+
+/**
+ * Puts the picture `image` (a JPEG or PNG file) in the place of the image
+ * `key`, wherever it is drawn; one of other proportions is fitted inside
+ * the old box with transparent margins. Full build.
+ */
+export function replace_image(file: Uint8Array, key: string, image: Uint8Array): Promise<Uint8Array> {
+  return call("replace_image", [file, key, image]);
+}
+
+/** What `compress_images` returns: the new PDF, and how its images went. */
+export interface CompressImagesResult {
+  bytes: Uint8Array;
+  considered: number;
+  recompressed: number;
+  bytesBefore: number;
+  bytesAfter: number;
+}
+
+/** Recompresses the PDF's images (as JPEG, scaled to what `level` needs where they're drawn). Full build. */
+export function compress_images(file: Uint8Array, options: { level?: CompressionLevel } = {}): Promise<CompressImagesResult> {
+  return call("compress_images", [file, options]);
 }
 
 /** True when the PDF can't be opened without a password (it reads as having no pages until decrypted). */

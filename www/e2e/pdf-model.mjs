@@ -490,6 +490,86 @@ async function main() {
     [photoJpgBytes, fourPagesBytes],
   );
 
+  // --- Phase 2: an image replaced by another picture (applied at once,
+  // undoable, previews of its pages redrawn; other proportions fitted in the
+  // old box), and a lighter copy with the images recompressed.
+  results["replaceImage puts another picture in the image's place, undoably"] = await page.evaluate(
+    async (photo) => {
+      const { PdfEditor } = window.__pdfModel;
+      const editor = new PdfEditor();
+      const doc = editor.getDocument(await editor.addImage(new Uint8Array(photo)));
+      const before = (await doc.getImages()).images[0];
+      const previewBefore = (await doc.getPreview(1, 0.2)).png;
+
+      // A blue square PNG in place of the 4:3 photo.
+      const canvas = new OffscreenCanvas(90, 90);
+      const context = canvas.getContext("2d");
+      context.fillStyle = "#0000ff";
+      context.fillRect(0, 0, 90, 90);
+      const square = new Uint8Array(await (await canvas.convertToBlob({ type: "image/png" })).arrayBuffer());
+
+      await doc.replaceImage(before.key, square);
+      const after = (await doc.getImages()).images[0];
+      const previewAfter = (await doc.getPreview(1, 0.2)).png;
+      const label = doc.history().at(-1).label;
+      const action = doc.history().at(-1).action;
+      doc.undo();
+      const undone = (await doc.getImages()).images[0];
+
+      return (
+        after.key === before.key &&
+        after.width === 120 &&
+        after.height === 90 &&
+        after.hasMask &&
+        previewAfter !== previewBefore &&
+        label === "Sostituisci immagine (pagina 1)" &&
+        action.type === "replaceImage" &&
+        undone.width === before.width &&
+        undone.format === "jpeg"
+      );
+    },
+    photoJpgBytes,
+  );
+
+  results["compressDocument makes a lighter copy, or none when nothing gets lighter"] = await page.evaluate(
+    async (four) => {
+      const { PdfEditor } = window.__pdfModel;
+      const editor = new PdfEditor();
+      // A heavy photo: 2000×1500 grainy pixels, at JPEG quality 0.95, on an A4 page.
+      const canvas = new OffscreenCanvas(2000, 1500);
+      const context = canvas.getContext("2d");
+      const pixels = context.createImageData(2000, 1500);
+      for (let i = 0; i < pixels.data.length; i += 4) {
+        const grain = Math.floor(Math.random() * 48);
+        pixels.data[i] = 150 + grain;
+        pixels.data[i + 1] = 90 + (grain >> 1);
+        pixels.data[i + 2] = 60;
+        pixels.data[i + 3] = 255;
+      }
+      context.putImageData(pixels, 0, 0);
+      const jpeg = new Uint8Array(await (await canvas.convertToBlob({ type: "image/jpeg", quality: 0.95 })).arrayBuffer());
+      const photoId = await editor.addImage(jpeg, { pageSize: "a4", orientation: "auto", margin: 0 });
+      const original = editor.getDocument(photoId).getBytes();
+
+      const result = await editor.compressDocument(photoId, "balanced");
+      const copy = result.id === null ? null : editor.getDocument(result.id);
+      const textOnly = await editor.compressDocument(await editor.addDocument(new Uint8Array(four)));
+
+      return (
+        copy !== null &&
+        result.recompressed === 1 &&
+        result.bytesAfter < result.bytesBefore / 2 &&
+        copy.getBytes().length === result.bytesAfter &&
+        copy.getPageCount() === 1 &&
+        editor.getDocument(photoId).getBytes() === original &&
+        textOnly.id === null &&
+        textOnly.considered === 0 &&
+        textOnly.bytesAfter === textOnly.bytesBefore
+      );
+    },
+    fourPagesBytes,
+  );
+
   // --- Photo pages remember their JPEG: put on another page later (one
   // undo step, pending edits following the new page), kept through a
   // commit, an insertion and a merge.
