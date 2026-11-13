@@ -17,6 +17,10 @@
 // of thumbnails turns into seconds. Holding them costs a copy per worker,
 // so each keeps only its last few documents, and lets them all go once the
 // pool has had nothing to do for a while.
+//
+// A worker also reads each document it holds only once (a `PreviewDocument`,
+// see pdfrs.worker.ts): a page then costs drawing it, not copying and
+// parsing the whole file again.
 import { createPdfrsWorker } from "./create-pdfrs-worker";
 import type { WorkerRequest, WorkerResponse } from "./worker-protocol";
 

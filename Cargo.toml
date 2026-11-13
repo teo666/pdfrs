@@ -17,7 +17,7 @@ default = ["console_error_panic_hook", "preview", "image-import"]
 # feature so a build that only needs merge/split/rotate/compose/encrypt/
 # decrypt can drop them - see docs/development.md for the "core"/"full"
 # wasm-pack build split this enables.
-preview = ["dep:hayro"]
+preview = ["dep:hayro", "dep:self_cell"]
 image-import = ["dep:image"]
 
 [dependencies]
@@ -51,6 +51,10 @@ console_error_panic_hook = { version = "0.1.7", optional = true }
 # don't need CJK support for previews; `simd` is a no-op on wasm32 targets so
 # it's dropped too, both to keep the wasm bundle smaller.
 hayro = { version = "0.9", default-features = false, features = ["embed-fonts"], optional = true }
+# Lets `PreviewDocument` keep a parsed `Pdf` together with the `RenderCache`
+# that borrows from it (fonts, glyphs, colour spaces shared between pages),
+# without unsafe code. Tiny, no dependencies.
+self_cell = { version = "1", optional = true }
 
 # Used only to read a JPEG's dimensions/color type (header parse, no full
 # pixel decode) and to encode JPEGs for the fixture generator - the JPEG

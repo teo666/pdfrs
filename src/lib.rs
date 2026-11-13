@@ -346,6 +346,43 @@ pub async fn render_page_preview(file: Uint8Array, page: u32, scale: f32) -> std
     Ok(Uint8Array::from(png.as_slice()))
 }
 
+/// A PDF read once and kept in memory, to render many of its pages: the file
+/// is copied into wasm and parsed only when the object is built, and fonts,
+/// glyphs and colour spaces shared between pages are decoded once. Rendering
+/// the 10th page costs the page alone, not the whole file again as with
+/// `render_page_preview`. Expects already-decrypted bytes.
+///
+/// It holds a copy of the file inside the wasm memory until `free()` is
+/// called: call it when done (or use `using`, where supported).
+///
+/// Behind the `preview` feature, like `render_page_preview`.
+#[cfg(feature = "preview")]
+#[wasm_bindgen]
+pub struct PreviewDocument(operations::preview::PreviewDocument);
+
+#[cfg(feature = "preview")]
+#[wasm_bindgen]
+impl PreviewDocument {
+    /// Reads `file`. Throws if it isn't a PDF hayro can read.
+    #[wasm_bindgen(constructor)]
+    pub fn new(file: Vec<u8>) -> std::result::Result<PreviewDocument, JsValue> {
+        Ok(PreviewDocument(operations::preview::PreviewDocument::new(file)?))
+    }
+
+    /// Number of pages.
+    #[wasm_bindgen(getter)]
+    pub fn page_count(&self) -> u32 {
+        self.0.page_count()
+    }
+
+    /// Renders `page` (1-indexed) to a PNG image; `scale` multiplies the
+    /// page's native size, as in `render_page_preview`.
+    pub fn render_page(&self, page: u32, scale: f32) -> std::result::Result<Uint8Array, JsValue> {
+        let png = self.0.render_page(page, scale)?;
+        Ok(Uint8Array::from(png.as_slice()))
+    }
+}
+
 /// Builds a one-page PDF with `file` (a JPEG) drawn on it. `options` is a JS
 /// object `{ pageSize?: "native"|"a4"|"letter", orientation?: "portrait"|"landscape"|"auto", margin?: number }`
 /// (`margin`: points of white space around the image on an A4/Letter page)

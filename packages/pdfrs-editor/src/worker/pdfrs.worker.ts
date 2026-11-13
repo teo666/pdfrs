@@ -20,6 +20,7 @@ import init, {
   write_metadata,
   write_outline,
 } from "pdfrs.js/core";
+import type { PreviewDocument } from "pdfrs.js/full";
 import { collectTransferables, type WorkerInitMessage, type WorkerRequest, type WorkerResponse } from "./worker-protocol";
 
 // Only the "core" build's functions - merge/split/rotate/compose/encrypt/
@@ -75,15 +76,44 @@ function loadFull(): Promise<Record<string, (...args: unknown[]) => Promise<unkn
 }
 
 // Documents held for the preview pool (see preview-worker-pool.ts), by the
-// key the pool gave them: sent once, then named in every page request.
-const heldDocuments = new Map<number, Uint8Array>();
+// key the pool gave them: sent once, then named in every page request. Kept
+// as the bytes the pool sent until the first page is asked for, then as a
+// `PreviewDocument`, which has read the file and keeps what its pages share
+// (fonts, glyphs...), so the next pages don't pay for reading it again. That
+// lives in the wasm memory, outside the garbage collector's reach: whatever
+// takes one out of this map must `free()` it (see `letGo`).
+const heldDocuments = new Map<number, Uint8Array | PreviewDocument>();
+
+function letGo(key: number): void {
+  const document = heldDocuments.get(key);
+  heldDocuments.delete(key);
+  if (document && !(document instanceof Uint8Array)) document.free();
+}
+
+async function renderHeldPage(key: number, page: number, scale: number): Promise<Uint8Array> {
+  const document = heldDocuments.get(key);
+  if (!document) throw new Error(`pdfrs worker: document ${key} not held`);
+  if (!(document instanceof Uint8Array)) return document.render_page(page, scale);
+
+  const full = (await loadFull()) as unknown as typeof import("pdfrs.js/full");
+  const read = new full.PreviewDocument(document);
+  // Still the one to keep: nothing released or replaced it while the full
+  // build was loading.
+  if (heldDocuments.get(key) === document) {
+    heldDocuments.set(key, read);
+    return read.render_page(page, scale);
+  }
+  try {
+    return read.render_page(page, scale);
+  } finally {
+    read.free();
+  }
+}
 
 async function callMethod(method: string, args: unknown[]): Promise<unknown> {
   if (method === "render_held_page") {
     const [key, page, scale] = args as [number, number, number];
-    const bytes = heldDocuments.get(key);
-    if (!bytes) throw new Error(`pdfrs worker: document ${key} not held`);
-    return callMethod("render_page_preview", [bytes, page, scale]);
+    return renderHeldPage(key, page, scale);
   }
   const table = FULL_METHODS.has(method)
     ? (await loadFull())
@@ -112,7 +142,7 @@ self.onmessage = async (event: MessageEvent<WorkerInitMessage | WorkerRequest>) 
 
   if ("type" in data) {
     if (data.type === "release") {
-      for (const key of data.keys) heldDocuments.delete(key);
+      for (const key of data.keys) letGo(key);
     } else if (data.type === "wasm-module") {
       precompiledFull = data.fullModule;
       readyResolve(init({ module_or_path: data.module }));
@@ -124,8 +154,11 @@ self.onmessage = async (event: MessageEvent<WorkerInitMessage | WorkerRequest>) 
 
   const { id, method, args } = data;
   // Before anything else: the request may be about the document it carries.
-  for (const key of data.release ?? []) heldDocuments.delete(key);
-  if (data.hold) heldDocuments.set(data.hold.key, data.hold.bytes);
+  for (const key of data.release ?? []) letGo(key);
+  if (data.hold) {
+    letGo(data.hold.key);
+    heldDocuments.set(data.hold.key, data.hold.bytes);
+  }
 
   try {
     await ready;
