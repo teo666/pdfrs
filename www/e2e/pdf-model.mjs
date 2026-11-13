@@ -743,7 +743,7 @@ async function main() {
     const doc = await PdfDocument.open(new Uint8Array(bytes));
     doc.deletePage(2);
     await doc.commit();
-    const labelled = doc.history().at(-1)?.label === "Conferma modifiche (3 pagine)";
+    const labelled = doc.history().at(-1)?.label === "Applica modifiche (3 pagine)";
     doc.goToHistoryIndex(0);
     return labelled && doc.getPageCount() === 4 && !doc.hasPendingChanges();
   }, fourPagesBytes);

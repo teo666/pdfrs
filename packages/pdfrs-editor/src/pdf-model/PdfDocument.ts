@@ -1103,7 +1103,7 @@ export class PdfDocument {
     // Recorded only once the wasm work has succeeded, so a failed commit
     // leaves no phantom history step. `pushUndo()` would snapshot the
     // *new* state, hence the pre-computed `before`.
-    this.recordSnapshot(before, `Conferma modifiche (${this.pageCount} pagine)`);
+    this.recordSnapshot(before, `Applica modifiche (${this.pageCount} pagine)`);
   }
 
   /** Same computation as `commit()`, without mutating this document - a preview of the final result. */
