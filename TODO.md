@@ -25,7 +25,8 @@ In ordine di priorità suggerito.
 - [ ] **Togliere solo la rotazione** di una pagina (`PdfDocument.resetRotation`): oggi si ruota di nuovo o si annulla.
 - [x] **Indice del PDF (segnalibri)** — strumento «Indice» (albero, voce → vai alla miniatura); l'indice resta con eliminazioni, riordini, estrazioni, inserimenti e unioni (un ramo per documento). `outline.rs`, `remapOutline` nel modello.
 - [ ] **Indice, fase 2** — modificare le voci (aggiungere, rinominare, togliere, spostare); portare nel documento di destinazione le voci delle pagine trasferite; ricordare lo stato aperto/chiuso dei rami dopo un «Applica modifiche».
-- [ ] **`stamp.rs` usa la MediaBox, le anteprime la CropBox** — su una pagina con CropBox diversa, una firma posizionata sull'anteprima finisce spostata nel PDF. `images.rs` usa già CropBox∩MediaBox: allineare `stamp_matrix` a quello.
+- [x] **`stamp.rs` usa la MediaBox, le anteprime la CropBox** — firme, immagini e testo ora si posizionano sulla parte di pagina mostrata (CropBox∩MediaBox, `nup::get_visible_box`, la stessa di `images.rs`).
+- [x] **N per foglio e libretto ignorano la CropBox** — ogni pagina diventa una Form con il `BBox` sulla parte mostrata (`create_page_form_xobject` usa `get_visible_box`): sul foglio arriva solo quella, e «formato originale» è quello della pagina mostrata.
 - [ ] **Permessi del PDF protetto** (stampa, copia del testo, modifica) — questo richiede prima il motore: `encrypt` in `src/operations/crypto.rs` usa `Permissions::default()`, cioè tutto consentito.
 
 ## Ottimizzazioni future
