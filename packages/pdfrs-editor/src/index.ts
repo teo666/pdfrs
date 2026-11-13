@@ -4,7 +4,7 @@
 //
 // Everything here runs the wasm module off the main thread: the model never
 // calls "pdfrs.js" directly, only through pdfrs-worker-client.ts.
-export { PdfDocument, type GetPreviewsOptions } from "./pdf-model/PdfDocument";
+export { EmptyDocumentError, PdfDocument, type GetPreviewsOptions } from "./pdf-model/PdfDocument";
 export { PdfEditor, WrongPasswordError } from "./pdf-model/PdfEditor";
 export type * from "./pdf-model/types";
 

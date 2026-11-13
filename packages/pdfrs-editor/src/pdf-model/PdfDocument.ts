@@ -22,6 +22,7 @@ import type {
   AnnotationId,
   AssetId,
   ExtractedImage,
+  HistoryAction,
   HistoryEntry,
   ImageAsset,
   PageAnnotation,
@@ -72,6 +73,7 @@ interface PendingRotation {
 interface DocumentSnapshot {
   /** What the user did to get *into* this state - the timeline is a list of these, not of the actions leading out of them. */
   label: string;
+  action: HistoryAction;
   bytes: Uint8Array;
   pageCount: number;
   rotations: Map<PageId, number>;
@@ -123,6 +125,14 @@ export function remapOutline(entries: OutlineEntry[], pages: Map<PageId, number>
     });
   }
   return result;
+}
+
+/** Thrown when applying (or exporting) would leave no page: every page is marked for deletion. */
+export class EmptyDocumentError extends Error {
+  constructor() {
+    super("il documento risulterebbe vuoto: annulla almeno un'eliminazione prima di confermare");
+    this.name = "EmptyDocumentError";
+  }
 }
 
 const PAGE_NAMES: Record<NonNullable<ImagePageOptions["pageSize"]>, string> = {
@@ -251,6 +261,7 @@ export class PdfDocument {
   // Describes how the *current* state was reached; moves onto a snapshot as
   // soon as that state becomes a past (or future) one.
   private currentLabel = "Documento aperto";
+  private currentAction: HistoryAction = { type: "open", params: {} };
 
   /** Can't be read without a password: no pages until decrypted (see `isLocked`). */
   private readonly locked: boolean;
@@ -319,7 +330,7 @@ export class PdfDocument {
   /** Adds a page made from a JPEG (see `insertPages`), remembering the photo so its page can be changed later. */
   async insertImage(jpeg: Uint8Array, options: ImagePageOptions = {}, at?: number): Promise<PageId> {
     const pdf = await image_to_pdf(jpeg, options);
-    const [page] = await this.insertPages(pdf, at, "Inserisci foto");
+    const [page] = await this.insertPages(pdf, at, "Inserisci foto", { type: "insertPhoto", params: {} });
     if (page === undefined) throw new Error("la foto non ha prodotto alcuna pagina");
     this.photos.set(page, { jpeg, options: { ...options } });
     return page;
@@ -339,7 +350,7 @@ export class PdfDocument {
     if (position === -1) throw new Error(`pagina ${page} inesistente`);
     if (samePageOptions(photo.options, options)) return page;
 
-    const before = this.snapshot(this.currentLabel);
+    const before = this.snapshot();
     const pdf = await image_to_pdf(photo.jpeg, options);
     // As in insertPages: merging keeps only /Root, so /Info is written back.
     const metadata = await this.ensureBaselineMetadata();
@@ -376,7 +387,10 @@ export class PdfDocument {
     this.photos.delete(page);
     this.photos.set(replacement, { jpeg: photo.jpeg, options: { ...options } });
     this.replacedFrom.set(replacement, page);
-    this.recordSnapshot(before, `Foto ${PAGE_NAMES[options.pageSize ?? "native"]} (pagina ${position + 1})`);
+    this.recordSnapshot(before, `Foto ${PAGE_NAMES[options.pageSize ?? "native"]} (pagina ${position + 1})`, {
+      type: "photoPage",
+      params: { page: position + 1, pageSize: options.pageSize ?? "native" },
+    });
     return replacement;
   }
 
@@ -424,7 +438,7 @@ export class PdfDocument {
   undo(): boolean {
     const snapshot = this.undoStack.pop();
     if (!snapshot) return false;
-    this.redoStack.push(this.snapshot(this.currentLabel));
+    this.redoStack.push(this.snapshot());
     this.restore(snapshot);
     return true;
   }
@@ -433,7 +447,7 @@ export class PdfDocument {
   redo(): boolean {
     const snapshot = this.redoStack.pop();
     if (!snapshot) return false;
-    this.undoStack.push(this.snapshot(this.currentLabel));
+    this.undoStack.push(this.snapshot());
     this.restore(snapshot);
     return true;
   }
@@ -449,13 +463,18 @@ export class PdfDocument {
   history(): HistoryEntry[] {
     // `redoStack` is a stack: its last element is the state nearest to the
     // present, so it reads backwards compared to the timeline.
-    const labels = [
-      ...this.undoStack.map((snapshot) => snapshot.label),
-      this.currentLabel,
-      ...[...this.redoStack].reverse().map((snapshot) => snapshot.label),
+    const steps = [
+      ...this.undoStack.map(({ label, action }) => ({ label, action })),
+      { label: this.currentLabel, action: this.currentAction },
+      ...[...this.redoStack].reverse().map(({ label, action }) => ({ label, action })),
     ];
     const currentIndex = this.undoStack.length;
-    return labels.map((label, index) => ({ index, label, current: index === currentIndex }));
+    return steps.map(({ label, action }, index) => ({
+      index,
+      label,
+      action: { type: action.type, params: { ...action.params } },
+      current: index === currentIndex,
+    }));
   }
 
   /**
@@ -481,9 +500,10 @@ export class PdfDocument {
     this.redoStack = [];
   }
 
-  private snapshot(label: string): DocumentSnapshot {
+  private snapshot(): DocumentSnapshot {
     return {
-      label,
+      label: this.currentLabel,
+      action: this.currentAction,
       bytes: this.bytes,
       pageCount: this.pageCount,
       rotations: new Map(this.rotations),
@@ -505,6 +525,7 @@ export class PdfDocument {
   /** `rotations`/`deletions`/`previewCache` are `readonly` fields, so they're refilled in place rather than reassigned. */
   private restore(snapshot: DocumentSnapshot): void {
     this.currentLabel = snapshot.label;
+    this.currentAction = snapshot.action;
     this.bytes = snapshot.bytes;
     this.pageCount = snapshot.pageCount;
     this.order = [...snapshot.order];
@@ -543,13 +564,14 @@ export class PdfDocument {
    * only ever contains steps that actually changed something - an undo
    * always visibly does something.
    */
-  private pushUndo(action: string): void {
-    this.recordSnapshot(this.snapshot(this.currentLabel), action);
+  private pushUndo(label: string, action: HistoryAction): void {
+    this.recordSnapshot(this.snapshot(), label, action);
   }
 
   /** `pushUndo()` for the async operations, which capture their "before" state up front and only commit it to the history once the wasm call has succeeded. */
-  private recordSnapshot(snapshot: DocumentSnapshot, action: string): void {
-    this.currentLabel = action;
+  private recordSnapshot(snapshot: DocumentSnapshot, label: string, action: HistoryAction): void {
+    this.currentLabel = label;
+    this.currentAction = action;
     this.undoStack.push(snapshot);
     if (this.undoStack.length > MAX_HISTORY) this.undoStack.shift();
     this.redoStack = [];
@@ -572,7 +594,10 @@ export class PdfDocument {
     const fromIndex = this.order.indexOf(id);
     const clampedIndex = Math.max(0, Math.min(toIndex, this.order.length - 1));
     if (clampedIndex === fromIndex) return;
-    this.pushUndo(`Sposta pagina ${id} in posizione ${clampedIndex + 1}`);
+    this.pushUndo(`Sposta pagina ${id} in posizione ${clampedIndex + 1}`, {
+      type: "movePage",
+      params: { page: id, position: clampedIndex + 1 },
+    });
     this.order.splice(fromIndex, 1);
     this.order.splice(clampedIndex, 0, id);
   }
@@ -589,7 +614,10 @@ export class PdfDocument {
     // A multiple of 360 leaves the pending rotation exactly as it was - not
     // a history step.
     if (degrees % 360 === 0) return;
-    this.pushUndo(`Ruota pagina ${id} di ${degrees > 0 ? "+" : ""}${degrees}\u00b0`);
+    this.pushUndo(`Ruota pagina ${id} di ${degrees > 0 ? "+" : ""}${degrees}\u00b0`, {
+      type: "rotatePage",
+      params: { page: id, degrees },
+    });
     const current = this.rotations.get(id) ?? 0;
     const next = ((current + degrees) % 360 + 360) % 360;
     if (next === 0) this.rotations.delete(id);
@@ -599,21 +627,21 @@ export class PdfDocument {
   resetRotation(id: PageId): void {
     this.assertValidPage(id);
     if (!this.rotations.has(id)) return;
-    this.pushUndo(`Azzera rotazione pagina ${id}`);
+    this.pushUndo(`Azzera rotazione pagina ${id}`, { type: "resetRotation", params: { page: id } });
     this.rotations.delete(id);
   }
 
   deletePage(id: PageId): void {
     this.assertValidPage(id);
     if (this.deletions.has(id)) return;
-    this.pushUndo(`Elimina pagina ${id}`);
+    this.pushUndo(`Elimina pagina ${id}`, { type: "deletePage", params: { page: id } });
     this.deletions.add(id);
   }
 
   restorePage(id: PageId): void {
     this.assertValidPage(id);
     if (!this.deletions.has(id)) return;
-    this.pushUndo(`Ripristina pagina ${id}`);
+    this.pushUndo(`Ripristina pagina ${id}`, { type: "restorePage", params: { page: id } });
     this.deletions.delete(id);
   }
 
@@ -630,7 +658,10 @@ export class PdfDocument {
     }
     if (targets.length === 1) return this.rotatePage(targets[0] as PageId, degrees);
     if (targets.length === 0 || degrees % 360 === 0) return;
-    this.pushUndo(`Ruota ${targets.length} pagine di ${degrees > 0 ? "+" : ""}${degrees}\u00b0`);
+    this.pushUndo(`Ruota ${targets.length} pagine di ${degrees > 0 ? "+" : ""}${degrees}\u00b0`, {
+      type: "rotatePages",
+      params: { count: targets.length, degrees },
+    });
     for (const id of targets) {
       const next = (((this.rotations.get(id) ?? 0) + degrees) % 360 + 360) % 360;
       if (next === 0) this.rotations.delete(id);
@@ -643,7 +674,7 @@ export class PdfDocument {
     const targets = this.distinctPages(ids).filter((id) => !this.deletions.has(id));
     if (targets.length === 1) return this.deletePage(targets[0] as PageId);
     if (targets.length === 0) return;
-    this.pushUndo(`Elimina ${targets.length} pagine`);
+    this.pushUndo(`Elimina ${targets.length} pagine`, { type: "deletePages", params: { count: targets.length } });
     for (const id of targets) this.deletions.add(id);
   }
 
@@ -652,7 +683,7 @@ export class PdfDocument {
     const targets = this.distinctPages(ids).filter((id) => this.deletions.has(id));
     if (targets.length === 1) return this.restorePage(targets[0] as PageId);
     if (targets.length === 0) return;
-    this.pushUndo(`Ripristina ${targets.length} pagine`);
+    this.pushUndo(`Ripristina ${targets.length} pagine`, { type: "restorePages", params: { count: targets.length } });
     for (const id of targets) this.deletions.delete(id);
   }
 
@@ -671,7 +702,10 @@ export class PdfDocument {
     if (block.length === 1) return this.movePage(block[0] as PageId, at);
     const next = [...rest.slice(0, at), ...block, ...rest.slice(at)];
     if (next.every((id, index) => id === this.order[index])) return;
-    this.pushUndo(`Sposta ${block.length} pagine in posizione ${at + 1}`);
+    this.pushUndo(`Sposta ${block.length} pagine in posizione ${at + 1}`, {
+      type: "movePages",
+      params: { count: block.length, position: at + 1 },
+    });
     this.order = next;
   }
 
@@ -683,8 +717,13 @@ export class PdfDocument {
    * pages keep their ids, and so do their cached previews. The new pages get
    * the ids after the last one. Returns those ids, in order.
    */
-  async insertPages(bytes: Uint8Array, at?: number, label?: string): Promise<PageId[]> {
-    const before = this.snapshot(this.currentLabel);
+  async insertPages(
+    bytes: Uint8Array,
+    at?: number,
+    label?: string,
+    action?: HistoryAction,
+  ): Promise<PageId[]> {
+    const before = this.snapshot();
     const added = await page_count(bytes);
     if (added === 0) return [];
     // merge_pdfs only carries /Root over: the document's own /Info would be
@@ -710,7 +749,11 @@ export class PdfDocument {
     }
     this.pageCount += added;
     this.order.splice(index, 0, ...ids);
-    this.recordSnapshot(before, label ?? `Inserisci ${added === 1 ? "1 pagina" : `${added} pagine`}`);
+    this.recordSnapshot(
+      before,
+      label ?? `Inserisci ${added === 1 ? "1 pagina" : `${added} pagine`}`,
+      action ?? { type: "insertPages", params: { count: added } },
+    );
     return ids;
   }
 
@@ -769,6 +812,13 @@ export class PdfDocument {
   }
 
   /** What the history calls an annotation: "testo", or its image's noun. */
+  /** What an annotation is, for `HistoryAction`: text, or the image it shows (a signature unless registered as an image). */
+  private kindOf(annotation: PageAnnotation): "text" | "signature" | "image" {
+    if (annotation.text) return "text";
+    const noun = annotation.asset === null ? undefined : this.assetNouns.get(annotation.asset);
+    return noun === "immagine" ? "image" : "signature";
+  }
+
   private nounOf(annotation: PageAnnotation): string {
     if (annotation.text) return "testo";
     return (annotation.asset !== null && this.assetNouns.get(annotation.asset)) || "firma";
@@ -828,7 +878,10 @@ export class PdfDocument {
     };
     assertBox(placed);
     const id = this.nextAnnotationId++;
-    this.pushUndo(`Aggiungi ${this.nounOf({ ...placed, id })} a pagina ${annotation.page}`);
+    this.pushUndo(`Aggiungi ${this.nounOf({ ...placed, id })} a pagina ${annotation.page}`, {
+      type: "addAnnotation",
+      params: { kind: this.kindOf({ ...placed, id }), page: annotation.page },
+    });
     this.annotationsById.set(id, { ...placed, id });
     return id;
   }
@@ -858,6 +911,9 @@ export class PdfDocument {
       relinking
         ? `${capitalize(this.nounOf(source))} di nuovo come le altre copie a pagina ${source.page}`
         : `${capitalize(this.nounOf(source))} su tutte le pagine (${covered.size + targets.length})`,
+      relinking
+        ? { type: "relinkAnnotation", params: { kind: this.kindOf(source), page: source.page } }
+        : { type: "annotationOnAllPages", params: { kind: this.kindOf(source), count: covered.size + targets.length } },
     );
     const linked = { ...source, x, y, width, rotation, height, group, linked: true };
     this.annotationsById.set(id, linked);
@@ -875,7 +931,10 @@ export class PdfDocument {
   detachAnnotation(id: AnnotationId): void {
     const current = this.annotationsById.get(id);
     if (!current || !current.linked) return;
-    this.pushUndo(`${capitalize(this.nounOf(current))} modificabile solo a pagina ${current.page}`);
+    this.pushUndo(`${capitalize(this.nounOf(current))} modificabile solo a pagina ${current.page}`, {
+      type: "detachAnnotation",
+      params: { kind: this.kindOf(current), page: current.page },
+    });
     this.annotationsById.set(id, { ...current, linked: false });
   }
 
@@ -912,18 +971,19 @@ export class PdfDocument {
     ) {
       return;
     }
-    const verb = textChanged
-      ? "Modifica"
+    const [verb, type] = textChanged
+      ? ["Modifica", "editAnnotation"]
       : next.rotation !== current.rotation
-        ? "Ruota"
+        ? ["Ruota", "rotateAnnotation"]
         : next.width !== current.width || next.height !== current.height
-          ? "Ridimensiona"
-          : "Sposta";
+          ? ["Ridimensiona", "resizeAnnotation"]
+          : ["Sposta", "moveAnnotation"];
     const members = this.groupMembers(current);
     this.pushUndo(
       members.length > 1
         ? `${verb} ${this.nounOf(current)} su ${members.length} pagine`
         : `${verb} ${this.nounOf(current)} a pagina ${current.page}`,
+      { type, params: { kind: this.kindOf(current), page: current.page, pages: members.length } },
     );
     const { x, y, width, rotation, height, text } = next;
     for (const member of members) {
@@ -940,6 +1000,7 @@ export class PdfDocument {
       members.length > 1
         ? `Rimuovi ${this.nounOf(current)} da ${members.length} pagine`
         : `Rimuovi ${this.nounOf(current)} da pagina ${current.page}`,
+      { type: "removeAnnotation", params: { kind: this.kindOf(current), page: current.page, pages: members.length } },
     );
     for (const member of members) this.annotationsById.delete(member.id);
   }
@@ -999,7 +1060,7 @@ export class PdfDocument {
   removeImages(ids: string[]): void {
     const fresh = [...new Set(ids)].filter((id) => !this.removedImages.has(id));
     if (fresh.length === 0) return;
-    this.pushUndo(this.removalLabel("Rimuovi", fresh));
+    this.pushUndo(this.removalLabel("Rimuovi", fresh), this.removalAction("removeImages", fresh));
     for (const id of fresh) this.removedImages.add(id);
   }
 
@@ -1007,11 +1068,20 @@ export class PdfDocument {
   restoreImages(ids: string[]): void {
     const removed = [...new Set(ids)].filter((id) => this.removedImages.has(id));
     if (removed.length === 0) return;
-    this.pushUndo(this.removalLabel("Ripristina", removed));
+    this.pushUndo(this.removalLabel("Ripristina", removed), this.removalAction("restoreImages", removed));
     for (const id of removed) this.removedImages.delete(id);
   }
 
   /** "Rimuovi immagine (pagina 3)", "Rimuovi 2 immagini da 12 pagine"... */
+  /** `removalLabel` as data: how many draws, on how many pages, and the page when it's one. */
+  private removalAction(type: string, ids: string[]): HistoryAction {
+    const wanted = new Set(ids);
+    const pages = [
+      ...new Set((this.baselineImages?.placements ?? []).filter((p) => wanted.has(p.id)).map((p) => p.page)),
+    ];
+    return { type, params: { count: ids.length, pages: pages.length, page: pages[0] ?? 0 } };
+  }
+
   private removalLabel(verb: string, ids: string[]): string {
     const wanted = new Set(ids);
     const pages = new Set(
@@ -1184,7 +1254,10 @@ export class PdfDocument {
 
     if (changed.length === 0) return;
 
-    this.pushUndo(`Modifica metadati (${changed.map((field) => METADATA_LABELS[field]).join(", ")})`);
+    this.pushUndo(`Modifica metadati (${changed.map((field) => METADATA_LABELS[field]).join(", ")})`, {
+      type: "metadata",
+      params: { fields: changed.join(",") },
+    });
 
     for (const field of changed) {
       const next = patch[field] ?? null;
@@ -1289,7 +1362,7 @@ export class PdfDocument {
   /** Applies pending rotations/deletions, replacing this document's baseline and clearing pending state. */
   async commit(): Promise<void> {
     if (!this.hasPendingChanges()) return;
-    const before = this.snapshot(this.currentLabel);
+    const before = this.snapshot();
     // A photo page keeps its photo through the commit only if it comes out
     // as its photo alone: rotations, annotations and removals get written
     // into the page, and making it again from the JPEG would lose them.
@@ -1320,7 +1393,10 @@ export class PdfDocument {
     // Recorded only once the wasm work has succeeded, so a failed commit
     // leaves no phantom history step. `pushUndo()` would snapshot the
     // *new* state, hence the pre-computed `before`.
-    this.recordSnapshot(before, `Applica modifiche (${this.pageCount} pagine)`);
+    this.recordSnapshot(before, `Applica modifiche (${this.pageCount} pagine)`, {
+      type: "commit",
+      params: { pages: this.pageCount },
+    });
   }
 
   /** Same computation as `commit()`, without mutating this document - a preview of the final result. */
@@ -1330,7 +1406,7 @@ export class PdfDocument {
 
   /** Immediate, whole-document operation - no pending state, nothing to preview. */
   async encrypt(ownerPassword: string, userPassword: string): Promise<void> {
-    const before = this.snapshot(this.currentLabel);
+    const before = this.snapshot();
     this.bytes = await encrypt_pdf(this.bytes, ownerPassword, userPassword);
     this.previewCache.clear();
     this.baselineMetadata = null;
@@ -1338,12 +1414,12 @@ export class PdfDocument {
     this.baselineOutline = null;
     this.removedImages.clear();
     this.photos.clear();
-    this.recordSnapshot(before, "Cifra documento");
+    this.recordSnapshot(before, "Cifra documento", { type: "encrypt", params: {} });
   }
 
   /** Immediate, whole-document operation - no pending state, nothing to preview. */
   async decrypt(password: string): Promise<void> {
-    const before = this.snapshot(this.currentLabel);
+    const before = this.snapshot();
     this.bytes = await decrypt_pdf(this.bytes, password);
     this.pageCount = await page_count(this.bytes);
     this.appliedPageCount = this.pageCount;
@@ -1355,13 +1431,13 @@ export class PdfDocument {
     this.removedImages.clear();
     this.photos.clear();
     this.order = identityOrder(this.pageCount);
-    this.recordSnapshot(before, "Decifra documento");
+    this.recordSnapshot(before, "Decifra documento", { type: "decrypt", params: {} });
   }
 
   private async computeCommittedBytes(): Promise<Uint8Array> {
     const survivingIds = this.allPageIds().filter((id) => !this.deletions.has(id));
     if (survivingIds.length === 0) {
-      throw new Error("il documento risulterebbe vuoto: annulla almeno un'eliminazione prima di confermare");
+      throw new EmptyDocumentError();
     }
 
     // Annotations first, on the baseline their page ids and coordinates

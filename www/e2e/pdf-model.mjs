@@ -615,6 +615,36 @@ async function main() {
     [tenPagesBytes, photoJpgBytes],
   );
 
+  // --- Each history step also comes as data (type + params), for a UI to
+  // put in its own language; the empty document error is recognisable.
+  results["history steps carry a structured action; emptying a document throws EmptyDocumentError"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfDocument } = window.__pdfModel;
+      const doc = await PdfDocument.open(new Uint8Array(bytes));
+      doc.rotatePage(2, 90);
+      doc.deletePages([1, 3]);
+      await doc.setMetadata({ title: "T", author: "A" });
+      const actions = doc.history().map((step) => step.action);
+      doc.deletePages([2, 4]);
+      let emptyError = "";
+      try {
+        await doc.commit();
+      } catch (err) {
+        emptyError = err.name;
+      }
+      const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+      return (
+        same(actions, [
+          { type: "open", params: {} },
+          { type: "rotatePage", params: { page: 2, degrees: 90 } },
+          { type: "deletePages", params: { count: 2 } },
+          { type: "metadata", params: { fields: "title,author" } },
+        ]) && emptyError === "EmptyDocumentError"
+      );
+    },
+    fourPagesBytes,
+  );
+
   // --- PdfEditor.mergeDocuments / splitDocument register new documents with the right page counts ---
   results["PdfEditor.mergeDocuments produces a new document with the summed page count"] = await page.evaluate(
     async ({ bytesA, bytesB }) => {

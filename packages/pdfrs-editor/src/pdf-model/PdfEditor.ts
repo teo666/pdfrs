@@ -145,7 +145,10 @@ export class PdfEditor {
     const pages = [...new Set(pageIds)];
     const bytes = await source.exportPages(pages);
     const count = pages.length === 1 ? "1 pagina" : `${pages.length} pagine`;
-    const inserted = await target.insertPages(bytes, options.at, `Inserisci ${count} da un altro documento`);
+    const inserted = await target.insertPages(bytes, options.at, `Inserisci ${count} da un altro documento`, {
+      type: "insertFromDocument",
+      params: { count: pages.length },
+    });
 
     const changed = changedPages(source);
     pages.forEach((page, index) => {

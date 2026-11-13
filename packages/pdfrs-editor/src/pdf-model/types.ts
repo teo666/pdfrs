@@ -45,6 +45,16 @@ export type PdfMetadata = Partial<Record<MetadataField, string>>;
  */
 export type MetadataPatch = Partial<Record<MetadataField, string | null>>;
 
+/**
+ * What a history step did, for a UI to describe in its own language: a
+ * `type` (e.g. "rotatePage") and its parameters (e.g. `{ page: 3, degrees: 90 }`).
+ * Annotations carry `kind`: "text", "signature" or "image".
+ */
+export interface HistoryAction {
+  type: string;
+  params: Record<string, string | number>;
+}
+
 /** One step in a document's undo history, as returned by `PdfDocument.history()` - oldest first, including the current state and any redoable steps ahead of it. */
 export interface HistoryEntry {
   /** Position in the timeline, and the argument `goToHistoryIndex()` takes. */
@@ -53,6 +63,8 @@ export interface HistoryEntry {
   label: string;
   /** True for the one state the document is actually in right now. */
   current: boolean;
+  /** The same step described as data (see `HistoryAction`). `label` is its Italian rendering. */
+  action: HistoryAction;
 }
 
 /** 1-indexed, inclusive page window, e.g. for rendering only part of a large document. */
