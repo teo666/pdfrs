@@ -7,7 +7,7 @@ Prima di chiamarle va inizializzato il modulo wasm una sola volta:
 ```ts
 import init, {
   merge_pdfs, split_pdf, rotate_pages, compose_pdf, encrypt_pdf, decrypt_pdf, read_permissions, restore_encryption,
-  watermark_pdf, blank_page_pdf, page_sizes,
+  watermark_pdf, page_labels_pdf, blank_page_pdf, page_sizes,
   is_password_protected, page_count, read_metadata, write_metadata,
   read_outline, write_outline, list_images, move_images, remove_images, annotate_pdf,
   nup_pdf, booklet_pdf, render_page_preview, PreviewDocument, image_to_pdf, extract_image,
@@ -76,6 +76,25 @@ Le posizioni sono riferite alla parte di pagina mostrata, con `/Rotate` applicat
 
 ```ts
 const marked = await watermark_pdf(bytes, { text: "RISERVATO", color: "#c0392b", opacity: 0.2, layer: "under" });
+```
+
+## `page_labels_pdf(file: Uint8Array, options): Promise<Uint8Array>`
+
+Numeri di pagina, un'intestazione o un piè di pagina: un testo breve su ciascuna pagina indicata, nello stesso punto.
+
+`options` è `{ items: [{ page, text }], position?, size?, font?, bold?, italic?, color?, margin? }`:
+- `items` contiene il testo di ogni pagina già composto («Pagina 3 di 12»): la numerazione la decide chi chiama.
+- `position` è uno fra `"top-left"`, `"top-center"`, `"top-right"`, `"bottom-left"`, `"bottom-center"` (il valore di default) e `"bottom-right"`.
+- `size` è il corpo in punti, 10 se manca.
+- `margin` è la distanza dai bordi in punti, 36 se manca.
+
+Le posizioni sono riferite alla pagina come si vede, con CropBox e `/Rotate`, quindi su una pagina ruotata il testo resta dritto. È testo vero, nei font standard. I testi vuoti vengono saltati.
+
+```ts
+const labelled = await page_labels_pdf(bytes, {
+  items: [1, 2, 3].map((page) => ({ page, text: `Pagina ${page} di 3` })),
+  position: "bottom-right",
+});
 ```
 
 ## `blank_page_pdf(width: number, height: number): Promise<Uint8Array>`

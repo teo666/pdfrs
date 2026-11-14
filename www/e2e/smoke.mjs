@@ -413,8 +413,11 @@ async function main() {
   };
 
   let ok = true;
-  for (const [label, passed] of Object.entries(results)) {
+  for (const [label, result] of Object.entries(results)) {
+    // Only `true` passes (see pdf-model.mjs): anything else is printed.
+    const passed = result === true;
     console.log(`${passed ? "PASS" : "FAIL"} - ${label}`);
+    if (!passed && result !== false) console.log(`    ${typeof result === "string" ? result : JSON.stringify(result)}`);
     ok &&= passed;
   }
   if (consoleErrors.length > 0) {

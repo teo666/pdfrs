@@ -519,6 +519,48 @@ async function main() {
     );
   }, fourPagesBytes);
 
+  // --- Page numbers: written in the order the pages are shown, pages
+  // marked for deletion left out, the first one skipped if asked.
+  results["addPageLabels numbers the pages in the order shown"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    // Every (deflated) stream of a PDF, inflated, as text: where to look for labels.
+    const streams = async (pdf) => {
+      const text = new TextDecoder("latin1").decode(pdf);
+      const out = [];
+      for (const match of text.matchAll(/stream\r?\n/g)) {
+        const start = match.index + match[0].length;
+        let end = text.indexOf("endstream", start);
+        // The end-of-line before "endstream" isn't part of the data.
+        while (end > start && (text[end - 1] === "\n" || text[end - 1] === "\r")) end--;
+        const data = pdf.slice(start, end);
+        try {
+          const inflated = new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate")));
+          out.push(new TextDecoder("latin1").decode(await inflated.arrayBuffer()));
+        } catch {
+          out.push(new TextDecoder("latin1").decode(data));
+        }
+      }
+      return out.join("\n").toLowerCase();
+    };
+    const hex = (label) => [...label].map((c) => c.charCodeAt(0).toString(16).padStart(2, "0")).join("");
+
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.movePage(4, 0);
+    doc.deletePage(2);
+    await doc.addPageLabels({ template: "Pagina {n} di {total}", position: "bottom-right", skipFirst: true });
+    const step = doc.history().at(-1);
+    await doc.commit(); // pages now: 4, 1, 3
+    const all = await streams(doc.getBytes());
+    return (
+      !all.includes(hex("Pagina 1 di 3")) && // skipped
+      all.includes(hex("Pagina 2 di 3")) &&
+      all.includes(hex("Pagina 3 di 3")) &&
+      !all.includes(hex("di 4")) &&
+      step.label === "Numeri di pagina su 2 pagine" &&
+      step.action.type === "pageLabels"
+    );
+  }, fourPagesBytes);
+
   // --- A blank page, the size of the one before it as shown (turned with it).
   results["insertBlankPage adds an empty page the size of its neighbour"] = await page.evaluate(async (photo) => {
     const { PdfDocument } = window.__pdfModel;
@@ -904,20 +946,23 @@ async function main() {
       const outline = async () => titles(await doc.getOutline());
       const steps = [];
 
-      // A new entry for page 5: after the branch of "Tre" (page 3), at its level.
+      // A new entry for page 5: after the entry of the nearest page before
+      // it ("Tre.a", page 4), at its level - inside "Tre".
       const added = await doc.addOutlineEntry("Cinque", 5);
-      steps.push((await outline()) === "1:Uno@1 2:Uno.a@2 1:Tre@3 2:Tre.a@4 1:Cinque@5 1:Sei@6" && added === 4);
+      steps.push((await outline()) === "1:Uno@1 2:Uno.a@2 1:Tre@3 2:Tre.a@4 2:Cinque@5 1:Sei@6" && added === 4);
       await doc.renameOutlineEntry(4, "Quinta");
-      // "Tre" moves up with its child.
+      // "Tre" moves up with its children.
       steps.push((await doc.moveOutlineEntry(2, -1)) === 0); // where it went
-      steps.push((await outline()) === "1:Tre@3 2:Tre.a@4 1:Uno@1 2:Uno.a@2 1:Quinta@5 1:Sei@6");
+      steps.push((await outline()) === "1:Tre@3 2:Tre.a@4 2:Quinta@5 1:Uno@1 2:Uno.a@2 1:Sei@6");
       steps.push((await doc.moveOutlineEntry(0, -1)) === null); // already first
-      // Under "Uno", then back out after it.
-      steps.push((await doc.indentOutlineEntry(4)) === 4);
-      steps.push((await outline()) === "1:Tre@3 2:Tre.a@4 1:Uno@1 2:Uno.a@2 2:Quinta@5 1:Sei@6");
-      // Out of "Uno": it was its last child, so it stays where it is, one level up.
-      steps.push((await doc.outdentOutlineEntry(4)) === 4); // already its last child: stays put
-      steps.push((await outline()) === "1:Tre@3 2:Tre.a@4 1:Uno@1 2:Uno.a@2 1:Quinta@5 1:Sei@6");
+      // "Sei" under "Uno", then back out.
+      steps.push((await doc.indentOutlineEntry(5)) === 5);
+      steps.push((await outline()) === "1:Tre@3 2:Tre.a@4 2:Quinta@5 1:Uno@1 2:Uno.a@2 2:Sei@6");
+      steps.push((await doc.outdentOutlineEntry(5)) === 5);
+      // "Quinta" out of "Tre": it was its last child, so it stays where it is, one level up.
+      steps.push((await doc.outdentOutlineEntry(2)) === 2);
+      steps.push((await outline()) === "1:Tre@3 2:Tre.a@4 1:Quinta@5 1:Uno@1 2:Uno.a@2 1:Sei@6");
+
       // With siblings after it, an entry taken out of its branch goes after them.
       const small = editor.getDocument(
         await editor.addDocument(
@@ -933,9 +978,9 @@ async function main() {
 
       // Removing "Tre" takes "Tre.a" too.
       await doc.removeOutlineEntry(0);
-      steps.push((await outline()) === "1:Uno@1 2:Uno.a@2 1:Quinta@5 1:Sei@6");
-      const labels = doc.history().slice(-6).map((h) => h.label);
-      steps.push(labels[0] === "Aggiungi «Cinque» all’indice" && labels[5] === "Elimina «Tre» dall’indice (2 voci)");
+      steps.push((await outline()) === "1:Quinta@5 1:Uno@1 2:Uno.a@2 1:Sei@6");
+      const labels = doc.history().slice(-7).map((h) => h.label);
+      steps.push(labels[0] === "Aggiungi «Cinque» all’indice" && labels[6] === "Elimina «Tre» dall’indice (2 voci)");
       steps.push(doc.hasPendingChanges());
 
       // Undo brings "Tre" back; redo takes it away again.
@@ -943,21 +988,22 @@ async function main() {
       steps.push((await outline()).startsWith("1:Tre@3 2:Tre.a@4"));
       doc.redo();
 
-      // Open "Uno" closed: not a change, but it lasts through applying.
-      await doc.setOutlineOpen(0, false);
-      steps.push(doc.history().length === 7 + 1);
+      // "Uno" (it has a child) closed: not a change, but it lasts through applying.
+      const before = doc.history().length;
+      await doc.setOutlineOpen(1, false);
+      steps.push(doc.history().length === before);
       await doc.commit();
       const inFile = await read_outline(doc.getBytes());
-      steps.push(titles(inFile) === "1:Uno@1 2:Uno.a@2 1:Quinta@5 1:Sei@6");
-      steps.push(inFile[0]?.open === false && inFile[3]?.color === "#c00000" && inFile[3]?.bold === true);
+      steps.push(titles(inFile) === "1:Quinta@5 1:Uno@1 2:Uno.a@2 1:Sei@6");
+      steps.push(inFile[1]?.open === false && inFile[3]?.color === "#c00000" && inFile[3]?.bold === true);
       steps.push(!doc.hasPendingChanges());
 
       // Only opening a branch: written with the next commit, which other edits bring.
-      await doc.setOutlineOpen(0, true);
+      await doc.setOutlineOpen(1, true);
       steps.push(!doc.hasPendingChanges());
       doc.rotatePage(2, 90);
       await doc.commit();
-      steps.push((await read_outline(doc.getBytes()))[0].open === true);
+      steps.push((await read_outline(doc.getBytes()))[1]?.open === true);
 
       // Moving pages 5 and 6 to another document brings "Quinta" and "Sei".
       const otherId = await editor.addDocument(new Uint8Array(ten));
@@ -1955,8 +2001,12 @@ async function main() {
   await browser.close();
 
   let ok = true;
-  for (const [label, passed] of Object.entries(results)) {
+  for (const [label, result] of Object.entries(results)) {
+    // Only `true` passes: some checks return what went wrong (the failing
+    // steps, details) instead of `false`, and that is printed.
+    const passed = result === true;
     console.log(`${passed ? "PASS" : "FAIL"} - ${label}`);
+    if (!passed && result !== false) console.log(`    ${typeof result === "string" ? result : JSON.stringify(result)}`);
     ok &&= passed;
   }
   if (consoleErrors.length > 0) {

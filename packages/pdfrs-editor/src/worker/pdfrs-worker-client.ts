@@ -10,6 +10,7 @@ import type {
   ImagePageOptions,
   OutlineEntry,
   PageDimensions,
+  PageLabelsOptions,
   PdfImages,
   PdfPermissions,
   WatermarkOptions,
@@ -121,6 +122,14 @@ export function encrypt_pdf(
 /** Draws a text watermark on `options.pages` (1-indexed; every page when absent). */
 export function watermark_pdf(file: Uint8Array, options: WatermarkOptions & { pages?: number[] }): Promise<Uint8Array> {
   return call("watermark_pdf", [file, options]);
+}
+
+/** Writes `items[].text` on each page, at the same place (see `PageLabelsOptions` for the style). */
+export function page_labels_pdf(
+  file: Uint8Array,
+  options: Omit<PageLabelsOptions, "template" | "start" | "skipFirst"> & { items: { page: number; text: string }[] },
+): Promise<Uint8Array> {
+  return call("page_labels_pdf", [file, options]);
 }
 
 /** A PDF of one empty page, `width` by `height` points. */

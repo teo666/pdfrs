@@ -183,6 +183,125 @@ pub fn watermark(doc: &mut Document, options: &WatermarkOptions) -> Result<()> {
     stamp::annotate(doc, &[], &annotations)
 }
 
+/// Where on the page a label goes: one of the four corners, or the middle
+/// of the top or bottom edge, of the page as shown.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LabelPosition {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomCenter,
+    BottomRight,
+}
+
+/// One page's label, already written out ("Pagina 3 di 12").
+#[derive(Debug, Clone, Deserialize)]
+pub struct PageLabel {
+    pub page: u32,
+    pub text: String,
+}
+
+fn label_size() -> f64 {
+    10.0
+}
+
+fn label_margin() -> f64 {
+    36.0
+}
+
+fn label_color() -> String {
+    "#000000".to_string()
+}
+
+/// Page numbers, a header, a footer: a short text on each page given, at
+/// the same place on all of them.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageLabelOptions {
+    pub items: Vec<PageLabel>,
+    #[serde(default)]
+    pub position: LabelPosition,
+    /// Font size in points; 10 when absent.
+    #[serde(default = "label_size")]
+    pub size: f64,
+    #[serde(default)]
+    pub font: StandardFont,
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub italic: bool,
+    /// `#rrggbb`; black when absent.
+    #[serde(default = "label_color")]
+    pub color: String,
+    /// Distance from the page's edges, in points; 36 (half an inch) when absent.
+    #[serde(default = "label_margin")]
+    pub margin: f64,
+}
+
+/// Writes each label on its page, in one pass. Positions are of the page
+/// as shown (CropBox, `/Rotate` applied), so a label reads upright at the
+/// bottom of a turned page too.
+pub fn page_labels(doc: &mut Document, options: &PageLabelOptions) -> Result<()> {
+    if !options.size.is_finite() || options.size <= 0.0 {
+        return Err(PdfrsError::InvalidArgument(format!("dimensione del testo non valida: {}", options.size)));
+    }
+    if !options.margin.is_finite() || options.margin < 0.0 {
+        return Err(PdfrsError::InvalidArgument(format!("margine non valido: {}", options.margin)));
+    }
+    let all = doc.get_pages();
+    let face = FontFace { family: options.font, bold: options.bold, italic: options.italic };
+    use LabelPosition::*;
+    let align = match options.position {
+        TopLeft | BottomLeft => TextAlign::Left,
+        TopCenter | BottomCenter => TextAlign::Center,
+        TopRight | BottomRight => TextAlign::Right,
+    };
+
+    let mut annotations = Vec::with_capacity(options.items.len());
+    for item in &options.items {
+        if item.text.trim().is_empty() {
+            continue;
+        }
+        let page_id = *all.get(&item.page).ok_or(PdfrsError::PageNotFound(item.page))?;
+        let (width, height) = shown_size(doc, page_id, item.page)?;
+        let layout = text::layout(&item.text, face);
+        let (box_width, box_height) = (layout.width * options.size, layout.height * options.size);
+        // The text's own padding (`text::PAD`) is inside the box: the margin
+        // is measured to the box, so a hair more to the ink.
+        let x = match options.position {
+            TopLeft | BottomLeft => options.margin,
+            TopCenter | BottomCenter => (width - box_width) / 2.0,
+            TopRight | BottomRight => width - options.margin - box_width,
+        };
+        let y = match options.position {
+            TopLeft | TopCenter | TopRight => options.margin,
+            BottomLeft | BottomCenter | BottomRight => height - options.margin - box_height,
+        };
+        annotations.push(Annotation {
+            page: item.page,
+            x: x / width,
+            y: y / height,
+            width: box_width / width,
+            height: None,
+            rotation: 0.0,
+            opacity: 1.0,
+            layer: Layer::Over,
+            kind: AnnotationKind::Text {
+                text: item.text.clone(),
+                font: options.font,
+                bold: options.bold,
+                italic: options.italic,
+                color: options.color.clone(),
+                align,
+            },
+        });
+    }
+    stamp::annotate(doc, &[], &annotations)
+}
+
 /// A page's size as it's shown, in points: the visible part (CropBox within
 /// MediaBox), its sides swapped when `/Rotate` turns it a quarter.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -368,6 +487,42 @@ mod tests {
         assert!(blank_page(400.0, f64::NAN).is_err());
         assert!(blank_page(20_000.0, 300.0).is_err());
     }
+
+    fn labels(items: &[(u32, &str)], position: LabelPosition) -> PageLabelOptions {
+        PageLabelOptions {
+            items: items.iter().map(|(page, text)| PageLabel { page: *page, text: text.to_string() }).collect(),
+            position,
+            size: 12.0,
+            font: StandardFont::Helvetica,
+            bold: false,
+            italic: false,
+            color: "#ff0000".to_string(),
+            margin: 36.0,
+        }
+    }
+
+    #[test]
+    fn label_options_read_from_js_with_their_defaults() {
+        let read: PageLabelOptions =
+            serde_json::from_str(r#"{ "items": [{ "page": 1, "text": "1" }], "position": "top-right" }"#).unwrap();
+        assert_eq!(read.position, LabelPosition::TopRight);
+        assert_eq!((read.size, read.margin, read.color.as_str()), (10.0, 36.0, "#000000"));
+    }
+
+    #[test]
+    fn labels_only_the_pages_given_and_skips_empty_texts() {
+        let mut doc = multi_page_document(3);
+        let pages = doc.get_pages();
+        let before: Vec<Vec<u8>> = pages.values().map(|id| doc.get_page_content(*id)).collect();
+        page_labels(&mut doc, &labels(&[(2, "Pagina 2 di 3"), (3, "  ")], LabelPosition::BottomCenter)).unwrap();
+        let after: Vec<Vec<u8>> = pages.values().map(|id| doc.get_page_content(*id)).collect();
+        assert_eq!(after[0], before[0]);
+        assert_ne!(after[1], before[1]);
+        assert_eq!(after[2], before[2]);
+
+        assert!(page_labels(&mut doc, &labels(&[(9, "x")], LabelPosition::TopLeft)).is_err());
+        assert!(page_labels(&mut doc, &PageLabelOptions { size: 0.0, ..labels(&[(1, "x")], LabelPosition::TopLeft) }).is_err());
+    }
 }
 
 #[cfg(all(test, feature = "preview"))]
@@ -506,5 +661,43 @@ mod render_tests {
         let (bounds, _) = bounds(&render(&mut doc, 1), red).unwrap();
         let (x, y) = centre(bounds);
         assert!((x - 0.5).abs() < 0.03 && (y - 0.5).abs() < 0.03, "{:?}", bounds);
+    }
+
+    fn labelled(position: LabelPosition, turned: bool) -> [f64; 4] {
+        let mut doc = multi_page_document(1);
+        if turned {
+            let page_id = doc.get_pages()[&1];
+            doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap().set("Rotate", 90);
+        }
+        let options = PageLabelOptions {
+            items: vec![PageLabel { page: 1, text: "Pagina 1 di 9".to_string() }],
+            position,
+            size: 14.0,
+            font: StandardFont::Helvetica,
+            bold: true,
+            italic: false,
+            color: "#ff0000".to_string(),
+            margin: 36.0,
+        };
+        page_labels(&mut doc, &options).unwrap();
+        bounds(&render(&mut doc, 1), red).expect("the label should show").0
+    }
+
+    #[test]
+    fn labels_at_the_bottom_centre_and_the_top_right() {
+        let b = labelled(LabelPosition::BottomCenter, false);
+        let (x, _) = centre(b);
+        assert!((x - 0.5).abs() < 0.02 && b[3] < 1.0 - 36.0 / 842.0 + 0.005 && b[1] > 0.9, "{:?}", b);
+
+        let b = labelled(LabelPosition::TopRight, false);
+        assert!(b[2] < 1.0 - 36.0 / 595.0 + 0.005 && b[2] > 0.85 && b[1] > 36.0 / 842.0 - 0.005 && b[3] < 0.1, "{:?}", b);
+    }
+
+    #[test]
+    fn upright_at_the_bottom_of_a_turned_page() {
+        let b = labelled(LabelPosition::BottomCenter, true);
+        let (x, _) = centre(b);
+        assert!((x - 0.5).abs() < 0.02 && b[1] > 0.85, "{:?}", b);
+        assert!(b[2] - b[0] > 3.0 * (b[3] - b[1]), "wider than tall: {:?}", b);
     }
 }

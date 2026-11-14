@@ -96,6 +96,20 @@ pub async fn watermark_pdf(file: Uint8Array, options: JsValue) -> std::result::R
     Ok(save(&mut doc)?)
 }
 
+/// Page numbers, a header, a footer: a short text on each of the pages
+/// given, at the same place. `options` is
+/// `{ items: [{ page, text }], position?: "top-left"|"top-center"|"top-right"|"bottom-left"|"bottom-center"|"bottom-right", size?, font?, bold?, italic?, color?, margin? }`:
+/// each page's text already written out ("Pagina 3 di 12"); `size` in
+/// points (10), `margin` from the edges in points (36). Positions are of
+/// the page as shown, so the text reads upright on a turned page too.
+#[wasm_bindgen]
+pub async fn page_labels_pdf(file: Uint8Array, options: JsValue) -> std::result::Result<Uint8Array, JsValue> {
+    let options: operations::watermark::PageLabelOptions = parse_options(options)?;
+    let mut doc = load(&file.to_vec())?;
+    operations::watermark::page_labels(&mut doc, &options)?;
+    Ok(save(&mut doc)?)
+}
+
 /// A PDF of one empty page, `width` by `height` points (1 to 14400).
 #[wasm_bindgen]
 pub async fn blank_page_pdf(width: f64, height: f64) -> std::result::Result<Uint8Array, JsValue> {
