@@ -34,6 +34,35 @@ pub struct OutlineEntry {
     /// Whether its children show when the document opens.
     #[serde(default = "open_by_default")]
     pub open: bool,
+    /// A web address it opens instead of a page (`/A` `/URI`), if it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    /// `#rrggbb` its title is shown in (`/C`), if not the reader's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Title in bold (`/F` bit 2).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bold: bool,
+    /// Title in italics (`/F` bit 1).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub italic: bool,
+}
+
+impl OutlineEntry {
+    /// An entry pointing at `page` (or nowhere), open, with no style.
+    pub fn new(title: &str, level: u32, page: Option<u32>) -> Self {
+        OutlineEntry {
+            title: title.to_string(),
+            level,
+            page,
+            top: None,
+            open: true,
+            uri: None,
+            color: None,
+            bold: false,
+            italic: false,
+        }
+    }
 }
 
 fn open_by_default() -> bool {
@@ -157,7 +186,38 @@ fn walk(
         });
         let (page, top) = dest.map_or((None, None), |d| resolve_destination(doc, d, pages, 0));
         let count = item.get(b"Count").ok().and_then(|c| deref(doc, c).as_i64().ok()).unwrap_or(0);
-        entries.push(OutlineEntry { title, level, page, top, open: count >= 0 });
+        let uri = item
+            .get(b"A")
+            .ok()
+            .and_then(|a| dict_of(doc, a))
+            .filter(|action| action.get(b"S").ok().and_then(|s| s.as_name().ok()) == Some(b"URI".as_ref()))
+            .and_then(|action| action.get(b"URI").ok())
+            .and_then(|uri| deref(doc, uri).as_str().ok())
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned());
+        let color = item
+            .get(b"C")
+            .ok()
+            .and_then(|c| deref(doc, c).as_array().ok())
+            .and_then(|rgb| {
+                let channel = |i: usize| rgb.get(i).and_then(|v| deref(doc, v).as_float().ok());
+                let (r, g, b) = (channel(0)?, channel(1)?, channel(2)?);
+                let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                Some(format!("#{:02x}{:02x}{:02x}", byte(r), byte(g), byte(b)))
+            })
+            // Black is what readers show anyway.
+            .filter(|hex| hex != "#000000");
+        let flags = item.get(b"F").ok().and_then(|f| deref(doc, f).as_i64().ok()).unwrap_or(0);
+        entries.push(OutlineEntry {
+            title,
+            level,
+            page,
+            top,
+            open: count >= 0,
+            uri,
+            color,
+            bold: flags & 2 != 0,
+            italic: flags & 1 != 0,
+        });
 
         if let Some(child) = item.get(b"First").ok().and_then(|f| f.as_reference().ok()) {
             walk(doc, child, level + 1, pages, seen, entries);
@@ -240,6 +300,22 @@ pub fn write(doc: &mut Document, entries: &[OutlineEntry]) -> Result<()> {
                 None => vec![(*page_id).into(), "Fit".into()],
             };
             item.set("Dest", dest);
+        } else if let Some(uri) = &entry.uri {
+            item.set(
+                "A",
+                dictionary! {
+                    "S" => "URI",
+                    "URI" => Object::String(uri.as_bytes().to_vec(), lopdf::StringFormat::Literal),
+                },
+            );
+        }
+        if let Some(color) = &entry.color {
+            let [r, g, b] = super::text::parse_color(color);
+            item.set("C", vec![Object::Real(r as f32), Object::Real(g as f32), Object::Real(b as f32)]);
+        }
+        let flags = i64::from(entry.italic) | (i64::from(entry.bold) << 1);
+        if flags != 0 {
+            item.set("F", flags);
         }
         doc.objects.insert(ids[index], Object::Dictionary(item));
     }
@@ -270,7 +346,30 @@ mod tests {
     use lopdf::StringFormat;
 
     fn entry(title: &str, level: u32, page: Option<u32>) -> OutlineEntry {
-        OutlineEntry { title: title.to_string(), level, page, top: None, open: true }
+        OutlineEntry::new(title, level, page)
+    }
+
+    #[test]
+    fn keeps_links_colours_and_styles() {
+        let mut doc = multi_page_document(2);
+        let entries = vec![
+            OutlineEntry { color: Some("#c00000".to_string()), bold: true, ..entry("Rosso", 1, Some(1)) },
+            OutlineEntry { uri: Some("https://example.com/a?b=1".to_string()), ..entry("Sito", 1, None) },
+            OutlineEntry { italic: true, ..entry("Corsivo", 2, Some(2)) },
+        ];
+        write(&mut doc, &entries).unwrap();
+
+        assert_eq!(read(&reloaded(&mut doc)), entries);
+    }
+
+    #[test]
+    fn a_page_wins_over_a_link() {
+        let mut doc = multi_page_document(2);
+        let both = OutlineEntry { uri: Some("https://example.com".to_string()), ..entry("Tutti e due", 1, Some(2)) };
+        write(&mut doc, &[both]).unwrap();
+
+        let read = read(&reloaded(&mut doc));
+        assert_eq!((read[0].page, read[0].uri.as_deref()), (Some(2), None));
     }
 
     fn reloaded(doc: &mut Document) -> Document {

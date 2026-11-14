@@ -22,6 +22,16 @@ import {
   write_outline,
 } from "../worker/pdfrs-worker-client";
 import { renderPageOnPool, renderPagesInParallel } from "../worker/preview-worker-pool";
+import {
+  indentEntry,
+  mergeIncoming,
+  type Moved,
+  moveEntry,
+  outdentEntry,
+  placeForPage,
+  removeEntry,
+  renameEntry,
+} from "./outline-edit";
 import type { TextContent } from "../text/layout";
 import type {
   AnnotationId,
@@ -96,6 +106,7 @@ interface DocumentSnapshot {
   appliedPageCount: number;
   replacedFrom: Map<PageId, PageId>;
   baselineOutline: OutlineEntry[] | null;
+  pendingOutline: OutlineEntry[] | null;
 }
 
 /** The JPEG a page was made from, and the page it was put on: kept so the page can be made again on another one. */
@@ -249,6 +260,10 @@ export class PdfDocument {
   // like the metadata (`null` = not read yet). Page operations that rebuild
   // the file (compose, merge) drop the outline; it's written back from this.
   private baselineOutline: OutlineEntry[] | null = null;
+  /** The outline as edited (page ids), when it has been: null means as in the file. */
+  private pendingOutline: OutlineEntry[] | null = null;
+  /** A branch was opened or closed: the outline is written with the next commit, though that alone isn't a pending change. */
+  private outlineOpenChanged = false;
   // Image draws to take away (placement ids from `getImages`), not applied
   // yet: part of the undoable state, like the annotations.
   private readonly removedImages = new Set<string>();
@@ -398,6 +413,11 @@ export class PdfDocument {
     this.pageCount += 1;
     this.baselineImages = null;
     this.baselineOutline = outline;
+    if (this.pendingOutline) {
+      this.pendingOutline = this.pendingOutline.map((entry) =>
+        entry.page === page ? { ...entry, page: replacement } : entry,
+      );
+    }
     // The old page stays in the baseline, out of the order: the next commit drops it.
     this.order[position] = replacement;
     const rotation = this.rotations.get(page);
@@ -441,6 +461,7 @@ export class PdfDocument {
       this.pendingMetadata.size > 0 ||
       this.annotationsById.size > 0 ||
       this.removedImages.size > 0 ||
+      this.pendingOutline !== null ||
       this.hasPendingReorder()
     );
   }
@@ -549,6 +570,7 @@ export class PdfDocument {
       appliedPageCount: this.appliedPageCount,
       replacedFrom: new Map(this.replacedFrom),
       baselineOutline: this.baselineOutline,
+      pendingOutline: this.pendingOutline,
     };
   }
 
@@ -584,6 +606,7 @@ export class PdfDocument {
     for (const [page, photo] of snapshot.photos) this.photos.set(page, photo);
     this.appliedPageCount = snapshot.appliedPageCount;
     this.baselineOutline = snapshot.baselineOutline;
+    this.pendingOutline = snapshot.pendingOutline;
     this.replacedFrom.clear();
     for (const [page, old] of snapshot.replacedFrom) this.replacedFrom.set(page, old);
   }
@@ -768,23 +791,30 @@ export class PdfDocument {
     const before = this.snapshot();
     const added = await page_count(bytes);
     if (added === 0) return [];
+    // Their outline comes along: the entries that point at one of them.
+    const incoming = (await read_outline(bytes)).filter((entry) => entry.page != null);
     // merge_pdfs only carries /Root over: the document's own /Info would be
     // lost, so it's written back onto the merged result.
     const metadata = await this.ensureBaselineMetadata();
     let merged = await merge_pdfs([this.bytes, bytes]);
     if (Object.keys(metadata).length > 0) merged = await write_metadata(merged, { ...metadata });
-    // So is the outline: the existing pages keep their numbers, so it goes back as it was.
-    const outline = await this.ensureBaselineOutline();
+    // So is the outline: the existing pages keep their numbers, so it goes
+    // back as it was, with the entries of the new pages where they land.
+    const ids = Array.from({ length: added }, (_, index) => this.pageCount + index + 1);
+    const index = Math.max(0, Math.min(at ?? this.order.length, this.order.length));
+    const order = [...this.order.slice(0, index), ...ids, ...this.order.slice(index)];
+    const arriving = incoming.map((entry) => ({ ...entry, page: this.pageCount + (entry.page as number) }));
+    const outline = mergeIncoming(await this.ensureBaselineOutline(), arriving, order);
     if (outline.length > 0) merged = await write_outline(merged, outline);
 
     // Merging renumbers the objects, so a pending removal inside a Form
     // (whose id names the Form's object) is carried over to its new id.
     const removals = this.removedImages.size > 0 ? await this.remapRemovals(merged) : null;
 
-    const ids = Array.from({ length: added }, (_, index) => this.pageCount + index + 1);
-    const index = Math.max(0, Math.min(at ?? this.order.length, this.order.length));
     this.bytes = merged;
     this.baselineImages = null;
+    this.baselineOutline = outline;
+    if (this.pendingOutline) this.pendingOutline = mergeIncoming(this.pendingOutline, arriving, order);
     if (removals) {
       this.removedImages.clear();
       for (const id of removals) this.removedImages.add(id);
@@ -815,7 +845,7 @@ export class PdfDocument {
     );
     // The outline entries of the pages exported, pointing at their new numbers.
     const outline = remapOutline(
-      await this.ensureBaselineOutline(),
+      await this.currentOutline(),
       new Map(pages.map((id, index) => [id, index + 1])),
     );
     if (outline.length > 0) bytes = await write_outline(bytes, outline);
@@ -1324,7 +1354,139 @@ export class PdfDocument {
    * operations underneath would lose it.
    */
   async getOutline(): Promise<OutlineEntry[]> {
-    return (await this.ensureBaselineOutline()).map((entry) => ({ ...entry }));
+    return (await this.currentOutline()).map((entry) => ({ ...entry }));
+  }
+
+  /** The outline as edited, or as in the file. */
+  private async currentOutline(): Promise<OutlineEntry[]> {
+    return this.pendingOutline ?? (await this.ensureBaselineOutline());
+  }
+
+  /**
+   * One undoable outline edit: `edit` gets the current outline and returns
+   * the new one with how the history should call the step, or null when
+   * there's nothing to do (no step then). Returns whether it did something.
+   */
+  private async editOutline(
+    edit: (entries: OutlineEntry[]) => { entries: OutlineEntry[]; label: string; action: HistoryAction } | null,
+  ): Promise<boolean> {
+    const result = edit(await this.currentOutline());
+    if (!result) return false;
+    this.pushUndo(result.label, result.action);
+    this.pendingOutline = result.entries;
+    return true;
+  }
+
+  /**
+   * Adds an outline entry pointing at `page`, placed after the branch of
+   * the entry for the nearest page before it (at its level), or first.
+   * Returns its index. A pending edit like the others: undoable, written by
+   * `commit()`/`exportBytes()`.
+   */
+  async addOutlineEntry(title: string, page: PageId): Promise<number> {
+    this.assertValidPage(page);
+    const name = title.trim();
+    if (!name) throw new Error("la voce dell'indice ha bisogno di un titolo");
+    let index = 0;
+    await this.editOutline((entries) => {
+      const place = placeForPage(entries, page, this.order);
+      index = place.index;
+      const entry: OutlineEntry = { title: name, level: place.level, page, open: true };
+      return {
+        entries: [...entries.slice(0, index), entry, ...entries.slice(index)],
+        label: `Aggiungi «${name}» all’indice`,
+        action: { type: "outlineAdd", params: { title: name, page } },
+      };
+    });
+    return index;
+  }
+
+  /** Renames the outline entry at `index` (in `getOutline()`). */
+  async renameOutlineEntry(index: number, title: string): Promise<void> {
+    const name = title.trim();
+    if (!name) throw new Error("la voce dell'indice ha bisogno di un titolo");
+    await this.editOutline((entries) => {
+      const old = entries[index]?.title;
+      if (old === name) return null;
+      return {
+        entries: renameEntry(entries, index, name),
+        label: `Rinomina «${old}» in «${name}» nell’indice`,
+        action: { type: "outlineRename", params: { from: old ?? "", title: name } },
+      };
+    });
+  }
+
+  /** Removes the outline entry at `index`, with the entries under it. */
+  async removeOutlineEntry(index: number): Promise<void> {
+    await this.editOutline((entries) => {
+      const removed = removeEntry(entries, index);
+      const title = entries[index]!.title;
+      const count = entries.length - removed.length;
+      return {
+        entries: removed,
+        label: `Elimina «${title}» dall’indice` + (count > 1 ? ` (${count} voci)` : ""),
+        action: { type: "outlineRemove", params: { title, count } },
+      };
+    });
+  }
+
+  /**
+   * Moves the outline entry at `index`, with the entries under it, before
+   * its previous (`by` -1) or after its next (`by` 1) sibling. Returns its
+   * index now, or null when it can't move that way.
+   */
+  async moveOutlineEntry(index: number, by: -1 | 1): Promise<number | null> {
+    return this.moveInOutline(index, (entries) => moveEntry(entries, index, by), (title) => ({
+      label: `Sposta «${title}» ${by < 0 ? "su" : "giù"} nell’indice`,
+      action: { type: "outlineMove", params: { title, by } },
+    }));
+  }
+
+  /** One level deeper: the entry at `index` goes under its previous sibling. Returns its index, or null when it has none. */
+  async indentOutlineEntry(index: number): Promise<number | null> {
+    return this.moveInOutline(index, (entries) => indentEntry(entries, index), (title) => ({
+      label: `Rientra «${title}» nell’indice`,
+      action: { type: "outlineIndent", params: { title } },
+    }));
+  }
+
+  /** One level up: the entry at `index` becomes its parent's next sibling. Returns its index now, or null at the top level. */
+  async outdentOutlineEntry(index: number): Promise<number | null> {
+    return this.moveInOutline(index, (entries) => outdentEntry(entries, index), (title) => ({
+      label: `Riduci il rientro di «${title}» nell’indice`,
+      action: { type: "outlineOutdent", params: { title } },
+    }));
+  }
+
+  private async moveInOutline(
+    index: number,
+    move: (entries: OutlineEntry[]) => Moved | null,
+    describe: (title: string) => { label: string; action: HistoryAction },
+  ): Promise<number | null> {
+    let landed: number | null = null;
+    await this.editOutline((entries) => {
+      const moved = move(entries);
+      if (!moved) return null;
+      landed = moved.index;
+      return { entries: moved.entries, ...describe(entries[index]!.title) };
+    });
+    return landed;
+  }
+
+  /**
+   * Opens or closes the branch of the outline entry at `index`: how readers
+   * show it when the file opens. Not an edit of its own - no history step,
+   * nothing pending - but kept, and written into the file with the next
+   * commit, so "Applica modifiche" doesn't close what was opened.
+   */
+  async setOutlineOpen(index: number, open: boolean): Promise<void> {
+    const entries = await this.currentOutline();
+    const entry = entries[index];
+    if (!entry || entry.open === open) return;
+    // Changed where it is: in the pending outline if there is one, or in the
+    // baseline's own (snapshots share it, so undo doesn't close it again).
+    entries[index] = { ...entry, open };
+    this.outlineOpenChanged = true;
   }
 
   /**
@@ -1334,7 +1496,7 @@ export class PdfDocument {
    */
   async getOutlineAsShown(): Promise<OutlineEntry[]> {
     const shown = this.allPageIds().filter((id) => !this.deletions.has(id));
-    return remapOutline(await this.ensureBaselineOutline(), new Map(shown.map((id, index) => [id, index + 1])));
+    return remapOutline(await this.currentOutline(), new Map(shown.map((id, index) => [id, index + 1])));
   }
 
   private async ensureBaselineMetadata(): Promise<PdfMetadata> {
@@ -1510,6 +1672,8 @@ export class PdfDocument {
     this.baselineMetadata = null;
     this.baselineImages = null;
     this.baselineOutline = null;
+    this.pendingOutline = null;
+    this.outlineOpenChanged = false;
     this.order = identityOrder(this.pageCount);
     // Recorded only once the wasm work has succeeded, so a failed commit
     // leaves no phantom history step. `pushUndo()` would snapshot the
@@ -1537,6 +1701,7 @@ export class PdfDocument {
     this.baselineMetadata = null;
     this.baselineImages = null;
     this.baselineOutline = null;
+    this.pendingOutline = null;
     this.removedImages.clear();
     this.photos.clear();
     this.recordSnapshot(before, "Cifra documento", { type: "encrypt", params: {} });
@@ -1553,6 +1718,7 @@ export class PdfDocument {
     this.baselineMetadata = null;
     this.baselineImages = null;
     this.baselineOutline = null;
+    this.pendingOutline = null;
     this.removedImages.clear();
     this.photos.clear();
     this.order = identityOrder(this.pageCount);
@@ -1578,10 +1744,14 @@ export class PdfDocument {
       bytes = await compose_pdf([bytes], layout);
       // compose_pdf leaves the outline behind: written back, following the pages.
       const outline = remapOutline(
-        await this.ensureBaselineOutline(),
+        await this.currentOutline(),
         new Map(survivingIds.map((id, index) => [id, index + 1])),
       );
       if (outline.length > 0) bytes = await write_outline(bytes, outline);
+    } else if (this.pendingOutline !== null || this.outlineOpenChanged) {
+      // The same pages in the same places: the outline as edited, or with
+      // its branches opened and closed, goes in as it is.
+      bytes = await write_outline(bytes, await this.currentOutline());
     }
 
     // Rotations are keyed by the *new* position, not the original id: deleting

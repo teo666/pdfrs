@@ -793,6 +793,90 @@ async function main() {
     [photoJpgBytes, fourPagesBytes],
   );
 
+  // --- Outline edits: each one undoable, pending until applied; a branch
+  // opened or closed stays so after applying; moved pages bring their entries.
+  results["outline entries are edited, kept open or closed, and travel with their pages"] = await page.evaluate(
+    async (ten) => {
+      const { PdfEditor, read_outline, write_outline } = window.__pdfModel;
+      const titled = await write_outline(new Uint8Array(ten), [
+        { title: "Uno", level: 1, page: 1, open: true },
+        { title: "Uno.a", level: 2, page: 2, open: true },
+        { title: "Tre", level: 1, page: 3, open: false },
+        { title: "Tre.a", level: 2, page: 4, open: true },
+        { title: "Sei", level: 1, page: 6, open: true, uri: undefined, color: "#c00000", bold: true },
+      ]);
+      const editor = new PdfEditor();
+      const id = await editor.addDocument(titled);
+      const doc = editor.getDocument(id);
+      const titles = (entries) => entries.map((e) => `${e.level}:${e.title}@${e.page ?? "-"}`).join(" ");
+      const outline = async () => titles(await doc.getOutline());
+      const steps = [];
+
+      // A new entry for page 5: after the branch of "Tre" (page 3), at its level.
+      const added = await doc.addOutlineEntry("Cinque", 5);
+      steps.push((await outline()) === "1:Uno@1 2:Uno.a@2 1:Tre@3 2:Tre.a@4 1:Cinque@5 1:Sei@6" && added === 4);
+      await doc.renameOutlineEntry(4, "Quinta");
+      // "Tre" moves up with its child.
+      steps.push((await doc.moveOutlineEntry(2, -1)) === 0); // where it went
+      steps.push((await outline()) === "1:Tre@3 2:Tre.a@4 1:Uno@1 2:Uno.a@2 1:Quinta@5 1:Sei@6");
+      steps.push((await doc.moveOutlineEntry(0, -1)) === null); // already first
+      // Under "Uno", then back out after it.
+      steps.push((await doc.indentOutlineEntry(4)) === 4);
+      steps.push((await outline()) === "1:Tre@3 2:Tre.a@4 1:Uno@1 2:Uno.a@2 2:Quinta@5 1:Sei@6");
+      // Out of "Uno": it was its last child, so it stays where it is, one level up.
+      steps.push((await doc.outdentOutlineEntry(4)) === 4); // already its last child: stays put
+      steps.push((await outline()) === "1:Tre@3 2:Tre.a@4 1:Uno@1 2:Uno.a@2 1:Quinta@5 1:Sei@6");
+      // With siblings after it, an entry taken out of its branch goes after them.
+      const small = editor.getDocument(
+        await editor.addDocument(
+          await write_outline(new Uint8Array(ten), [
+            { title: "A", level: 1, page: 1, open: true },
+            { title: "A.1", level: 2, page: 2, open: true },
+            { title: "A.2", level: 2, page: 3, open: true },
+          ]),
+        ),
+      );
+      steps.push((await small.outdentOutlineEntry(1)) === 2);
+      steps.push(titles(await small.getOutline()) === "1:A@1 2:A.2@3 1:A.1@2");
+
+      // Removing "Tre" takes "Tre.a" too.
+      await doc.removeOutlineEntry(0);
+      steps.push((await outline()) === "1:Uno@1 2:Uno.a@2 1:Quinta@5 1:Sei@6");
+      const labels = doc.history().slice(-6).map((h) => h.label);
+      steps.push(labels[0] === "Aggiungi «Cinque» all’indice" && labels[5] === "Elimina «Tre» dall’indice (2 voci)");
+      steps.push(doc.hasPendingChanges());
+
+      // Undo brings "Tre" back; redo takes it away again.
+      doc.undo();
+      steps.push((await outline()).startsWith("1:Tre@3 2:Tre.a@4"));
+      doc.redo();
+
+      // Open "Uno" closed: not a change, but it lasts through applying.
+      await doc.setOutlineOpen(0, false);
+      steps.push(doc.history().length === 7 + 1);
+      await doc.commit();
+      const inFile = await read_outline(doc.getBytes());
+      steps.push(titles(inFile) === "1:Uno@1 2:Uno.a@2 1:Quinta@5 1:Sei@6");
+      steps.push(inFile[0]?.open === false && inFile[3]?.color === "#c00000" && inFile[3]?.bold === true);
+      steps.push(!doc.hasPendingChanges());
+
+      // Only opening a branch: written with the next commit, which other edits bring.
+      await doc.setOutlineOpen(0, true);
+      steps.push(!doc.hasPendingChanges());
+      doc.rotatePage(2, 90);
+      await doc.commit();
+      steps.push((await read_outline(doc.getBytes()))[0].open === true);
+
+      // Moving pages 5 and 6 to another document brings "Quinta" and "Sei".
+      const otherId = await editor.addDocument(new Uint8Array(ten));
+      await editor.transferPages(id, [5, 6], otherId, { move: true });
+      const other = editor.getDocument(otherId);
+      steps.push(titles(await other.getOutline()) === "1:Quinta@11 1:Sei@12");
+      return steps.every(Boolean) || steps.map((ok, i) => (ok ? "" : i)).filter(String).join(",");
+    },
+    tenPagesBytes,
+  );
+
   // --- The outline: read, and written back wherever the page operations
   // underneath would drop it - applying deletions and a reorder, exporting
   // some pages, inserting pages, putting a photo on another page - and
