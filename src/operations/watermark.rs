@@ -10,7 +10,7 @@ use lopdf::{dictionary, Document, Object, Stream};
 use serde::{Deserialize, Serialize};
 
 use super::nup::get_visible_box;
-use super::stamp::{self, Annotation, AnnotationKind, Layer};
+use super::stamp::{self, Annotation, AnnotationKind, ImageAsset, Layer};
 use super::text::{self, FontFace, StandardFont, TextAlign};
 use crate::error::{PdfrsError, Result};
 
@@ -118,57 +118,17 @@ pub fn watermark(doc: &mut Document, options: &WatermarkOptions) -> Result<()> {
         }
     }
 
-    let all = doc.get_pages();
-    let pages: Vec<u32> = match &options.pages {
-        Some(pages) => {
-            let mut pages = pages.clone();
-            pages.sort_unstable();
-            pages.dedup();
-            pages
-        }
-        None => all.keys().copied().collect(),
-    };
-
     let face = FontFace { family: options.font, bold: options.bold, italic: options.italic };
     let layout = text::layout(&options.text, face);
     let aspect = layout.height / layout.width;
-    let radians = options.angle.to_radians();
-    let (cos, sin) = (radians.cos().abs(), radians.sin().abs());
-
-    let mut annotations = Vec::with_capacity(pages.len());
-    for page in pages {
-        let page_id = *all.get(&page).ok_or(PdfrsError::PageNotFound(page))?;
-        let (width, height) = shown_size(doc, page_id, page)?;
-
-        // The text box, in points, before it's turned.
-        let box_width = match options.size {
-            WatermarkSize::Points(points) => layout.width * points,
-            // The turned box (w·cos + h·sin by w·sin + h·cos, h = w·aspect)
-            // filling FIT_SHARE of the page in whichever direction is tighter.
-            WatermarkSize::Keyword(SizeKeyword::Fit) => f64::min(
-                FIT_SHARE * width / (cos + aspect * sin),
-                FIT_SHARE * height / (sin + aspect * cos),
-            ),
-        };
-        let box_height = box_width * aspect;
-        // How tall it stands once turned, for top and bottom.
-        let turned_height = box_width * sin + box_height * cos;
-        let centre_y = match options.position {
-            WatermarkPosition::Center => height / 2.0,
-            WatermarkPosition::Top => EDGE_MARGIN * height + turned_height / 2.0,
-            WatermarkPosition::Bottom => height - EDGE_MARGIN * height - turned_height / 2.0,
-        };
-
-        annotations.push(Annotation {
-            page,
-            x: (width / 2.0 - box_width / 2.0) / width,
-            y: (centre_y - box_height / 2.0) / height,
-            width: box_width / width,
-            height: None,
-            // Annotations turn clockwise; the watermark's angle is counter-clockwise.
-            rotation: -options.angle,
-            opacity: options.opacity,
-            layer: options.layer,
+    let size = options.size;
+    let boxes = placements(doc, &options.pages, options.angle, options.position, aspect, |width, height, fit| match size {
+        WatermarkSize::Points(points) => layout.width * points,
+        WatermarkSize::Keyword(SizeKeyword::Fit) => fit(width, height),
+    })?;
+    let annotations: Vec<Annotation> = boxes
+        .into_iter()
+        .map(|placed| Annotation {
             kind: AnnotationKind::Text {
                 text: options.text.clone(),
                 font: options.font,
@@ -177,10 +137,143 @@ pub fn watermark(doc: &mut Document, options: &WatermarkOptions) -> Result<()> {
                 color: options.color.clone(),
                 align: options.align,
             },
+            ..placed.annotation(options.angle, options.opacity, options.layer)
+        })
+        .collect();
+    stamp::annotate(doc, &[], &annotations)
+}
+
+/// Where a watermark goes on one page: its unturned box, in fractions of the page shown.
+struct Placed {
+    page: u32,
+    x: f64,
+    y: f64,
+    width: f64,
+}
+
+impl Placed {
+    /// As an annotation (its `kind` still to be set).
+    fn annotation(&self, angle: f64, opacity: f64, layer: Layer) -> Annotation {
+        Annotation {
+            page: self.page,
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height: None,
+            // Annotations turn clockwise; the watermark's angle is counter-clockwise.
+            rotation: -angle,
+            opacity,
+            layer,
+            kind: AnnotationKind::Image { asset: 0 },
+        }
+    }
+}
+
+/// The box of a watermark of proportions `aspect` (height / width) on each
+/// page: `box_width` says how wide, in points, on a page of the size given.
+/// It's handed the "fit" size too: the widest that, turned by `angle`, stays
+/// within FIT_SHARE of the page. Centred, or at the top or bottom.
+fn placements(
+    doc: &Document,
+    pages: &Option<Vec<u32>>,
+    angle: f64,
+    position: WatermarkPosition,
+    aspect: f64,
+    box_width: impl Fn(f64, f64, &dyn Fn(f64, f64) -> f64) -> f64,
+) -> Result<Vec<Placed>> {
+    let all = doc.get_pages();
+    let pages: Vec<u32> = match pages {
+        Some(pages) => {
+            let mut pages = pages.clone();
+            pages.sort_unstable();
+            pages.dedup();
+            pages
+        }
+        None => all.keys().copied().collect(),
+    };
+    let radians = angle.to_radians();
+    let (cos, sin) = (radians.cos().abs(), radians.sin().abs());
+    // The turned box (w·cos + h·sin by w·sin + h·cos, h = w·aspect) filling
+    // FIT_SHARE of the page in whichever direction is tighter.
+    let fit = |width: f64, height: f64| {
+        f64::min(FIT_SHARE * width / (cos + aspect * sin), FIT_SHARE * height / (sin + aspect * cos))
+    };
+
+    let mut placed = Vec::with_capacity(pages.len());
+    for page in pages {
+        let page_id = *all.get(&page).ok_or(PdfrsError::PageNotFound(page))?;
+        let (width, height) = shown_size(doc, page_id, page)?;
+        let w = box_width(width, height, &fit);
+        let h = w * aspect;
+        // How tall it stands once turned, for top and bottom.
+        let turned_height = w * sin + h * cos;
+        let centre_y = match position {
+            WatermarkPosition::Center => height / 2.0,
+            WatermarkPosition::Top => EDGE_MARGIN * height + turned_height / 2.0,
+            WatermarkPosition::Bottom => height - EDGE_MARGIN * height - turned_height / 2.0,
+        };
+        placed.push(Placed {
+            page,
+            x: (width / 2.0 - w / 2.0) / width,
+            y: (centre_y - h / 2.0) / height,
+            width: w / width,
         });
     }
+    Ok(placed)
+}
 
-    stamp::annotate(doc, &[], &annotations)
+fn no_turn() -> f64 {
+    0.0
+}
+
+/// What `watermark_image` draws, and where: the same as a text watermark,
+/// without the text. `size` as a number is the share of the page's width
+/// (0..1) the image takes; the angle is 0 (upright) when absent.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageWatermarkOptions {
+    #[serde(default = "default_opacity")]
+    pub opacity: f64,
+    #[serde(default)]
+    pub size: WatermarkSize,
+    #[serde(default = "no_turn")]
+    pub angle: f64,
+    #[serde(default)]
+    pub position: WatermarkPosition,
+    #[serde(default)]
+    pub layer: Layer,
+    #[serde(default)]
+    pub pages: Option<Vec<u32>>,
+}
+
+/// An image as a watermark (a logo, a stamp) on the chosen pages - one
+/// image object for all of them, its transparency kept.
+pub fn watermark_image(doc: &mut Document, image: ImageAsset, options: &ImageWatermarkOptions) -> Result<()> {
+    if image.width == 0 || image.height == 0 {
+        return Err(PdfrsError::InvalidArgument("l'immagine della filigrana è vuota".to_string()));
+    }
+    if !options.angle.is_finite() {
+        return Err(PdfrsError::InvalidArgument(format!("angolo della filigrana non valido: {}", options.angle)));
+    }
+    if let WatermarkSize::Points(share) = options.size {
+        if !share.is_finite() || share <= 0.0 || share > 1.0 {
+            return Err(PdfrsError::InvalidArgument(format!(
+                "dimensione della filigrana non valida: {} (una quota della larghezza della pagina, da 0 a 1)",
+                share
+            )));
+        }
+    }
+    let aspect = image.height as f64 / image.width as f64;
+    let size = options.size;
+    let boxes = placements(doc, &options.pages, options.angle, options.position, aspect, |width, height, fit| match size {
+        WatermarkSize::Points(share) => share * width,
+        WatermarkSize::Keyword(SizeKeyword::Fit) => fit(width, height),
+    })?;
+    let annotations: Vec<Annotation> = boxes
+        .into_iter()
+        .map(|placed| placed.annotation(options.angle, options.opacity, options.layer))
+        .collect();
+    stamp::annotate(doc, &[image], &annotations)
 }
 
 /// Where on the page a label goes: one of the four corners, or the middle
@@ -523,6 +616,50 @@ mod tests {
         assert!(page_labels(&mut doc, &labels(&[(9, "x")], LabelPosition::TopLeft)).is_err());
         assert!(page_labels(&mut doc, &PageLabelOptions { size: 0.0, ..labels(&[(1, "x")], LabelPosition::TopLeft) }).is_err());
     }
+
+    pub(super) fn red_image() -> Vec<u8> {
+        // 4 x 2, opaque red.
+        [255u8, 0, 0, 255].repeat(8)
+    }
+
+    pub(super) fn image_options() -> ImageWatermarkOptions {
+        ImageWatermarkOptions {
+            opacity: 1.0,
+            size: WatermarkSize::default(),
+            angle: 0.0,
+            position: WatermarkPosition::Center,
+            layer: Layer::Over,
+            pages: None,
+        }
+    }
+
+    #[test]
+    fn one_image_object_for_every_page() {
+        let mut doc = multi_page_document(3);
+        let pixels = red_image();
+        let image = ImageAsset { pixels: &pixels, width: 4, height: 2 };
+        watermark_image(&mut doc, image, &image_options()).unwrap();
+
+        let images = doc
+            .objects
+            .values()
+            .filter_map(|object| object.as_stream().ok())
+            .filter(|stream| stream.dict.get(b"Subtype").and_then(Object::as_name).ok() == Some(b"Image".as_ref()))
+            .filter(|stream| stream.dict.has(b"SMask"))
+            .count();
+        assert_eq!(images, 1, "one image (with its mask) shared by the three pages");
+    }
+
+    #[test]
+    fn rejects_an_image_watermark_it_cannot_draw() {
+        let mut doc = multi_page_document(1);
+        let pixels = red_image();
+        let image = ImageAsset { pixels: &pixels, width: 4, height: 2 };
+        let too_big = ImageWatermarkOptions { size: WatermarkSize::Points(1.5), ..image_options() };
+        assert!(watermark_image(&mut doc, image, &too_big).is_err());
+        let empty = ImageAsset { pixels: &[], width: 0, height: 0 };
+        assert!(watermark_image(&mut doc, empty, &image_options()).is_err());
+    }
 }
 
 #[cfg(all(test, feature = "preview"))]
@@ -699,5 +836,46 @@ mod render_tests {
         let (x, _) = centre(b);
         assert!((x - 0.5).abs() < 0.02 && b[1] > 0.85, "{:?}", b);
         assert!(b[2] - b[0] > 3.0 * (b[3] - b[1]), "wider than tall: {:?}", b);
+    }
+
+    fn image_watermarked(options: ImageWatermarkOptions, filled: bool) -> Option<([f64; 4], usize)> {
+        let mut doc = multi_page_document(1);
+        if filled {
+            let page_id = doc.get_pages()[&1];
+            let content_id = doc.add_object(Stream::new(dictionary! {}, b"0 0 0 rg 0 0 595 842 re f".to_vec()));
+            doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap().set("Contents", content_id);
+        }
+        let pixels = super::tests::red_image();
+        let image = ImageAsset { pixels: &pixels, width: 4, height: 2 };
+        watermark_image(&mut doc, image, &options).unwrap();
+        bounds(&render(&mut doc, 1), red)
+    }
+
+    #[test]
+    fn an_image_fits_the_page_in_the_middle_or_takes_its_share() {
+        let (b, _) = image_watermarked(super::tests::image_options(), false).expect("the image should show");
+        let (x, y) = centre(b);
+        assert!((x - 0.5).abs() < 0.02 && (y - 0.5).abs() < 0.02, "{:?}", b);
+        assert!((b[2] - b[0] - 0.8).abs() < 0.02, "fit: 80% of the width: {:?}", b);
+
+        let half = ImageWatermarkOptions { size: WatermarkSize::Points(0.5), ..super::tests::image_options() };
+        let (b, _) = image_watermarked(half, false).unwrap();
+        assert!((b[2] - b[0] - 0.5).abs() < 0.02, "half the width: {:?}", b);
+    }
+
+    #[test]
+    fn an_image_see_through_and_under_the_content() {
+        let faint = ImageWatermarkOptions { opacity: 0.3, ..super::tests::image_options() };
+        assert!(image_watermarked(faint, false).is_none(), "no full red at 30%");
+
+        let under = ImageWatermarkOptions { layer: Layer::Under, ..super::tests::image_options() };
+        // hayro can leave a one-pixel seam of the image's anti-aliased edge
+        // under the fill; anything wider would be the image showing.
+        let shown = image_watermarked(under, true);
+        assert!(
+            shown.is_none_or(|(b, _)| b[2] - b[0] < 0.01 || b[3] - b[1] < 0.01),
+            "hidden under a filled page: {:?}",
+            shown
+        );
     }
 }

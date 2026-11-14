@@ -110,6 +110,28 @@ pub async fn page_labels_pdf(file: Uint8Array, options: JsValue) -> std::result:
     Ok(save(&mut doc)?)
 }
 
+/// An image as a watermark on the pages of a PDF: `image` is RGBA8,
+/// `width * height * 4` bytes, already decoded (as for `annotate_pdf`), and
+/// keeps its transparency. `options` is the same as `watermark_pdf`'s
+/// without the text: `{ opacity?, size?: number | "fit", angle?, position?, layer?, pages? }`,
+/// with `size` as a number the share of the page's width (0..1), and the
+/// angle 0 (upright) when absent. One image object for every page.
+#[wasm_bindgen]
+pub async fn watermark_image_pdf(
+    file: Uint8Array,
+    image: Uint8Array,
+    width: u32,
+    height: u32,
+    options: JsValue,
+) -> std::result::Result<Uint8Array, JsValue> {
+    let options: operations::watermark::ImageWatermarkOptions = parse_options(options)?;
+    let pixels = image.to_vec();
+    let asset = operations::stamp::ImageAsset { pixels: &pixels, width, height };
+    let mut doc = load(&file.to_vec())?;
+    operations::watermark::watermark_image(&mut doc, asset, &options)?;
+    Ok(save(&mut doc)?)
+}
+
 /// A PDF of one empty page, `width` by `height` points (1 to 14400).
 #[wasm_bindgen]
 pub async fn blank_page_pdf(width: f64, height: f64) -> std::result::Result<Uint8Array, JsValue> {
