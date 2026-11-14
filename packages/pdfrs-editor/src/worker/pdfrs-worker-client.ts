@@ -6,6 +6,7 @@ import { createPdfrsWorker } from "./create-pdfrs-worker";
 import type {
   CompressionLevel,
   ExtractedImage,
+  ImageBox,
   ImagePageOptions,
   OutlineEntry,
   PageDimensions,
@@ -157,6 +158,11 @@ export function list_images(file: Uint8Array): Promise<PdfImages> {
 }
 
 /** Takes away the images drawn at `placements` (ids from `list_images`); images nothing draws any more leave the file. */
+/** Moves and resizes images already in the PDF: each placement id to its new box. */
+export function move_images(file: Uint8Array, moves: (ImageBox & { id: string })[]): Promise<Uint8Array> {
+  return call("move_images", [file, moves]);
+}
+
 export function remove_images(file: Uint8Array, placements: string[]): Promise<Uint8Array> {
   return call("remove_images", [file, placements]);
 }

@@ -154,8 +154,18 @@ export interface PdfImagePlacement {
   y: number;
   width: number;
   height: number;
-  /** Other pages drawing the same Form: removing it here removes it there too. */
+  /** Other pages drawing the same Form: removing it here removes it there too, and it can't be moved. */
   sharedPages: PageId[];
+  /** A clipping path applies where it's drawn: part of it may not show, and moved it may be cut off. */
+  clipped: boolean;
+}
+
+/** A placement's new box (see `PdfDocument.moveImage`), in the frame of `PdfImagePlacement`. */
+export interface ImageBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface PdfImages {

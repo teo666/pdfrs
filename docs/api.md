@@ -9,7 +9,7 @@ import init, {
   merge_pdfs, split_pdf, rotate_pages, compose_pdf, encrypt_pdf, decrypt_pdf, read_permissions,
   watermark_pdf, blank_page_pdf, page_sizes,
   is_password_protected, page_count, read_metadata, write_metadata,
-  read_outline, write_outline, list_images, remove_images, annotate_pdf,
+  read_outline, write_outline, list_images, move_images, remove_images, annotate_pdf,
   nup_pdf, booklet_pdf, render_page_preview, PreviewDocument, image_to_pdf, extract_image,
 } from "pdfrs.js/full"; // oppure "pdfrs.js/core", senza le tre funzioni della build "full"
 
@@ -229,6 +229,25 @@ Le immagini già presenti nel PDF:
   - Le coordinate sono frazioni della pagina visibile, con l'origine in alto a sinistra.
   - `image` è la `key` dell'immagine disegnata.
   - `sharedPages` elenca le altre pagine che disegnano la stessa Form: togliendo l'immagine da una, sparisce anche da quelle.
+  - `clipped` vale `true` quando dove è disegnata c'è un tracciato di ritaglio (`W`/`W*`, o il `/BBox` di una Form): una parte potrebbe non vedersi, e spostata potrebbe essere tagliata.
+
+## `move_images(file: Uint8Array, moves): Promise<Uint8Array>`
+
+Sposta e ridimensiona immagini già presenti nel PDF. `moves` è `[{ id, x, y, width, height }]`: un `id` di `list_images` e il suo nuovo riquadro, nello stesso sistema dei piazzamenti (frazioni della pagina come si vede, origine in alto a sinistra).
+
+Il disegno non viene riscritto. Viene racchiuso in `q <m> cm … Q`, dove `m` porta il vecchio riquadro sul nuovo, quindi:
+- l'immagine conserva specchiature, rotazioni e trasformazioni intorno;
+- gli `id` restano gli stessi, e una rimozione in sospeso ritrova l'immagine.
+
+La funzione rifiuta, senza toccare niente:
+- un'immagine dentro una Form disegnata anche da altre pagine (`sharedPages`), perché si sposterebbe anche lì;
+- un riquadro senza misura;
+- una trasformazione degenere.
+
+```ts
+const [first] = (await list_images(bytes)).placements;
+const moved = await move_images(bytes, [{ id: first.id, x: 0.1, y: 0.1, width: first.width / 2, height: first.height / 2 }]);
+```
 
 ## `remove_images(file: Uint8Array, placements: string[]): Promise<Uint8Array>`
 

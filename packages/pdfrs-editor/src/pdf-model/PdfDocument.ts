@@ -9,6 +9,7 @@ import {
   is_password_protected,
   list_images,
   merge_pdfs,
+  move_images,
   page_count,
   page_sizes,
   read_metadata,
@@ -38,6 +39,7 @@ import type {
   AssetId,
   ExtractedImage,
   HistoryAction,
+  ImageBox,
   HistoryEntry,
   ImageAsset,
   PageAnnotation,
@@ -1221,6 +1223,34 @@ export class PdfDocument {
       { type: "blankPage", params: { position: index + 1 } },
     );
     return id as PageId;
+  }
+
+  /**
+   * Moves and resizes the image drawn at `placement` (an id from
+   * `getImages`) to `box`, in the frame of its placement (fractions of the
+   * page as shown). Right away, like `replaceImage`: one undo step, the
+   * page's preview drawn again. The placement keeps its id, so a pending
+   * removal still holds. Refused for an image in a Form other pages draw
+   * too (`sharedPages`): it would move on all of them.
+   */
+  async moveImage(placement: string, box: ImageBox): Promise<void> {
+    const found = (await this.getImages()).placements.find((p) => p.id === placement);
+    if (!found) throw new Error(`nessuna immagine disegnata in ${placement}`);
+    if (found.sharedPages.length > 0) {
+      throw new Error("l'immagine è in una parte comune ad altre pagine: spostarla la sposterebbe anche lì");
+    }
+    const before = this.snapshot();
+    this.bytes = await move_images(this.bytes, [{ id: placement, ...box }]);
+    this.baselineImages = null;
+    for (const cached of [...this.previewCache.keys()]) {
+      if (cached.startsWith(`${found.page}:`)) this.previewCache.delete(cached);
+    }
+    const resized = Math.abs(box.width - found.width) > 1e-6 || Math.abs(box.height - found.height) > 1e-6;
+    this.recordSnapshot(
+      before,
+      `${resized ? "Ridimensiona" : "Sposta"} immagine (pagina ${found.page})`,
+      { type: resized ? "resizeImage" : "moveImage", params: { page: found.page } },
+    );
   }
 
   /** "Rimuovi immagine (pagina 3)", "Rimuovi 2 immagini da 12 pagine"... */

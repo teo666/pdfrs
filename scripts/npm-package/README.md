@@ -52,6 +52,7 @@ them, though: for a responsive page, call them from a Web Worker.
 | `read_metadata(file)` / `write_metadata(file, patch)` | title, author, dates… (`null` in the patch removes a field) |
 | `read_outline(file)` / `write_outline(file, entries)` | bookmarks, as a flat list with levels |
 | `list_images(file)` / `remove_images(file, placements)` | images already in the PDF, and where they're drawn |
+| `move_images(file, moves)` | moves and resizes images already in the PDF (placement ids stay the same) |
 | `annotate_pdf(file, assets, assetsMeta, annotations)` | stamps text, images and signatures on pages, over or under the content, with any opacity |
 | `watermark_pdf(file, options)` | a text watermark across the pages (size to fit, angle, opacity, over or under the content) |
 | `blank_page_pdf(width, height)` / `page_sizes(file)` | an empty one-page PDF; every page's size as shown |
