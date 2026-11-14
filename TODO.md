@@ -31,10 +31,5 @@ In ordine di priorità suggerito.
 
 ## Ottimizzazioni future
 
-- [ ] **Documento già letto tenuto nel worker, lato Rust** — oggi i worker del pool di anteprime tengono i *byte* del documento (`preview-worker-pool.ts`: inviati una volta per worker, non più a ogni pagina), ma ogni pagina da renderizzare paga ancora, dentro il worker:
-  - due copie dell'intero file: `file.to_vec()` da JS a wasm (`render_page_preview` in `src/lib.rs`), poi `bytes.to_vec()` per l'`Arc` di `Pdf::new` (`src/operations/preview.rs`);
-  - la lettura del documento da capo (`Pdf::new`: xref, trailer, albero delle pagine);
-  - una `RenderCache` nuova, quindi font e immagini condivisi tra le pagine decodificati di nuovo ogni volta.
-
-  Idea: un oggetto wasm (es. `PreviewDocument`, `#[wasm_bindgen]`) costruito una volta dai byte, che tiene `Pdf` e `RenderCache` e ha `render_page(page, scale)`; il worker lo tiene al posto del `Uint8Array` nella mappa `heldDocuments` di `pdfrs.worker.ts` e lo libera (`free()`) quando il pool gli dice `release`. Il protocollo `hold`/`release` del pool resta com'è. Il guadagno è nel worker (tempo per pagina e memoria temporanea), non sul main thread, che è già libero: conta soprattutto per scansioni pesanti e documenti con molte pagine. Da misurare prima e dopo (es. PDF da ~40 MB di scansioni: oggi ~2-3 s per 15 pagine).
+- [x] **Documento già letto tenuto nel worker, lato Rust** — `PreviewDocument` (`src/operations/preview.rs`, esportato in wasm): legge il file una volta e tiene `Pdf` e `RenderCache`; il worker lo tiene al posto dei byte e lo libera (`free()`) quando il pool gli dice `release`. Misurato con `www/e2e/preview-bench.mjs` su un solo worker: libro da 44 MB da ~38 a ~31 ms per miniatura, 8 MB da ~24,5 a ~21, file piccoli invariati. Il resto è il disegno della pagina in sé.
 

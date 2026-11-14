@@ -9,7 +9,7 @@ import init, {
   merge_pdfs, split_pdf, rotate_pages, compose_pdf, encrypt_pdf, decrypt_pdf,
   is_password_protected, page_count, read_metadata, write_metadata,
   read_outline, write_outline, list_images, remove_images, annotate_pdf,
-  nup_pdf, booklet_pdf, render_page_preview, image_to_pdf, extract_image,
+  nup_pdf, booklet_pdf, render_page_preview, PreviewDocument, image_to_pdf, extract_image,
 } from "pdfrs.js/full"; // oppure "pdfrs.js/core", senza le tre funzioni della build "full"
 
 await init();
@@ -246,6 +246,32 @@ for (let page = 1; page <= count; page++) {
   // usa `url` come src di un <img> per mostrare la card della pagina
 }
 ```
+
+## `new PreviewDocument(file: Uint8Array)`
+
+> Dietro la feature Cargo `preview`, come `render_page_preview`: solo in `pdfrs.js/full`.
+
+Un PDF letto una volta e tenuto in memoria, per disegnarne molte pagine. `render_page_preview` copia e rilegge l'intero file per ogni pagina. `PreviewDocument` invece copia il file nella memoria wasm e lo legge (xref, trailer, albero delle pagine) solo quando viene creato; font, glifi e spazi colore comuni alle pagine li decodifica alla prima pagina che li usa. Le immagini decodificate non le tiene, quindi la memoria non cresce con un documento pieno di scansioni.
+
+- `page_count`: il numero di pagine.
+- `render_page(page, scale)`: la pagina (1-indicizzata) in PNG, sincrona, con lo stesso `scale` di `render_page_preview`. Lancia un errore per una pagina che non c'è, e l'oggetto resta usabile.
+- `free()`: libera la memoria wasm. Va chiamata quando il documento non serve più: il garbage collector non la libera da solo. Dove il browser supporta `using`, si può dichiarare con `using`.
+
+Il costruttore lancia un errore se il file non è un PDF leggibile. Come `render_page_preview`, si aspetta byte già decifrati.
+
+```ts
+const document = new PreviewDocument(bytes);
+try {
+  for (let page = 1; page <= document.page_count; page++) {
+    const png = document.render_page(page, 0.4);
+    // ...
+  }
+} finally {
+  document.free();
+}
+```
+
+Il pool di anteprime di `pdfrs-editor` lo usa così: ogni worker tiene un `PreviewDocument` per i documenti che sta disegnando (vedi `pdfrs.worker.ts`). Su un libro da 44 MB una miniatura passa da circa 38 a circa 31 ms per worker; sui file piccoli la differenza non si vede.
 
 ## `image_to_pdf(file: Uint8Array, options): Promise<Uint8Array>`
 

@@ -10,7 +10,7 @@ previews. Everything runs locally: no file leaves the page.
 | Import | Size (wasm) | What's in it |
 | --- | --- | --- |
 | `pdfrs.js/core` | ~1.2 MB | everything except the five functions on the next line |
-| `pdfrs.js/full` | ~5.9 MB | `core` plus `render_page_preview` (pages to PNG), `image_to_pdf` (JPEG to PDF page), `extract_image`, `replace_image` and `compress_images` |
+| `pdfrs.js/full` | ~5.9 MB | `core` plus `render_page_preview` and `PreviewDocument` (pages to PNG), `image_to_pdf` (JPEG to PDF page), `extract_image`, `replace_image` and `compress_images` |
 
 The functions in both builds have the same signatures; pick `core` unless you
 need previews or image import.
@@ -53,6 +53,7 @@ them, though: for a responsive page, call them from a Web Worker.
 | `list_images(file)` / `remove_images(file, placements)` | images already in the PDF, and where they're drawn |
 | `annotate_pdf(file, assets, assetsMeta, annotations)` | stamps text, images and signatures on pages |
 | `render_page_preview(file, page, scale)` | a page as PNG (`full` only) |
+| `new PreviewDocument(file)` | a PDF read once, to render many pages: `render_page(page, scale)`, `page_count`, `free()` when done (`full` only) |
 | `image_to_pdf(file, options?)` | a JPEG as a one-page PDF (`full` only) |
 | `extract_image(file, key, maxSize?)` | an image of the PDF as JPEG or PNG (`full` only) |
 | `replace_image(file, key, image)` | another picture in the place of an image, everywhere it's drawn (`full` only) |

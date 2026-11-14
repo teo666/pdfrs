@@ -165,6 +165,50 @@ async function main() {
     [tenPagesBytes, photoJpgBytes],
   );
 
+  // --- A pool worker keeps a few documents, read once (PreviewDocument):
+  // it lets go of the oldest ones as new ones come (freeing what they took in
+  // the wasm memory), reads them again when asked, and still draws the same
+  // pixels. A file that isn't a PDF fails its own page and nothing else.
+  results["pool workers let go of old documents and read them again when asked"] = await page.evaluate(
+    async ([ten, four, two, photo]) => {
+      const { PdfDocument, renderPagesInParallel } = window.__pdfModel;
+      const sent = () => window.__pdfrsPreviewBytesSent ?? 0;
+      const render = async (bytes, page) => {
+        let png;
+        await renderPagesInParallel(bytes, [page], 0.3, (_, result) => (png = result), 1);
+        return png;
+      };
+      const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+      const photoPage = (await PdfDocument.fromImage(new Uint8Array(photo))).getBytes();
+      const documents = [new Uint8Array(ten), new Uint8Array(four), photoPage, new Uint8Array(two)];
+
+      // More documents, one at a time, than a worker keeps (two).
+      const first = [];
+      for (const bytes of documents) first.push(await render(bytes, 1));
+      const before = sent();
+      const again = [];
+      for (const bytes of documents) again.push(await render(bytes, 1));
+      const resent = sent() - before;
+
+      let broken = false;
+      try {
+        await render(new Uint8Array([1, 2, 3]), 1);
+      } catch {
+        broken = true;
+      }
+      const afterBroken = await render(documents[0], 1);
+
+      return (
+        resent >= 1 &&
+        again.every((png, i) => same(png, first[i])) &&
+        !same(first[1], first[2]) &&
+        broken &&
+        same(afterBroken, first[0])
+      );
+    },
+    [tenPagesBytes, fourPagesBytes, twoPagesBytes, photoJpgBytes],
+  );
+
   // --- Preview cache: same (page, scale) on an unchanged baseline returns
   // the identical PNG reference the second time - proof no re-render
   // happened, not just that the bytes look the same. ---
