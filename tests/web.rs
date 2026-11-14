@@ -129,7 +129,12 @@ async fn compose_reorders_pages_across_sources() {
 
 #[wasm_bindgen_test]
 async fn encrypt_then_decrypt_round_trips() {
-    let encrypted = pdfrs::encrypt_pdf(bytes(ONE_PAGE), "owner-secret".to_string(), "user-secret".to_string())
+    let encrypted = pdfrs::encrypt_pdf(
+        bytes(ONE_PAGE),
+        "owner-secret".to_string(),
+        "user-secret".to_string(),
+        wasm_bindgen::JsValue::UNDEFINED,
+    )
         .await
         .expect("encrypt should succeed");
 
@@ -142,7 +147,12 @@ async fn encrypt_then_decrypt_round_trips() {
 
 #[wasm_bindgen_test]
 async fn decrypt_rejects_wrong_password() {
-    let encrypted = pdfrs::encrypt_pdf(bytes(ONE_PAGE), "owner-secret".to_string(), "user-secret".to_string())
+    let encrypted = pdfrs::encrypt_pdf(
+        bytes(ONE_PAGE),
+        "owner-secret".to_string(),
+        "user-secret".to_string(),
+        wasm_bindgen::JsValue::UNDEFINED,
+    )
         .await
         .expect("encrypt should succeed");
 

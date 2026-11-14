@@ -6,7 +6,7 @@ Prima di chiamarle va inizializzato il modulo wasm una sola volta:
 
 ```ts
 import init, {
-  merge_pdfs, split_pdf, rotate_pages, compose_pdf, encrypt_pdf, decrypt_pdf,
+  merge_pdfs, split_pdf, rotate_pages, compose_pdf, encrypt_pdf, decrypt_pdf, read_permissions,
   is_password_protected, page_count, read_metadata, write_metadata,
   read_outline, write_outline, list_images, remove_images, annotate_pdf,
   nup_pdf, booklet_pdf, render_page_preview, PreviewDocument, image_to_pdf, extract_image,
@@ -57,13 +57,26 @@ const composed = await compose_pdf([bytesA, bytesB], [
 ]);
 ```
 
-## `encrypt_pdf(file: Uint8Array, ownerPassword: string, userPassword: string): Promise<Uint8Array>`
+## `encrypt_pdf(file: Uint8Array, ownerPassword: string, userPassword: string, options?): Promise<Uint8Array>`
 
-Cifra il PDF con AES-256 (PDF 2.0, revisione 6 — lo schema più forte supportato). `userPassword` è richiesta per aprire il documento; `ownerPassword` per cambiarne i permessi o rimuovere la cifratura. Fallisce se il documento è già cifrato.
+Cifra il PDF con AES-256 (PDF 2.0, revisione 6 — lo schema più forte supportato). `userPassword` è richiesta per aprire il documento; `ownerPassword` lo apre con tutto permesso, ed è quella che toglie le limitazioni. Fallisce se il documento è già cifrato.
+
+`options` (facoltativo) è `{ permissions?: { print, printHighQuality, copy, modify, annotate, fillForms, assemble } }`: cosa permette chi apre il file con `userPassword`. Ogni permesso non indicato è concesso.
+- Le limitazioni hanno senso solo con una `ownerPassword` diversa da `userPassword`.
+- Sono una richiesta ai lettori PDF, non un blocco: quasi tutti la rispettano.
+- `printHighQuality` senza `print` non conta.
+- La copia per gli strumenti di accessibilità resta sempre permessa.
 
 ```ts
 const encrypted = await encrypt_pdf(bytes, "owner-secret", "user-secret");
+const noPrinting = await encrypt_pdf(bytes, "owner-secret", "user-secret", { permissions: { print: false, copy: false } });
 ```
+
+## `read_permissions(file: Uint8Array): Promise<PdfPermissions | null>`
+
+Cosa permette un PDF cifrato a chi lo apre con la password utente: `{ print, printHighQuality, copy, modify, annotate, fillForms, assemble }`. Ritorna `null` per un PDF non cifrato. Non serve la password, perché la voce `/P` del dizionario di cifratura non è cifrata. Vale anche per un PDF con le sole limitazioni, che si apre senza password.
+
+Le modifiche fatte con le altre funzioni salvano il file senza cifratura, quindi senza limitazioni. Per rimetterle si usa di nuovo `encrypt_pdf`.
 
 ## `decrypt_pdf(file: Uint8Array, password: string): Promise<Uint8Array>`
 

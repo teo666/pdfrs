@@ -45,7 +45,8 @@ them, though: for a responsive page, call them from a Web Worker.
 | `compose_pdf(sources, layout)` | builds a PDF from pages of several PDFs, in any order |
 | `nup_pdf(file, options?)` | several pages per sheet |
 | `booklet_pdf(file, options?)` | pages arranged for folding into a booklet |
-| `encrypt_pdf(file, owner, user)` / `decrypt_pdf(file, password)` | AES-256 |
+| `encrypt_pdf(file, owner, user, options?)` / `decrypt_pdf(file, password)` | AES-256; `options.permissions` restricts printing, copying, editing… for the user password |
+| `read_permissions(file)` | what an encrypted PDF allows, without the password (`null` if not encrypted) |
 | `is_password_protected(file)` | whether opening it needs a password |
 | `page_count(file)` | number of pages |
 | `read_metadata(file)` / `write_metadata(file, patch)` | title, author, dates… (`null` in the patch removes a field) |

@@ -1,6 +1,22 @@
-import { compress_images, decrypt_pdf, encrypt_pdf, merge_pdfs, split_pdf, write_outline } from "../worker/pdfrs-worker-client";
+import {
+  compress_images,
+  decrypt_pdf,
+  encrypt_pdf,
+  merge_pdfs,
+  read_permissions,
+  split_pdf,
+  write_outline,
+} from "../worker/pdfrs-worker-client";
 import { PdfDocument } from "./PdfDocument";
-import type { CompressionLevel, CompressResult, DocumentId, ImagePageOptions, OutlineEntry, PageId } from "./types";
+import type {
+  CompressionLevel,
+  CompressResult,
+  DocumentId,
+  ImagePageOptions,
+  OutlineEntry,
+  PageId,
+  ProtectOptions,
+} from "./types";
 
 /**
  * Manages a collection of `PdfDocument`s and the operations that span more
@@ -208,14 +224,22 @@ export class PdfEditor {
    * A password-protected copy of a document, as it looks now (pending edits
    * applied), registered as a new document - locked, see
    * `PdfDocument.isLocked`. The source stays as it is. AES-256; `password`
-   * opens the copy, `ownerPassword` (the same one unless given) is the
-   * owner's.
+   * opens the copy. `options.permissions` restricts what that password
+   * allows (see `PdfPermissions`); restrictions need `options.ownerPassword`,
+   * different from `password`, which opens it with everything allowed.
+   * Without restrictions the owner password is the same one unless given.
+   * (A string as third argument is the owner password, as before.)
    */
-  async protectDocument(id: DocumentId, password: string, ownerPassword = password): Promise<DocumentId> {
+  async protectDocument(id: DocumentId, password: string, options: ProtectOptions | string = {}): Promise<DocumentId> {
+    const { ownerPassword = password, permissions } = typeof options === "string" ? { ownerPassword: options } : options;
     const source = this.getDocument(id);
     if (source.isLocked()) throw new Error("il documento è già protetto da password");
     if (!password) throw new Error("serve una password");
-    return this.addDocument(await encrypt_pdf(await source.exportBytes(), ownerPassword, password));
+    const restricted = Object.values(permissions ?? {}).some((allowed) => allowed === false);
+    if (restricted && (!ownerPassword || ownerPassword === password)) {
+      throw new Error("per le limitazioni serve una seconda password, diversa da quella di apertura");
+    }
+    return this.addDocument(await encrypt_pdf(await source.exportBytes(), ownerPassword, password, { permissions }));
   }
 
   /**
@@ -252,7 +276,9 @@ export class PdfEditor {
       if (err instanceof Error && /invalid password/i.test(err.message)) throw new WrongPasswordError();
       throw err;
     }
-    return this.addDocument(bytes);
+    const copy = await this.addDocument(bytes);
+    this.getDocument(copy).inheritPermissions(await read_permissions(source.getBytes()));
+    return copy;
   }
 }
 

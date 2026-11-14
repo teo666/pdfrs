@@ -3,7 +3,7 @@
 // round-trip to the worker instead of a direct call, wrapped back into a
 // Promise so call sites don't need to know a worker is involved at all.
 import { createPdfrsWorker } from "./create-pdfrs-worker";
-import type { CompressionLevel, ExtractedImage, ImagePageOptions, OutlineEntry, PdfImages } from "../pdf-model/types";
+import type { CompressionLevel, ExtractedImage, ImagePageOptions, OutlineEntry, PdfImages, PdfPermissions } from "../pdf-model/types";
 import type { TextStyle } from "../text/layout";
 import type { WorkerRequest, WorkerResponse } from "./worker-protocol";
 
@@ -98,8 +98,19 @@ export function write_metadata(file: Uint8Array, patch: Record<string, string | 
   return call("write_metadata", [file, patch]);
 }
 
-export function encrypt_pdf(file: Uint8Array, ownerPassword: string, userPassword: string): Promise<Uint8Array> {
-  return call("encrypt_pdf", [file, ownerPassword, userPassword]);
+/** AES-256. `options.permissions`: what the user password allows (each one left out is allowed). */
+export function encrypt_pdf(
+  file: Uint8Array,
+  ownerPassword: string,
+  userPassword: string,
+  options: { permissions?: Partial<PdfPermissions> } = {},
+): Promise<Uint8Array> {
+  return call("encrypt_pdf", [file, ownerPassword, userPassword, options]);
+}
+
+/** What opening an encrypted PDF with its user password allows; `null` when it isn't encrypted. Needs no password. */
+export function read_permissions(file: Uint8Array): Promise<PdfPermissions | null> {
+  return call("read_permissions", [file]);
 }
 
 export function decrypt_pdf(file: Uint8Array, password: string): Promise<Uint8Array> {
