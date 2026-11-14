@@ -1,0 +1,7 @@
+# WebAssembly SIMD (simd128) for every wasm build: hayro's rasterizer
+# (vello_cpu, through fearless_simd) has a simd128 path that is only compiled
+# in with this target feature. Page previews draw about 4x faster with it,
+# and the binary is smaller. Supported by every current browser (Chrome 91,
+# Firefox 89, Safari 16.4 and later).
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

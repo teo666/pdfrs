@@ -48,6 +48,7 @@ pub struct OutlineEntry {
     pub italic: bool,
 }
 
+#[cfg(test)]
 impl OutlineEntry {
     /// An entry pointing at `page` (or nowhere), open, with no style.
     pub fn new(title: &str, level: u32, page: Option<u32>) -> Self {

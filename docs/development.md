@@ -45,6 +45,20 @@ cargo run --example gen_fixtures
 
 Rilancialo se cambi la struttura dei PDF di prova (es. servono più pagine, font diversi, ecc.) o le dimensioni del JPEG di test.
 
+### WebAssembly SIMD
+
+`.cargo/config.toml` compila ogni build wasm32 con `-C target-feature=+simd128`.
+- Il rasterizzatore di hayro (vello_cpu, tramite fearless_simd) ha un percorso `simd128` che si compila solo con questa feature.
+- Con la feature una miniatura si disegna circa 4 volte più in fretta: libro da 44 MB, da ~21 a ~5 ms a pagina nel wasm. Il binario `full` passa da 6,2 a 4,9 MB.
+- La regola vale per lo script di build, per i test wasm e per la CI dell'app, che compila il motore con lo stesso script.
+- Serve un browser con SIMD wasm: Chrome/Edge 91, Firefox 89, Safari 16.4 e successivi.
+
+Le miniature non usano `Pixmap::into_png` di hayro, ma `preview::encode_with`:
+- RGB senza alfa, perché la pagina è disegnata su bianco opaco;
+- zlib livello 3 con filtro Sub. Rispetto al default (livello 6, filtro adattivo) la codifica è circa il 40% più veloce, con PNG più grandi del 5–15%.
+
+Il bench `preview::tests::bench` misura disegno e codifica separatamente.
+
 ### Preview PDF → PNG (`examples/render_preview.rs`)
 
 Renderizza ogni pagina di un PDF in PNG usando `hayro` (lo stesso motore dietro `operations::preview::render_page_preview`), utile per controllare la fedeltà del rendering senza passare da wasm/browser:
