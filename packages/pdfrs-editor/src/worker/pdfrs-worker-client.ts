@@ -8,6 +8,7 @@ import type {
   ExtractedImage,
   ImageBox,
   ImagePageOptions,
+  ImageWatermarkOptions,
   OutlineEntry,
   PageDimensions,
   PageLabelsOptions,
@@ -130,6 +131,17 @@ export function page_labels_pdf(
   options: Omit<PageLabelsOptions, "template" | "start" | "skipFirst"> & { items: { page: number; text: string }[] },
 ): Promise<Uint8Array> {
   return call("page_labels_pdf", [file, options]);
+}
+
+/** An image (RGBA8, `width * height * 4` bytes) as a watermark on `options.pages` (1-indexed; every page when absent). */
+export function watermark_image_pdf(
+  file: Uint8Array,
+  image: Uint8Array,
+  width: number,
+  height: number,
+  options: ImageWatermarkOptions & { pages?: number[] },
+): Promise<Uint8Array> {
+  return call("watermark_image_pdf", [file, image, width, height, options]);
 }
 
 /** A PDF of one empty page, `width` by `height` points. */

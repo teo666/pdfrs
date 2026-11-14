@@ -230,6 +230,18 @@ export interface WatermarkOptions {
   layer?: "over" | "under";
 }
 
+/** An image watermark: see `PdfDocument.addImageWatermark`. Like `WatermarkOptions`, without the text. */
+export interface ImageWatermarkOptions {
+  /** 0 to 1; 0.3 when absent. */
+  opacity?: number;
+  /** "fit" (the default): as big as fits in 80% of each page; a number: the share of the page's width (0..1). */
+  size?: number | "fit";
+  /** Degrees, counter-clockwise as the page is shown; 0 (upright) when absent. */
+  angle?: number;
+  position?: "center" | "top" | "bottom";
+  layer?: "over" | "under";
+}
+
 /** Where a page label goes, on the page as shown. */
 export type LabelPosition = "top-left" | "top-center" | "top-right" | "bottom-left" | "bottom-center" | "bottom-right";
 

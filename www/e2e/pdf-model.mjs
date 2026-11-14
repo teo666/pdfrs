@@ -519,6 +519,29 @@ async function main() {
     );
   }, fourPagesBytes);
 
+  results["addImageWatermark puts an image on the chosen pages, as one undo step"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    const before = await doc.getPreview(2, 0.3);
+    // 4 x 2, red, half transparent.
+    const pixels = new Uint8Array(Array.from({ length: 8 }, () => [220, 30, 30, 128]).flat());
+    await doc.addImageWatermark({ pixels, width: 4, height: 2 }, { opacity: 0.5, size: 0.4 }, [2, 3]);
+    const after = await doc.getPreview(2, 0.3);
+    const step = doc.history().at(-1);
+    const text = new TextDecoder("latin1").decode(await doc.exportBytes());
+    const images = text.match(/\/Subtype\s*\/Image/g)?.length ?? 0;
+    doc.undo();
+    const undone = await doc.getPreview(2, 0.3);
+    const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+    return (
+      !same(after.png, before.png) &&
+      same(undone.png, before.png) &&
+      images === 2 && // the image and its mask, once for both pages
+      /\/ca 0\.5/.test(text) &&
+      step.label === "Filigrana su 2 pagine"
+    );
+  }, fourPagesBytes);
+
   // --- Page numbers: written in the order the pages are shown, pages
   // marked for deletion left out, the first one skipped if asked.
   results["addPageLabels numbers the pages in the order shown"] = await page.evaluate(async (bytes) => {

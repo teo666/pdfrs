@@ -7,7 +7,7 @@ Prima di chiamarle va inizializzato il modulo wasm una sola volta:
 ```ts
 import init, {
   merge_pdfs, split_pdf, rotate_pages, compose_pdf, encrypt_pdf, decrypt_pdf, read_permissions, restore_encryption,
-  watermark_pdf, page_labels_pdf, blank_page_pdf, page_sizes,
+  watermark_pdf, watermark_image_pdf, page_labels_pdf, blank_page_pdf, page_sizes,
   is_password_protected, page_count, read_metadata, write_metadata,
   read_outline, write_outline, list_images, move_images, remove_images, annotate_pdf,
   nup_pdf, booklet_pdf, render_page_preview, PreviewDocument, image_to_pdf, extract_image,
@@ -76,6 +76,20 @@ Le posizioni sono riferite alla parte di pagina mostrata, con `/Rotate` applicat
 
 ```ts
 const marked = await watermark_pdf(bytes, { text: "RISERVATO", color: "#c0392b", opacity: 0.2, layer: "under" });
+```
+
+## `watermark_image_pdf(file: Uint8Array, image: Uint8Array, width: number, height: number, options): Promise<Uint8Array>`
+
+Un'immagine come filigrana, per esempio un logo o un timbro. `image` è RGBA8 già decodificato (`width * height * 4` byte), come per `annotate_pdf`, e la trasparenza resta.
+
+`options` sono le stesse di `watermark_pdf` senza il testo: `{ opacity?, size?, angle?, position?, layer?, pages? }`. Le differenze:
+- `size`, se è un numero, è la quota della larghezza della pagina, da 0 a 1;
+- l'angolo, se manca, vale 0 (immagine dritta).
+
+Tutte le pagine usano un solo oggetto immagine.
+
+```ts
+const marked = await watermark_image_pdf(bytes, logo.pixels, logo.width, logo.height, { size: 0.3, opacity: 0.15, layer: "under" });
 ```
 
 ## `page_labels_pdf(file: Uint8Array, options): Promise<Uint8Array>`

@@ -60,6 +60,7 @@ them, though: for a responsive page, call them from a Web Worker.
 | `move_images(file, moves)` | moves, resizes and turns images already in the PDF (placement ids stay the same) |
 | `annotate_pdf(file, assets, assetsMeta, annotations)` | stamps text, images and signatures on pages, over or under the content, with any opacity |
 | `watermark_pdf(file, options)` | a text watermark across the pages (size to fit, angle, opacity, over or under the content) |
+| `watermark_image_pdf(file, image, width, height, options)` | an image (RGBA) as a watermark, with the same options, keeping its transparency |
 | `page_labels_pdf(file, options)` | page numbers, headers, footers: a short text per page, at a corner or the middle of an edge |
 | `blank_page_pdf(width, height)` / `page_sizes(file)` | an empty one-page PDF; every page's size as shown |
 | `render_page_preview(file, page, scale)` | a page as PNG (`full` only) |

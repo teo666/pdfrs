@@ -20,6 +20,7 @@ import {
   replace_image,
   restore_encryption,
   rotate_pages,
+  watermark_image_pdf,
   watermark_pdf,
   write_metadata,
   write_outline,
@@ -55,6 +56,7 @@ import type {
   PageRange,
   PdfImages,
   PdfMetadata,
+  ImageWatermarkOptions,
   PageLabelsOptions,
   PdfPermissions,
   WatermarkOptions,
@@ -1247,6 +1249,32 @@ export class PdfDocument {
     if (!options.text.trim()) throw new Error("il testo della filigrana è vuoto");
     const before = this.snapshot();
     this.bytes = await watermark_pdf(this.bytes, { ...options, pages: targets });
+    for (const page of targets) {
+      for (const cached of [...this.previewCache.keys()]) {
+        if (cached.startsWith(`${page}:`)) this.previewCache.delete(cached);
+      }
+    }
+    this.recordSnapshot(
+      before,
+      targets.length === 1 ? `Filigrana sulla pagina ${targets[0]}` : `Filigrana su ${targets.length} pagine`,
+      { type: "watermark", params: { count: targets.length, page: targets[0] as PageId } },
+    );
+  }
+
+  /**
+   * An image (a logo, a stamp: RGBA, as `ImageAsset`) as a watermark on
+   * `pages` - every page when absent - right away, like `addWatermark`:
+   * one undo step, those pages' previews drawn again. Its transparency is
+   * kept; one image object serves every page.
+   */
+  async addImageWatermark(image: ImageAsset, options: ImageWatermarkOptions, pages?: PageId[]): Promise<void> {
+    const targets = pages ? this.distinctPages(pages) : [...this.order];
+    if (targets.length === 0) return;
+    const before = this.snapshot();
+    this.bytes = await watermark_image_pdf(this.bytes, image.pixels, image.width, image.height, {
+      ...options,
+      pages: targets,
+    });
     for (const page of targets) {
       for (const cached of [...this.previewCache.keys()]) {
         if (cached.startsWith(`${page}:`)) this.previewCache.delete(cached);
