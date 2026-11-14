@@ -427,6 +427,78 @@ async function main() {
     return doc.hasPendingChanges() === true && doc.getPageCount() === 4;
   }, fourPagesBytes);
 
+  // --- Watermark: applied right away on the pages asked for, their
+  // previews redrawn (the others kept), one undo step; pending edits stay.
+  results["addWatermark marks the chosen pages at once, as one undo step"] = await page.evaluate(async (bytes) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.open(new Uint8Array(bytes));
+    doc.rotatePage(3, 90); // pending, and still pending afterwards
+    const first = await doc.getPreview(1, 0.3);
+    const second = await doc.getPreview(2, 0.3);
+    await doc.addWatermark({ text: "BOZZA", color: "#ff0000", opacity: 0.5 }, [2, 4]);
+    const step = doc.history().at(-1);
+    const firstAfter = await doc.getPreview(1, 0.3);
+    const secondAfter = await doc.getPreview(2, 0.3);
+    const text = new TextDecoder("latin1").decode(await doc.exportBytes());
+    doc.undo();
+    const secondUndone = await doc.getPreview(2, 0.3);
+    const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+
+    let empty = false;
+    try {
+      await doc.addWatermark({ text: "  " });
+    } catch {
+      empty = true;
+    }
+    return (
+      firstAfter.png === first.png && // not redrawn: the very same cached picture
+      !same(secondAfter.png, second.png) &&
+      same(secondUndone.png, second.png) &&
+      doc.pages()[2].pendingRotation === 90 &&
+      /\/ca 0\.5/.test(text) &&
+      step.label === "Filigrana su 2 pagine" &&
+      step.action.type === "watermark" &&
+      step.action.params.count === 2 &&
+      empty
+    );
+  }, fourPagesBytes);
+
+  // --- A blank page, the size of the one before it as shown (turned with it).
+  results["insertBlankPage adds an empty page the size of its neighbour"] = await page.evaluate(async (photo) => {
+    const { PdfDocument } = window.__pdfModel;
+    // A landscape photo page, then the blank one after it.
+    const doc = await PdfDocument.fromImage(new Uint8Array(photo), { pageSize: "a4", orientation: "landscape" });
+    const id = await doc.insertBlankPage(1);
+    const added = await doc.getPreview(id, 0.2);
+    const neighbour = await doc.getPreview(1, 0.2);
+    const size = async (png) => {
+      const bitmap = await createImageBitmap(new Blob([png], { type: "image/png" }));
+      return [bitmap.width, bitmap.height];
+    };
+    const [w, h] = await size(added.png);
+    const [nw, nh] = await size(neighbour.png);
+    const step = doc.history().at(-1);
+
+    // In front, a turned page: the blank one comes turned too.
+    doc.rotatePage(1, 90);
+    const front = await doc.insertBlankPage(0);
+    const [fw, fh] = await size((await doc.getPreview(front, 0.2)).png);
+    doc.undo();
+    doc.undo();
+    doc.undo();
+    return (
+      w === nw &&
+      h === nh &&
+      w > h &&
+      fw === nh &&
+      fh === nw &&
+      doc.getPageCount() === 1 &&
+      step.action.type === "blankPage" &&
+      step.action.params.position === 2 &&
+      step.label === "Inserisci pagina bianca in posizione 2"
+    );
+  }, photoJpgBytes);
+
   // --- Permissions: restrictions need a second, different password; the
   // locked copy reports them without being unlocked, and so does the copy
   // unlocked from it. A plain document has none.

@@ -1,4 +1,4 @@
-import type { TextContent } from "../text/layout";
+import type { StandardFont, TextAlign, TextContent } from "../text/layout";
 
 /** 1-indexed page number, stable until the next PdfDocument.commit(). */
 export type PageId = number;
@@ -188,6 +188,34 @@ export interface PdfPermissions {
   fillForms: boolean;
   /** Insert, rotate or delete pages and change bookmarks, even without `modify`. */
   assemble: boolean;
+}
+
+/** A text watermark: see `PdfDocument.addWatermark`. */
+export interface WatermarkOptions {
+  /** One or more lines (`\n`), in a PDF standard font (WinAnsi characters). */
+  text: string;
+  font?: StandardFont;
+  bold?: boolean;
+  italic?: boolean;
+  /** `#rrggbb`; grey when absent. */
+  color?: string;
+  /** How the lines line up; centred when absent. */
+  align?: TextAlign;
+  /** 0 to 1; 0.3 when absent. */
+  opacity?: number;
+  /** A font size in points, or "fit" (the default): as big as fits in 80% of each page. */
+  size?: number | "fit";
+  /** Degrees, counter-clockwise as the page is shown: 45 (the default) rises to the right, 0 is horizontal. */
+  angle?: number;
+  position?: "center" | "top" | "bottom";
+  /** Over the content (the default), or under it - where anything opaque on the page (a scan) hides it. */
+  layer?: "over" | "under";
+}
+
+/** A page's size as it's shown, in points (visible part, `/Rotate` applied). */
+export interface PageDimensions {
+  width: number;
+  height: number;
 }
 
 /** How `PdfEditor.protectDocument` protects a document. */

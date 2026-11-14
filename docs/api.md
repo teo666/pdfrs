@@ -7,6 +7,7 @@ Prima di chiamarle va inizializzato il modulo wasm una sola volta:
 ```ts
 import init, {
   merge_pdfs, split_pdf, rotate_pages, compose_pdf, encrypt_pdf, decrypt_pdf, read_permissions,
+  watermark_pdf, blank_page_pdf, page_sizes,
   is_password_protected, page_count, read_metadata, write_metadata,
   read_outline, write_outline, list_images, remove_images, annotate_pdf,
   nup_pdf, booklet_pdf, render_page_preview, PreviewDocument, image_to_pdf, extract_image,
@@ -56,6 +57,34 @@ const composed = await compose_pdf([bytesA, bytesB], [
   { source: 0, page: 1 },
 ]);
 ```
+
+## `watermark_pdf(file: Uint8Array, options): Promise<Uint8Array>`
+
+Una filigrana di testo, per esempio «BOZZA», sulle pagine.
+
+`options` è `{ text, font?, bold?, italic?, color?, align?, opacity?, size?, angle?, position?, layer?, pages? }`:
+- `text`: una o più righe (`\n`), nei font standard, come per il testo di `annotate_pdf`.
+- `color`: `#rrggbb`, grigio se manca.
+- `opacity`: da 0 a 1, 0,3 se manca.
+- `size`: un corpo in punti, uguale su tutte le pagine, oppure `"fit"` (il valore di default). Con `"fit"` la scritta è grande quanto basta a riempire l'80% di ogni pagina, all'angolo scelto.
+- `angle`: gradi in senso antiorario come si vede la pagina. 45, il valore di default, sale da sinistra a destra; 0 è orizzontale.
+- `position`: `"center"` (il valore di default), `"top"` o `"bottom"`, a un 5% dal bordo.
+- `layer`: `"over"` (il valore di default) o `"under"`, come per `annotate_pdf`.
+- `pages`: numeri di pagina da 1; tutte le pagine se manca.
+
+Le posizioni sono riferite alla parte di pagina mostrata, con `/Rotate` applicata: la scritta viene dritta per chi legge anche su una pagina ruotata.
+
+```ts
+const marked = await watermark_pdf(bytes, { text: "RISERVATO", color: "#c0392b", opacity: 0.2, layer: "under" });
+```
+
+## `blank_page_pdf(width: number, height: number): Promise<Uint8Array>`
+
+Un PDF di una sola pagina vuota, `width` × `height` punti, ciascuno da 1 a 14400. Si inserisce in un altro documento come un PDF qualsiasi.
+
+## `page_sizes(file: Uint8Array): Promise<{ width, height }[]>`
+
+La misura di ogni pagina come si vede, in punti e in ordine. È la parte mostrata, cioè la CropBox dentro la MediaBox, con i lati scambiati se `/Rotate` la gira di un quarto.
 
 ## `encrypt_pdf(file: Uint8Array, ownerPassword: string, userPassword: string, options?): Promise<Uint8Array>`
 
@@ -119,6 +148,8 @@ I parametri:
 - **`assetsMeta`**: `[{ width, height }]`, parallelo ad `assets`.
 - **`annotations`**: `[{ page, x, y, width, rotation?, kind: "image", asset }]`, dove `asset` è l'indice dentro `assets`. `x`/`y`/`width` sono **frazioni (0..1) della pagina come la si vede**, con origine in alto a sinistra — le stesse coordinate del riquadro che l'utente trascina sull'anteprima. L'altezza non è un parametro: deriva da `width` e dalle proporzioni dell'immagine, così un'immagine non può essere stirata.
 - **`rotation`** (opzionale, default 0): gradi **in senso orario come li vede chi guarda la pagina**, lo stesso verso di `/Rotate`. La rotazione avviene attorno al centro dell'immagine, quindi non ne sposta la posizione, e `x`/`y`/`width` restano quelli del rettangolo **non ruotato**. Ometterlo equivale a passare `0`.
+- **`opacity`** (opzionale, default 1): da 0 a 1. Diventa uno stato grafico `/ExtGState` con `ca`/`CA`, uno solo per ogni opacità usata, condiviso dalle pagine.
+- **`layer`** (opzionale, default `"over"`): `"over"` disegna sopra il contenuto della pagina. `"under"` lo disegna prima, quindi non copre niente, ma sparisce dietro qualsiasi cosa opaca, come una scansione.
 
 Le pagine con `/Rotate` sono gestite: il content stream non sa nulla di quella rotazione (il visualizzatore la applica per conto suo), quindi la matrice viene convertita dallo spazio visualizzato a quello della pagina, e l'immagine ruotata di conseguenza per apparire dritta.
 

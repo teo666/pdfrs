@@ -1,5 +1,6 @@
 import {
   annotate_pdf,
+  blank_page_pdf,
   compose_pdf,
   decrypt_pdf,
   encrypt_pdf,
@@ -9,12 +10,14 @@ import {
   list_images,
   merge_pdfs,
   page_count,
+  page_sizes,
   read_metadata,
   read_outline,
   read_permissions,
   remove_images,
   replace_image,
   rotate_pages,
+  watermark_pdf,
   write_metadata,
   write_outline,
 } from "../worker/pdfrs-worker-client";
@@ -39,6 +42,7 @@ import type {
   PdfImages,
   PdfMetadata,
   PdfPermissions,
+  WatermarkOptions,
 } from "./types";
 
 export interface GetPreviewsOptions {
@@ -1138,6 +1142,55 @@ export class PdfDocument {
       pages.length === 1 ? `Sostituisci immagine (pagina ${pages[0]})` : `Sostituisci immagine su ${pages.length} pagine`,
       { type: "replaceImage", params: { pages: pages.length, page: pages[0] ?? 0 } },
     );
+  }
+
+  /**
+   * Draws a text watermark (see `WatermarkOptions`) on `pages` - every page
+   * when absent - right away: like `replaceImage`, it changes the document
+   * itself, as one undo step, and the previews of those pages are drawn
+   * again, so they show it exactly as it comes out (under the content
+   * included). Pending edits are kept.
+   */
+  async addWatermark(options: WatermarkOptions, pages?: PageId[]): Promise<void> {
+    const targets = pages ? this.distinctPages(pages) : [...this.order];
+    if (targets.length === 0) return;
+    if (!options.text.trim()) throw new Error("il testo della filigrana è vuoto");
+    const before = this.snapshot();
+    this.bytes = await watermark_pdf(this.bytes, { ...options, pages: targets });
+    for (const page of targets) {
+      for (const cached of [...this.previewCache.keys()]) {
+        if (cached.startsWith(`${page}:`)) this.previewCache.delete(cached);
+      }
+    }
+    this.recordSnapshot(
+      before,
+      targets.length === 1 ? `Filigrana sulla pagina ${targets[0]}` : `Filigrana su ${targets.length} pagine`,
+      { type: "watermark", params: { count: targets.length, page: targets[0] as PageId } },
+    );
+  }
+
+  /**
+   * Inserts an empty page at `at` in the display order (default: at the
+   * end), the size of the page shown just before it (the first page, when
+   * it goes in front) - turned, if that page is. One undo step. Returns its id.
+   */
+  async insertBlankPage(at?: number): Promise<PageId> {
+    const index = Math.max(0, Math.min(at ?? this.order.length, this.order.length));
+    const neighbour = this.order[index - 1] ?? this.order[0];
+    let width = 595.28;
+    let height = 841.89;
+    if (neighbour !== undefined) {
+      const size = (await page_sizes(this.bytes))[neighbour - 1];
+      if (size) ({ width, height } = size);
+      if ((this.rotations.get(neighbour) ?? 0) % 180 !== 0) [width, height] = [height, width];
+    }
+    const [id] = await this.insertPages(
+      await blank_page_pdf(width, height),
+      index,
+      `Inserisci pagina bianca in posizione ${index + 1}`,
+      { type: "blankPage", params: { position: index + 1 } },
+    );
+    return id as PageId;
   }
 
   /** "Rimuovi immagine (pagina 3)", "Rimuovi 2 immagini da 12 pagine"... */

@@ -48,6 +48,22 @@ pub enum AnnotationKind {
     },
 }
 
+/// Whether an annotation goes over the page's content or under it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Layer {
+    /// Drawn after the content: always visible, covers what's beneath it.
+    #[default]
+    Over,
+    /// Drawn before the content: covers nothing, but anything opaque on the
+    /// page (a scan, a filled background) hides it.
+    Under,
+}
+
+fn fully_opaque() -> f64 {
+    1.0
+}
+
 /// One thing drawn on one page.
 ///
 /// `x`/`y`/`width` are fractions (0..1) of the page **as displayed**, with the
@@ -77,6 +93,12 @@ pub struct Annotation {
     /// and the image's own proportions.
     #[serde(default)]
     pub height: Option<f64>,
+    /// 0 (invisible) to 1 (opaque, the default): how much of what's beneath shows through.
+    #[serde(default = "fully_opaque")]
+    pub opacity: f64,
+    /// Over the page's content (the default) or under it.
+    #[serde(default)]
+    pub layer: Layer,
     #[serde(flatten)]
     pub kind: AnnotationKind,
 }
@@ -119,6 +141,8 @@ pub fn annotate(doc: &mut Document, assets: &[ImageAsset], annotations: &[Annota
     let mut image_ids: Vec<Option<ObjectId>> = vec![None; assets.len()];
     // One font object per face, shared by every page that uses it.
     let mut font_ids: HashMap<FontFace, ObjectId> = HashMap::new();
+    // One graphics state per opacity (in thousandths), likewise.
+    let mut opacity_ids: HashMap<u32, ObjectId> = HashMap::new();
 
     for (page, page_id, grouped) in targets {
         // The part of the page shown (CropBox within MediaBox): what the
@@ -134,7 +158,8 @@ pub fn annotate(doc: &mut Document, assets: &[ImageAsset], annotations: &[Annota
         // re-encoded: that round trip loses inline images (see
         // content_scan.rs). Only what we add goes through `Content::encode`.
         let original = doc.get_page_content(page_id);
-        let mut added: Vec<Operation> = Vec::new();
+        let mut over: Vec<Operation> = Vec::new();
+        let mut under: Vec<Operation> = Vec::new();
 
         // Wrap whatever was already on the page in its own q/Q before adding
         // anything. A page's content stream is not required to leave the
@@ -214,19 +239,44 @@ pub fn annotate(doc: &mut Document, assets: &[ImageAsset], annotations: &[Annota
                 }
             };
 
-            added.push(Operation::new("q", vec![]));
-            added.extend(operations);
-            added.push(Operation::new("Q", vec![]));
+            let layer = match annotation.layer {
+                Layer::Over => &mut over,
+                Layer::Under => &mut under,
+            };
+            layer.push(Operation::new("q", vec![]));
+            if annotation.opacity < 1.0 {
+                // ca for fills (text, images), CA for strokes, as a named
+                // graphics state: there's no operator that sets them directly.
+                let key = (annotation.opacity * 1000.0).round() as u32;
+                let state_id = *opacity_ids.entry(key).or_insert_with(|| {
+                    let alpha = Object::Real(key as f32 / 1000.0);
+                    doc.add_object(dictionary! {
+                        "Type" => "ExtGState",
+                        "ca" => alpha.clone(),
+                        "CA" => alpha,
+                    })
+                });
+                let name = format!("Gs{}", state_id.0);
+                add_resource(doc, page_id, b"ExtGState", name.as_bytes(), state_id)?;
+                layer.push(Operation::new("gs", vec![Object::Name(name.into_bytes())]));
+            }
+            layer.extend(operations);
+            layer.push(Operation::new("Q", vec![]));
         }
 
-        let encoded = Content { operations: added }
-            .encode()
-            .map_err(|err| PdfrsError::InvalidArgument(err.to_string()))?;
-        let mut content = Vec::with_capacity(original.len() + encoded.len() + 8);
+        let encode = |operations: Vec<Operation>| {
+            Content { operations }
+                .encode()
+                .map_err(|err| PdfrsError::InvalidArgument(err.to_string()))
+        };
+        let (under, over) = (encode(under)?, encode(over)?);
+        let mut content = Vec::with_capacity(original.len() + under.len() + over.len() + 8);
+        // Under the content: drawn first, from the page's initial state.
+        content.extend_from_slice(&under);
         content.extend_from_slice(b"q\n");
         content.extend_from_slice(&original);
         content.extend_from_slice(b"\nQ\n");
-        content.extend_from_slice(&encoded);
+        content.extend_from_slice(&over);
         // A stream of the page's own: the old one may be shared with other pages.
         content_scan::set_page_content(doc, page_id, content)?;
     }
@@ -292,6 +342,12 @@ fn validate_annotation(annotation: &Annotation, asset_count: usize) -> Result<()
                 "altezza dell'annotazione non valida: {height}"
             )));
         }
+    }
+    if !(0.0..=1.0).contains(&annotation.opacity) {
+        return Err(PdfrsError::InvalidArgument(format!(
+            "opacità dell'annotazione non valida: {} (va da 0 a 1)",
+            annotation.opacity
+        )));
     }
     if !annotation.rotation.is_finite() {
         return Err(PdfrsError::InvalidArgument(format!(
@@ -405,7 +461,7 @@ fn inherited_attribute(doc: &Document, page_id: ObjectId, key: &[u8]) -> Option<
 
 /// `/Rotate` normalised to 0/90/180/270. Anything else (absent, malformed, or
 /// not a multiple of 90) is treated as 0, which is what viewers do.
-fn page_rotation(doc: &Document, page_id: ObjectId) -> i64 {
+pub(crate) fn page_rotation(doc: &Document, page_id: ObjectId) -> i64 {
     let degrees = inherited_attribute(doc, page_id, b"Rotate")
         .and_then(|object| object.as_i64().ok())
         .unwrap_or(0);
@@ -448,30 +504,35 @@ fn text_operations(
     operations
 }
 
-/// Adds a font to the page's /Resources /Font - the same steps as lopdf's
-/// `add_xobject`, for fonts: create the dictionary if missing, follow it if
-/// it's a reference.
+/// Adds a font to the page's /Resources /Font.
 fn add_font_resource(doc: &mut Document, page_id: ObjectId, name: &[u8], font_id: ObjectId) -> Result<()> {
-    let fonts_ref = {
+    add_resource(doc, page_id, b"Font", name, font_id)
+}
+
+/// Adds `name` → `id` to the page's /Resources /`category` (/Font,
+/// /ExtGState...) - the same steps as lopdf's `add_xobject`: create the
+/// dictionary if missing, follow it if it's a reference.
+fn add_resource(doc: &mut Document, page_id: ObjectId, category: &[u8], name: &[u8], id: ObjectId) -> Result<()> {
+    let category_ref = {
         let resources = doc.get_or_create_resources(page_id).and_then(Object::as_dict_mut)?;
-        if !resources.has(b"Font") {
-            resources.set("Font", lopdf::Dictionary::new());
+        if !resources.has(category) {
+            resources.set(category.to_vec(), lopdf::Dictionary::new());
         }
-        match resources.get(b"Font")? {
+        match resources.get(category)? {
             Object::Reference(id) => Some(*id),
             _ => None,
         }
     };
-    let fonts = match fonts_ref {
-        Some(mut id) => {
-            while let Object::Reference(next) = doc.get_object(id)? {
-                id = *next;
+    let entries = match category_ref {
+        Some(mut ref_id) => {
+            while let Object::Reference(next) = doc.get_object(ref_id)? {
+                ref_id = *next;
             }
-            doc.get_object_mut(id)?
+            doc.get_object_mut(ref_id)?
         }
-        None => doc.get_or_create_resources(page_id).and_then(Object::as_dict_mut)?.get_mut(b"Font")?,
+        None => doc.get_or_create_resources(page_id).and_then(Object::as_dict_mut)?.get_mut(category)?,
     };
-    fonts.as_dict_mut()?.set(name.to_vec(), Object::Reference(font_id));
+    entries.as_dict_mut()?.set(name.to_vec(), Object::Reference(id));
     Ok(())
 }
 
@@ -574,7 +635,17 @@ mod tests {
     }
 
     pub(super) fn at(page: u32, x: f64, y: f64, width: f64, asset: usize) -> Annotation {
-        Annotation { page, x, y, width, rotation: 0.0, height: None, kind: AnnotationKind::Image { asset } }
+        Annotation {
+            page,
+            x,
+            y,
+            width,
+            rotation: 0.0,
+            height: None,
+            opacity: 1.0,
+            layer: Layer::Over,
+            kind: AnnotationKind::Image { asset },
+        }
     }
 
     /// `at`, turned by `rotation` degrees clockwise as the reader sees it.

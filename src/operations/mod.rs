@@ -19,6 +19,7 @@ pub mod rotate;
 pub mod split;
 pub mod stamp;
 pub mod text;
+pub mod watermark;
 mod text_metrics;
 
 #[cfg(test)]
