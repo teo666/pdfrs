@@ -11,6 +11,7 @@ import {
   merge_pdfs,
   move_images,
   page_count,
+  page_labels_pdf,
   page_sizes,
   read_metadata,
   read_outline,
@@ -54,6 +55,7 @@ import type {
   PageRange,
   PdfImages,
   PdfMetadata,
+  PageLabelsOptions,
   PdfPermissions,
   WatermarkOptions,
 } from "./types";
@@ -1254,6 +1256,43 @@ export class PdfDocument {
       before,
       targets.length === 1 ? `Filigrana sulla pagina ${targets[0]}` : `Filigrana su ${targets.length} pagine`,
       { type: "watermark", params: { count: targets.length, page: targets[0] as PageId } },
+    );
+  }
+
+  /**
+   * Page numbers, a header or a footer (see `PageLabelsOptions`) on `pages`
+   * - every page shown when absent - right away, like `addWatermark`: one
+   * undo step, those pages' previews drawn again. The numbers follow the
+   * order the pages are *shown* in, pages marked for deletion left out:
+   * `{n}` is a page's place among those labelled (plus `start` - 1),
+   * `{total}` how many they are. Reordering afterwards doesn't renumber them.
+   */
+  async addPageLabels(options: PageLabelsOptions, pages?: PageId[]): Promise<void> {
+    const chosen = pages ? new Set(this.distinctPages(pages)) : null;
+    const targets = this.order.filter((id) => !this.deletions.has(id) && (!chosen || chosen.has(id)));
+    if (targets.length === 0) return;
+    if (!options.template.trim()) throw new Error("il testo dei numeri di pagina è vuoto");
+    const start = options.start ?? 1;
+    const total = targets.length + start - 1;
+    const items = targets
+      .map((page, index) => ({
+        page,
+        text: options.template.split("{n}").join(String(index + start)).split("{total}").join(String(total)),
+      }))
+      .slice(options.skipFirst ? 1 : 0);
+    if (items.length === 0) return;
+    const { template: _template, start: _start, skipFirst: _skip, ...style } = options;
+    const before = this.snapshot();
+    this.bytes = await page_labels_pdf(this.bytes, { ...style, items });
+    for (const { page } of items) {
+      for (const cached of [...this.previewCache.keys()]) {
+        if (cached.startsWith(`${page}:`)) this.previewCache.delete(cached);
+      }
+    }
+    this.recordSnapshot(
+      before,
+      items.length === 1 ? `Numero di pagina sulla pagina ${items[0]!.page}` : `Numeri di pagina su ${items.length} pagine`,
+      { type: "pageLabels", params: { count: items.length, page: items[0]!.page } },
     );
   }
 

@@ -230,6 +230,29 @@ export interface WatermarkOptions {
   layer?: "over" | "under";
 }
 
+/** Where a page label goes, on the page as shown. */
+export type LabelPosition = "top-left" | "top-center" | "top-right" | "bottom-left" | "bottom-center" | "bottom-right";
+
+/** Page numbers, a header or a footer: see `PdfDocument.addPageLabels`. */
+export interface PageLabelsOptions {
+  /** The text, with `{n}` for the page's number and `{total}` for how many are numbered. */
+  template: string;
+  /** The number of the first page labelled; 1 when absent. */
+  start?: number;
+  /** Leave the first page without its label (it still counts: the next one is `start + 1`). */
+  skipFirst?: boolean;
+  position?: LabelPosition;
+  /** Font size in points; 10 when absent. */
+  size?: number;
+  font?: StandardFont;
+  bold?: boolean;
+  italic?: boolean;
+  /** `#rrggbb`; black when absent. */
+  color?: string;
+  /** From the page's edges, in points; 36 when absent. */
+  margin?: number;
+}
+
 /** A page's size as it's shown, in points (visible part, `/Rotate` applied). */
 export interface PageDimensions {
   width: number;
