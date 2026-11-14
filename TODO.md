@@ -2,16 +2,28 @@
 
 Idee di funzionalità discusse e non ancora implementate.
 
-- [ ] **Pagina bianca / watermark** — stesso pattern di `image_to_pdf` (costruire un content stream/pagina da zero) applicato a una pagina vuota o a un testo/immagine stampato sopra pagine esistenti.
-- [ ] **Riordino di pagine tra documenti diversi nell'editor** — trascinare una pagina dal documento A dentro il documento B; concettualmente un delete-da-A + compose-in-B, la logica sotto esiste già, serve solo lavoro di UI.
+## Lista di lavoro
+
+I punti decisi, nell'ordine in cui si fanno. Ogni PR spunta il suo.
+
+1. [ ] **Rilascio di `pdfrs.js` 0.3.0** — CropBox, `replace_image`/`compress_images`, `PreviewDocument` e quello che arriva dai punti sotto. Versione e changelog; la pubblicazione su npm la conferma l'utente.
+2. [ ] **Prima release dell'app** (tag `v0.1.0` in pdfrs-app): zip dell'estensione per Chrome e Firefox e della build web, con il workflow `release.yml` che c'è già.
+3. [ ] **Pulizia** — branch già mergiati; action ferme a Node 20 (`configure-pages`, `deploy-pages`, `pnpm/action-setup`, `upload-artifact`).
+4. [x] **Togliere solo la rotazione** di una o più pagine: il badge «90° ×» della miniatura e del visualizzatore, e un pulsante nella barra delle pagine selezionate (`PdfDocument.resetRotations`, un solo passo di cronologia).
+5. [ ] **Filigrana di testo e pagine bianche** — filigrana sopra o sotto il contenuto, con opacità, angolo, dimensione e pagine scelte, applicata subito e annullabile; «Inserisci pagina bianca» della misura della pagina vicina.
+6. [ ] **Indice, fase 2** — modificare le voci (aggiungere, rinominare, togliere, spostare, rientro); portare nel documento di destinazione le voci delle pagine trasferite; ricordare lo stato aperto/chiuso dei rami dopo un «Applica modifiche»; tenere link URI, colore e stile delle voci.
+7. [ ] **Permessi del PDF protetto** (stampa, copia del testo, modifica…) con una password per togliere le limitazioni diversa da quella di apertura; mostrare le limitazioni di un file aperto.
+8. [ ] **Immagini, fase 3** — spostare e ridimensionare un'immagine già nel PDF (`q <delta> cm … Q` attorno al disegno; niente per le Form condivise tra pagine; avviso per quelle ritagliate).
+9. [ ] **Miniature più veloci da disegnare** — misurare prima quanto pesa la codifica PNG rispetto al disegno; poi scala più bassa, WebP o bitmap, profilo di hayro.
+
+## Altre idee
+
 - [x] **Possibilità di mettere la firma** — apposizione di immagini PNG (con trasparenza) su pagine esistenti (`annotate_pdf`), con pannello nella pagina di test.
-- [ ] **Firma, N-up e booklet nell'editor** — oggi `annotate_pdf`, `nup_pdf` e `booklet_pdf` sono esposti solo nella pagina di test (`www/src/main.ts`), non nei web component dell'editor.
 - [ ] **Simple pdf viewer**
 - [x] **fascicolatura / booklet** — imposizione a libretto piegato al centro (saddle-stitch), riordino automatico a multipli di 4, supporto fronte/retro e direzione di rilegatura (`booklet_pdf`).
 - [x] **pdf multipagina / N-up** — layout a griglia con $N$ pagine per foglio (1, 2, 4, 6, 8, 9, 16 o custom), margini, spacing, bordi, orientamento e auto-rotazione (`nup_pdf`).
 - [x] **rimozione immagini (fase 1)** — elenco delle immagini già nel PDF con posizione, scarico (JPEG originale o PNG), rimozione in sospeso da una pagina o da tutte (`images.rs`, `image_extract.rs`, strumento «Immagini» dell'app).
 - [x] **Immagini, fase 2** — sostituire un'immagine (ovunque sia disegnata, adattata nel riquadro con margini trasparenti: `replace_image`) e alleggerire il file ricomprimendo le immagini in una copia (`compress_images`, tre livelli). `image_edit.rs`; strumento «Immagini» dell'app.
-- [ ] **Immagini, fase 3** — spostare e ridimensionare un'immagine esistente (riscrivere la `cm` che la precede; attenzione a trasformazioni annidate e ritagli).
 - [ ] rimozione firma digitale
 - [ ] creazione firma digitale
 
@@ -22,12 +34,9 @@ In ordine di priorità suggerito.
 - [x] **Pannello "Proprietà": i metadati del documento** — titolo, autore, oggetto, parole chiave, creator, producer, date. Il motore li legge e scrive (`read_metadata`/`write_metadata`) e il modello li gestisce già come una modifica in sospeso (`PdfDocument.getMetadata()`/`setMetadata()`: lettura lazy, annullabili, applicati con il commit). Utile per correggere il titolo che i lettori PDF mostrano al posto del nome del file, o per togliere l'autore prima di condividere.
 - [x] **Cronologia delle modifiche** — il modello tiene una cronologia con un'etichetta per ogni passo ("Conferma modifiche (12 pagine)", il nome dell'immagine inserita…) e può saltare a un punto preciso (`history()`, `goToHistoryIndex()`); l'app ha solo Annulla/Ripeti. Un pannello con l'elenco permetterebbe di tornare indietro di più passi in un clic e di vedere cosa si annulla.
 - [x] **Pagina A4/Letter per i JPEG** — ogni foto aperta o inserita va sulla pagina e col margine predefiniti (A4, 1 cm, ricordati); nel visualizzatore si cambiano foto per foto (A4 / Letter / dimensione reale; margine nessuno / 0,5 / 1 / 2 cm) con «Usa per le prossime foto» (`setPhotoPage`, opzione `margin` di `image_to_pdf`).
-- [ ] **Togliere solo la rotazione** di una pagina (`PdfDocument.resetRotation`): oggi si ruota di nuovo o si annulla.
 - [x] **Indice del PDF (segnalibri)** — strumento «Indice» (albero, voce → vai alla miniatura); l'indice resta con eliminazioni, riordini, estrazioni, inserimenti e unioni (un ramo per documento). `outline.rs`, `remapOutline` nel modello.
-- [ ] **Indice, fase 2** — modificare le voci (aggiungere, rinominare, togliere, spostare); portare nel documento di destinazione le voci delle pagine trasferite; ricordare lo stato aperto/chiuso dei rami dopo un «Applica modifiche».
 - [x] **`stamp.rs` usa la MediaBox, le anteprime la CropBox** — firme, immagini e testo ora si posizionano sulla parte di pagina mostrata (CropBox∩MediaBox, `nup::get_visible_box`, la stessa di `images.rs`).
 - [x] **N per foglio e libretto ignorano la CropBox** — ogni pagina diventa una Form con il `BBox` sulla parte mostrata (`create_page_form_xobject` usa `get_visible_box`): sul foglio arriva solo quella, e «formato originale» è quello della pagina mostrata.
-- [ ] **Permessi del PDF protetto** (stampa, copia del testo, modifica) — questo richiede prima il motore: `encrypt` in `src/operations/crypto.rs` usa `Permissions::default()`, cioè tutto consentito.
 
 ## Ottimizzazioni future
 

@@ -1137,6 +1137,39 @@ async function main() {
     );
   }, tenPagesBytes);
 
+  results["resetRotations clears several pages in one step, skipping pages not rotated"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfDocument } = window.__pdfModel;
+      const doc = await PdfDocument.open(new Uint8Array(bytes));
+      doc.rotatePages([1, 2, 3], 90);
+      doc.rotatePage(5, -90);
+      const before = doc.history().length;
+      doc.resetRotations([1, 3, 4, 5]); // page 4 isn't rotated: skipped
+      const steps = doc.history().slice(before);
+      const rotations = () => doc.pages().map((p) => p.pendingRotation);
+      const cleared = rotations().join() === "0,90,0,0,0,0,0,0,0,0";
+      doc.resetRotations([4, 6]); // nothing rotated: no step
+      const noStep = doc.history().length === before + 1;
+      doc.resetRotations([2]); // one page: the single-page step
+      const single = doc.history().at(-1);
+      doc.undo();
+      doc.undo();
+      const undone = rotations().join() === "90,90,90,0,270,0,0,0,0,0";
+      return (
+        cleared &&
+        noStep &&
+        undone &&
+        steps.length === 1 &&
+        steps[0].label === "Azzera la rotazione di 3 pagine" &&
+        steps[0].action.type === "resetRotations" &&
+        steps[0].action.params.count === 3 &&
+        single.action.type === "resetRotation" &&
+        single.action.params.page === 2
+      );
+    },
+    tenPagesBytes,
+  );
+
   results["a group edit on a single page reads like the single-page edit"] = await page.evaluate(async (bytes) => {
     const { PdfDocument } = window.__pdfModel;
     const doc = await PdfDocument.open(new Uint8Array(bytes));
