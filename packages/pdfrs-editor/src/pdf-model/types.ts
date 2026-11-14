@@ -114,6 +114,12 @@ export interface OutlineEntry {
   top?: number | null;
   /** Whether its children show when the document opens. */
   open: boolean;
+  /** A web address it opens instead of a page, if it does. */
+  uri?: string;
+  /** `#rrggbb` its title is shown in, if not the reader's default. */
+  color?: string;
+  bold?: boolean;
+  italic?: boolean;
 }
 
 /** One distinct image already in the PDF (see `PdfDocument.getImages`). */

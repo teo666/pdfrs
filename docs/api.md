@@ -200,16 +200,20 @@ Il testo non ASCII viene codificato in UTF-16BE (ASCII resta in PDFDocEncoding),
 
 ## `read_outline(file: Uint8Array): Promise<OutlineEntry[]>`
 
-L'indice (segnalibri) del PDF come **lista piatta in ordine di lettura**, vuota se il documento non ne ha. Ogni voce è `{ title, level, page?, top?, open }`:
+L'indice (segnalibri) del PDF come **lista piatta in ordine di lettura**, vuota se il documento non ne ha. Ogni voce è `{ title, level, page?, top?, open, uri?, color?, bold?, italic? }`:
 
 - `level` vale 1 per il primo livello; i figli di una voce la seguono con `level + 1`;
 - `page` è 1-based, ed è assente se la voce punta fuori dal documento;
 - `top` è la posizione sulla pagina, in unità PDF dal basso, se la destinazione la indica;
-- `open` dice se i figli si vedono aperti all'apertura del documento.
+- `open` dice se i figli si vedono aperti all'apertura del documento;
+- `uri` è l'indirizzo web che la voce apre al posto di una pagina (azione `/URI`), se lo fa;
+- `color` (`#rrggbb`), `bold` e `italic`: come il lettore mostra il titolo (`/C`, `/F`), se non nel modo normale.
+
+Le altre azioni (aprire un altro file, eseguire JavaScript…) non si leggono: la voce resta, senza pagina.
 
 ## `write_outline(file: Uint8Array, entries: OutlineEntry[]): Promise<Uint8Array>`
 
-Sostituisce l'indice con `entries`, nella stessa forma restituita da `read_outline`. Un array vuoto toglie l'indice.
+Sostituisce l'indice con `entries`, nella stessa forma restituita da `read_outline`. Un array vuoto toglie l'indice. Una voce con `page` punta alla pagina; altrimenti, con `uri`, apre l'indirizzo.
 
 ```ts
 const outline = await read_outline(bytes);
