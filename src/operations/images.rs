@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::content_scan::{self, InlineImage, Op, Operand};
 use super::nup::{get_inherited_attribute, get_page_rotation, get_visible_box, multiply_matrix};
@@ -67,6 +67,9 @@ pub struct Placement {
     pub height: f64,
     /// Other pages drawing the same Form: removing this image removes it there too.
     pub shared_pages: Vec<u32>,
+    /// A clipping path is in effect where it's drawn: part of it may not
+    /// show, and moved elsewhere it may be cut off.
+    pub clipped: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]
@@ -108,6 +111,8 @@ struct Draw {
     drawn: Drawn,
     /// Image space (unit square) to user space.
     matrix: [f64; 6],
+    /// A clipping path (`W`, `W*`, or a Form's own box) applies.
+    clipped: bool,
 }
 
 impl Draw {
@@ -175,17 +180,20 @@ fn walk(
     start: [f64; 6],
     source: Source,
     depth: usize,
+    clipped_from_outside: bool,
     visiting: &mut Vec<ObjectId>,
     found: &mut dyn FnMut(Draw),
 ) {
     let mut ctm = start;
+    let mut clipped = clipped_from_outside;
     let mut stack = Vec::new();
     let mut occurrence = 0u32;
 
     for op in content_scan::scan(content) {
         match op.operator.as_str() {
-            "q" => stack.push(ctm),
-            "Q" => ctm = stack.pop().unwrap_or(ctm),
+            "q" => stack.push((ctm, clipped)),
+            "Q" => (ctm, clipped) = stack.pop().unwrap_or((ctm, clipped)),
+            "W" | "W*" => clipped = true,
             "cm" => {
                 if let Some(matrix) = matrix_operands(&op) {
                     ctm = multiply_matrix(matrix, ctm);
@@ -193,7 +201,14 @@ fn walk(
             }
             "BI" => {
                 if let Some(image) = op.inline_image.clone() {
-                    found(Draw { source, occurrence, span: op.span.clone(), drawn: Drawn::Inline(image), matrix: ctm });
+                    found(Draw {
+                        source,
+                        occurrence,
+                        span: op.span.clone(),
+                        drawn: Drawn::Inline(image),
+                        matrix: ctm,
+                        clipped,
+                    });
                     occurrence += 1;
                 }
             }
@@ -203,7 +218,14 @@ fn walk(
                 let Ok(stream) = doc.get_object(id).and_then(Object::as_stream) else { continue };
                 match stream.dict.get(b"Subtype").ok().and_then(|s| s.as_name().ok()) {
                     Some(b"Image") => {
-                        found(Draw { source, occurrence, span: op.span.clone(), drawn: Drawn::Object(id), matrix: ctm });
+                        found(Draw {
+                            source,
+                            occurrence,
+                            span: op.span.clone(),
+                            drawn: Drawn::Object(id),
+                            matrix: ctm,
+                            clipped,
+                        });
                         occurrence += 1;
                     }
                     Some(b"Form") if depth < MAX_FORM_DEPTH && !visiting.contains(&id) => {
@@ -228,6 +250,8 @@ fn walk(
                             multiply_matrix(form_matrix, ctm),
                             Source::Form(id),
                             depth + 1,
+                            // A Form draws only inside its /BBox.
+                            clipped || stream.dict.has(b"BBox"),
                             visiting,
                             found,
                         );
@@ -250,7 +274,7 @@ fn page_draws(doc: &Document, page: u32, page_id: ObjectId) -> Vec<Draw> {
     let content = doc.get_page_content(page_id);
     let resources = page_resources(doc, page_id);
     let mut draws = Vec::new();
-    walk(doc, &content, resources.as_ref(), IDENTITY, Source::Page(page), 0, &mut Vec::new(), &mut |draw| {
+    walk(doc, &content, resources.as_ref(), IDENTITY, Source::Page(page), 0, false, &mut Vec::new(), &mut |draw| {
         draws.push(draw)
     });
     draws
@@ -411,6 +435,7 @@ pub fn list(doc: &Document) -> Result<ImagesReport> {
                 width: max_x - min_x,
                 height: max_y - min_y,
                 shared_pages: Vec::new(),
+                clipped: draw.clipped,
             });
         }
     }
@@ -501,6 +526,146 @@ pub fn remove(doc: &mut Document, placements: &[String]) -> Result<()> {
         doc.delete_object(*id);
     }
     // Their masks, and the page contents replaced above, are now unreachable.
+    doc.prune_objects();
+    Ok(())
+}
+
+/// Where to put a placement: its new box, in the same frame as
+/// `Placement::{x, y, width, height}` (fractions of the page as shown).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageMove {
+    /// A `Placement::id`.
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// The inverse of an affine matrix, if it has one.
+fn invert(matrix: [f64; 6]) -> Option<[f64; 6]> {
+    let [a, b, c, d, e, f] = matrix;
+    let det = a * d - b * c;
+    if !det.is_finite() || det.abs() < 1e-12 {
+        return None;
+    }
+    let (ia, ib, ic, id) = (d / det, -b / det, -c / det, a / det);
+    Some([ia, ib, ic, id, -(e * ia + f * ic), -(e * ib + f * id)])
+}
+
+/// A number for a content stream: no exponent, as few digits as it needs.
+fn pdf_number(value: f64) -> String {
+    let text = format!("{:.6}", if value.abs() < 5e-7 { 0.0 } else { value });
+    let text = text.trim_end_matches('0').trim_end_matches('.');
+    if text == "-0" { "0".to_string() } else { text.to_string() }
+}
+
+/// Moves and resizes the images drawn at the given placements: each one's
+/// box (`Placement::{x, y, width, height}`) becomes the one asked for.
+///
+/// The draw itself is left as it is - wrapped in `q <m> cm … Q`, with `m`
+/// what takes the old box onto the new one - so the image keeps whatever it
+/// had (mirroring, a turn, the transforms around it), and the placement ids
+/// stay the same: a pending removal still finds its image. A draw inside a
+/// Form that other pages draw too is refused, since the Form is the same on
+/// all of them; one with a box of no size, or a transform that can't be
+/// undone, too. Everything is checked before anything changes.
+pub fn move_images(doc: &mut Document, moves: &[ImageMove]) -> Result<()> {
+    if moves.is_empty() {
+        return Ok(());
+    }
+    for m in moves {
+        let values = [m.x, m.y, m.width, m.height];
+        if values.iter().any(|v| !v.is_finite()) || m.width <= 0.0 || m.height <= 0.0 {
+            return Err(PdfrsError::InvalidArgument(format!("riquadro non valido per l'immagine {}", m.id)));
+        }
+    }
+    let wanted: HashMap<&str, &ImageMove> = moves.iter().map(|m| (m.id.as_str(), m)).collect();
+    let report = list(doc)?;
+    let pages = doc.get_pages();
+
+    // By stream: the byte ranges to replace, and with what.
+    type Replacements = Vec<(Range<usize>, Vec<u8>)>;
+    let mut edits: BTreeMap<Source, Replacements> = BTreeMap::new();
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    for (&page, &page_id) in &pages {
+        let display = Display::of(doc, page_id, page)?;
+        for draw in page_draws(doc, page, page_id) {
+            let id = draw.placement_id();
+            let Some(target) = wanted.get(id.as_str()) else { continue };
+            if !found.insert(id.clone()) {
+                continue;
+            }
+            let placement = report.placements.iter().find(|p| p.id == id && p.page == page);
+            let Some(placement) = placement else { continue };
+            if !placement.shared_pages.is_empty() {
+                return Err(PdfrsError::InvalidArgument(format!(
+                    "l'immagine {id} è disegnata da una Form usata anche dalle pagine {:?}: spostarla la sposterebbe anche lì",
+                    placement.shared_pages
+                )));
+            }
+            if placement.width <= 1e-9 || placement.height <= 1e-9 {
+                return Err(PdfrsError::InvalidArgument(format!("l'immagine {id} non ha dimensioni da cui partire")));
+            }
+
+            // User space -> fractions of the page shown, from three points.
+            let origin = display.point(0.0, 0.0);
+            let unit_x = display.point(1.0, 0.0);
+            let unit_y = display.point(0.0, 1.0);
+            let to_display = [
+                unit_x[0] - origin[0],
+                unit_x[1] - origin[1],
+                unit_y[0] - origin[0],
+                unit_y[1] - origin[1],
+                origin[0],
+                origin[1],
+            ];
+            let from_display = invert(to_display)
+                .ok_or_else(|| PdfrsError::InvalidArgument(format!("la pagina {page} ha una misura nulla")))?;
+            // The old box onto the new one, in that frame.
+            let (sx, sy) = (target.width / placement.width, target.height / placement.height);
+            let boxes = [sx, 0.0, 0.0, sy, target.x - placement.x * sx, target.y - placement.y * sy];
+            // The same, in user space; then as a `cm` put in front of the draw's own transform.
+            let user = multiply_matrix(multiply_matrix(to_display, boxes), from_display);
+            let undo = invert(draw.matrix)
+                .ok_or_else(|| PdfrsError::InvalidArgument(format!("l'immagine {id} ha una trasformazione degenere")))?;
+            let delta = multiply_matrix(multiply_matrix(draw.matrix, user), undo);
+
+            let numbers: Vec<String> = delta.iter().map(|v| pdf_number(*v)).collect();
+            let mut with = format!("q {} cm ", numbers.join(" ")).into_bytes();
+            let content = match draw.source {
+                Source::Page(_) => doc.get_page_content(page_id),
+                Source::Form(form) => {
+                    let stream = doc.get_object(form)?.as_stream()?;
+                    stream.decompressed_content().unwrap_or_else(|_| stream.content.clone())
+                }
+            };
+            with.extend_from_slice(&content[draw.span.clone()]);
+            with.extend_from_slice(b" Q");
+            edits.entry(draw.source).or_default().push((draw.span, with));
+        }
+    }
+    if let Some(missing) = wanted.keys().find(|id| !found.contains(**id)) {
+        return Err(PdfrsError::InvalidArgument(format!("nessuna immagine disegnata in {missing}")));
+    }
+
+    for (source, list) in edits {
+        match source {
+            Source::Page(page) => {
+                let page_id = pages[&page];
+                let content = content_scan::replace(&doc.get_page_content(page_id), &list);
+                content_scan::set_page_content(doc, page_id, content)?;
+            }
+            Source::Form(id) => {
+                let stream = doc.get_object_mut(id)?.as_stream_mut()?;
+                let content = stream.decompressed_content().unwrap_or_else(|_| stream.content.clone());
+                stream.set_plain_content(content_scan::replace(&content, &list));
+                let _ = stream.compress();
+            }
+        }
+    }
+    // The page contents replaced above are now unreachable.
     doc.prune_objects();
     Ok(())
 }
@@ -735,5 +900,192 @@ pub(crate) mod tests {
     fn rejects_a_placement_that_does_not_exist() {
         let mut doc = multi_page_document(1);
         assert!(remove(&mut doc, &["p1#0".to_string()]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod move_tests {
+    use super::tests::{add_image, draw_on};
+    use super::*;
+    use crate::operations::test_support::multi_page_document;
+    use lopdf::{dictionary, Stream};
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    fn placed(doc: &Document, id: &str) -> Placement {
+        list(doc).unwrap().placements.into_iter().find(|p| p.id == id).expect("still listed, same id")
+    }
+
+    fn to(id: &str, x: f64, y: f64, width: f64, height: f64) -> ImageMove {
+        ImageMove { id: id.to_string(), x, y, width, height }
+    }
+
+    fn assert_box(p: &Placement, x: f64, y: f64, width: f64, height: f64) {
+        assert!(
+            close(p.x, x) && close(p.y, y) && close(p.width, width) && close(p.height, height),
+            "expected ({}, {}, {}, {}), got {:?}",
+            x,
+            y,
+            width,
+            height,
+            p
+        );
+    }
+
+    /// A page with the red image at (0.1, 0.1), 0.2 x 0.1 of the page.
+    fn page_with_image() -> Document {
+        let mut doc = multi_page_document(1);
+        let image = add_image(&mut doc, false);
+        draw_on(&mut doc, 1, &[("Im0", image)], "q 119 0 0 84.2 59.5 673.6 cm /Im0 Do Q");
+        doc
+    }
+
+    #[test]
+    fn moves_and_resizes_keeping_the_id() {
+        let mut doc = page_with_image();
+        move_images(&mut doc, &[to("p1#0", 0.5, 0.6, 0.3, 0.2)]).unwrap();
+        assert_box(&placed(&doc, "p1#0"), 0.5, 0.6, 0.3, 0.2);
+
+        // Again, from where it is now.
+        move_images(&mut doc, &[to("p1#0", 0.0, 0.0, 0.1, 0.05)]).unwrap();
+        assert_box(&placed(&doc, "p1#0"), 0.0, 0.0, 0.1, 0.05);
+    }
+
+    #[test]
+    fn on_a_turned_page_and_a_cropped_one() {
+        for edit in ["Rotate", "CropBox"] {
+            let mut doc = page_with_image();
+            let page_id = doc.get_pages()[&1];
+            let page = doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap();
+            match edit {
+                "Rotate" => page.set("Rotate", 90),
+                _ => page.set("CropBox", vec![20.into(), 300.into(), 500.into(), 800.into()]),
+            }
+            let before = placed(&doc, "p1#0");
+            move_images(&mut doc, &[to("p1#0", 0.4, 0.3, before.width * 1.5, before.height * 1.5)]).unwrap();
+            let after = placed(&doc, "p1#0");
+            assert_box(&after, 0.4, 0.3, before.width * 1.5, before.height * 1.5);
+        }
+    }
+
+    #[test]
+    fn inside_a_form_drawn_by_one_page_only() {
+        let mut doc = multi_page_document(2);
+        let image = add_image(&mut doc, false);
+        let form = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+                "Resources" => dictionary! { "XObject" => dictionary! { "Im0" => image } },
+            },
+            b"q 119 0 0 84.2 59.5 673.6 cm /Im0 Do Q".to_vec(),
+        ));
+        draw_on(&mut doc, 1, &[("Fm0", form)], "q 1 0 0 1 0 0 cm /Fm0 Do Q");
+        let id = format!("f{}_{}#0", form.0, form.1);
+        assert!(placed(&doc, &id).clipped, "a Form draws only inside its box");
+
+        move_images(&mut doc, &[to(&id, 0.3, 0.3, 0.2, 0.1)]).unwrap();
+        assert_box(&placed(&doc, &id), 0.3, 0.3, 0.2, 0.1);
+
+        // Drawn by page 2 too: moving it there would move it here as well.
+        let page_two = doc.get_pages()[&2];
+        doc.get_object_mut(page_two).unwrap().as_dict_mut().unwrap().set(
+            "Resources",
+            dictionary! { "XObject" => dictionary! { "Fm0" => form } },
+        );
+        content_scan::set_page_content(&mut doc, page_two, b"/Fm0 Do".to_vec()).unwrap();
+        let err = move_images(&mut doc, &[to(&id, 0.0, 0.0, 0.2, 0.1)]).unwrap_err();
+        assert!(err.to_string().contains("Form"), "{}", err);
+    }
+
+    #[test]
+    fn a_removal_still_finds_a_moved_image() {
+        let mut doc = page_with_image();
+        let image = add_image(&mut doc, false);
+        let page_id = doc.get_pages()[&1];
+        let resources = doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap().get_mut(b"Resources").unwrap();
+        resources.as_dict_mut().unwrap().get_mut(b"XObject").unwrap().as_dict_mut().unwrap().set("Im1", image);
+        let content = [doc.get_page_content(page_id), b" q 10 0 0 10 0 0 cm /Im1 Do Q".to_vec()].concat();
+        content_scan::set_page_content(&mut doc, page_id, content).unwrap();
+
+        move_images(&mut doc, &[to("p1#0", 0.6, 0.6, 0.2, 0.1)]).unwrap();
+        remove(&mut doc, &["p1#1".to_string()]).unwrap();
+        let report = list(&doc).unwrap();
+        assert_eq!(report.placements.len(), 1);
+        assert_box(&report.placements[0], 0.6, 0.6, 0.2, 0.1);
+    }
+
+    #[test]
+    fn tells_a_clipped_image() {
+        let mut doc = multi_page_document(1);
+        let image = add_image(&mut doc, false);
+        draw_on(&mut doc, 1, &[("Im0", image)], "q 0 0 100 100 re W n q 50 0 0 50 0 0 cm /Im0 Do Q Q q 50 0 0 50 200 200 cm /Im0 Do Q");
+        let report = list(&doc).unwrap();
+        assert!(report.placements[0].clipped);
+        assert!(!report.placements[1].clipped, "the clip ended with its Q");
+    }
+
+    #[test]
+    fn rejects_what_it_cannot_do() {
+        let mut doc = page_with_image();
+        assert!(move_images(&mut doc, &[to("p1#9", 0.1, 0.1, 0.1, 0.1)]).is_err());
+        assert!(move_images(&mut doc, &[to("p1#0", 0.1, 0.1, 0.0, 0.1)]).is_err());
+        assert!(move_images(&mut doc, &[to("p1#0", f64::NAN, 0.1, 0.1, 0.1)]).is_err());
+        // Nothing changed.
+        assert_box(&placed(&doc, "p1#0"), 0.1, 0.1, 0.2, 0.1);
+    }
+
+    #[test]
+    fn numbers_without_exponents() {
+        assert_eq!(pdf_number(1e-9), "0");
+        assert_eq!(pdf_number(-0.0000001), "0");
+        assert_eq!(pdf_number(2.5), "2.5");
+        assert_eq!(pdf_number(-120.0), "-120");
+        assert_eq!(pdf_number(1234567.123456789), "1234567.123457");
+    }
+}
+
+#[cfg(all(test, feature = "preview"))]
+mod move_render_tests {
+    use super::tests::{add_image, draw_on};
+    use super::*;
+    use crate::operations::preview::render_page_preview;
+    use crate::operations::test_support::multi_page_document;
+    use hayro::vello_cpu::Pixmap;
+
+    fn red_box(doc: &mut Document) -> [f64; 4] {
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        let png = render_page_preview(&bytes, 1, 0.5).unwrap();
+        let pixmap = Pixmap::from_png(std::io::Cursor::new(png)).unwrap();
+        let (w, h) = (pixmap.width(), pixmap.height());
+        let (mut left, mut top, mut right, mut bottom) = (u16::MAX, u16::MAX, 0, 0);
+        for y in 0..h {
+            for x in 0..w {
+                let p = pixmap.sample(x, y);
+                if p.r > 200 && p.g < 60 && p.b < 60 {
+                    left = left.min(x);
+                    right = right.max(x);
+                    top = top.min(y);
+                    bottom = bottom.max(y);
+                }
+            }
+        }
+        assert!(right > 0, "the image should show");
+        let (w, h) = (w as f64, h as f64);
+        [left as f64 / w, top as f64 / h, (right + 1) as f64 / w, (bottom + 1) as f64 / h]
+    }
+
+    #[test]
+    fn drawn_where_it_was_moved_and_nowhere_else() {
+        let mut doc = multi_page_document(1);
+        let image = add_image(&mut doc, false);
+        draw_on(&mut doc, 1, &[("Im0", image)], "q 119 0 0 84.2 59.5 673.6 cm /Im0 Do Q");
+        move_images(&mut doc, &[ImageMove { id: "p1#0".to_string(), x: 0.5, y: 0.7, width: 0.4, height: 0.2 }]).unwrap();
+
+        let [left, top, right, bottom] = red_box(&mut doc);
+        let near = |a: f64, b: f64| (a - b).abs() < 0.01;
+        assert!(near(left, 0.5) && near(top, 0.7) && near(right, 0.9) && near(bottom, 0.9), "{:?}", [left, top, right, bottom]);
     }
 }

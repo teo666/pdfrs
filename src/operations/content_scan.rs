@@ -340,6 +340,24 @@ pub fn cut(bytes: &[u8], ranges: &[Range<usize>]) -> Vec<u8> {
     out
 }
 
+/// `bytes` with each range replaced by its bytes (a space on each side, so
+/// the tokens around stay apart). Ranges must not overlap.
+pub fn replace(bytes: &[u8], edits: &[(Range<usize>, Vec<u8>)]) -> Vec<u8> {
+    let mut sorted: Vec<&(Range<usize>, Vec<u8>)> = edits.iter().collect();
+    sorted.sort_by_key(|(range, _)| range.start);
+    let mut out = Vec::with_capacity(bytes.len() + edits.iter().map(|(_, with)| with.len() + 2).sum::<usize>());
+    let mut at = 0;
+    for (range, with) in sorted {
+        out.extend_from_slice(&bytes[at..range.start]);
+        out.push(b' ');
+        out.extend_from_slice(with);
+        out.push(b' ');
+        at = range.end;
+    }
+    out.extend_from_slice(&bytes[at..]);
+    out
+}
+
 /// Gives a page new content, as a new stream of its own. Never rewrites the
 /// page's current stream in place: a content stream can be shared by
 /// several pages, and `Document::change_page_content` would change them all.

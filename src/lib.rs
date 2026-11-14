@@ -287,6 +287,20 @@ pub async fn list_images(file: Uint8Array) -> std::result::Result<JsValue, JsVal
     serde_wasm_bindgen::to_value(&report).map_err(|err| PdfrsError::Options(err.to_string()).into())
 }
 
+/// Moves and resizes images already in a PDF: `moves` is
+/// `[{ id, x, y, width, height }]`, a placement id from `list_images` and
+/// its new box, in the same frame as the placements (fractions of the page
+/// as shown, origin at the top left). The draws are wrapped, not rewritten,
+/// so the ids stay the same. An image in a Form that other pages draw too
+/// is refused: it would move on all of them.
+#[wasm_bindgen]
+pub async fn move_images(file: Uint8Array, moves: JsValue) -> std::result::Result<Uint8Array, JsValue> {
+    let moves: Vec<operations::images::ImageMove> = parse_options(moves)?;
+    let mut doc = load(&file.to_vec())?;
+    operations::images::move_images(&mut doc, &moves)?;
+    Ok(save(&mut doc)?)
+}
+
 /// Takes away the images drawn at `placements` (an array of placement ids
 /// from `list_images`); an image nothing draws any more is deleted from the
 /// file.

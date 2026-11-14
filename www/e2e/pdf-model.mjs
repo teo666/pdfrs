@@ -427,6 +427,44 @@ async function main() {
     return doc.hasPendingChanges() === true && doc.getPageCount() === 4;
   }, fourPagesBytes);
 
+  // --- Moving an image already in the PDF: right away, one undo step, the
+  // same placement id, where it was asked to go.
+  results["moveImage puts an image where it's asked, keeping its id, undoable"] = await page.evaluate(async (photo) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.fromImage(new Uint8Array(photo), { pageSize: "a4", margin: 28 });
+    const [placement] = (await doc.getImages()).placements;
+    const before = await doc.getPreview(1, 0.3);
+    const box = { x: 0.1, y: 0.5, width: placement.width / 2, height: placement.height / 2 };
+    await doc.moveImage(placement.id, box);
+    const [moved] = (await doc.getImages()).placements;
+    const after = await doc.getPreview(1, 0.3);
+    const step = doc.history().at(-1);
+    const near = (a, b) => Math.abs(a - b) < 1e-4;
+    const placed =
+      moved.id === placement.id &&
+      near(moved.x, box.x) &&
+      near(moved.y, box.y) &&
+      near(moved.width, box.width) &&
+      near(moved.height, box.height);
+    doc.undo();
+    const [back] = (await doc.getImages()).placements;
+
+    let missing = false;
+    try {
+      await doc.moveImage("p1#7", box);
+    } catch {
+      missing = true;
+    }
+    return (
+      placed &&
+      after.png !== before.png &&
+      step.label === "Ridimensiona immagine (pagina 1)" &&
+      step.action.type === "resizeImage" &&
+      near(back.x, placement.x) &&
+      missing
+    );
+  }, photoJpgBytes);
+
   // --- Watermark: applied right away on the pages asked for, their
   // previews redrawn (the others kept), one undo step; pending edits stay.
   results["addWatermark marks the chosen pages at once, as one undo step"] = await page.evaluate(async (bytes) => {
