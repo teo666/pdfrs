@@ -49,6 +49,14 @@ impl PreviewDocument {
     /// PNG image. `scale` multiplies the page's native size (e.g. `1.5` for a
     /// sharper-than-1:1 preview).
     pub fn render_page(&self, page: u32, scale: f32) -> Result<Vec<u8>> {
+        // zlib level 3 with the Sub filter: measured on books, datasheets and
+        // scans (see `bench`), it encodes ~40% faster than the default
+        // (level 6, adaptive filter) for 5-15% bigger files.
+        encode_with(&self.draw(page, scale)?, png::DeflateCompression::Level(3), Some(png::Filter::Sub))
+    }
+
+    /// The page drawn, before it's encoded.
+    fn draw(&self, page: u32, scale: f32) -> Result<hayro::vello_cpu::Pixmap> {
         let index = page.checked_sub(1).ok_or(PdfrsError::PageNotFound(page))? as usize;
         let pixmap = self.parsed.with_dependent(|pdf, cache| {
             let page_obj = pdf.pages().get(index)?;
@@ -64,9 +72,35 @@ impl PreviewDocument {
                 },
             ))
         });
-        let pixmap = pixmap.ok_or(PdfrsError::PageNotFound(page))?;
-        pixmap.into_png().map_err(|err| PdfrsError::Preview(format!("{err:?}")))
+        pixmap.ok_or(PdfrsError::PageNotFound(page))
     }
+}
+
+/// A drawn page as PNG. RGB, not RGBA: pages are drawn on opaque white, so
+/// the alpha channel would be all 255 - a quarter of the bytes to filter
+/// and compress for nothing. `filter`: the encoder's adaptive one when absent.
+fn encode_with(
+    pixmap: &hayro::vello_cpu::Pixmap,
+    deflate: png::DeflateCompression,
+    filter: Option<png::Filter>,
+) -> Result<Vec<u8>> {
+    let mut rgb = Vec::with_capacity(pixmap.data().len() * 3);
+    for pixel in pixmap.data() {
+        rgb.extend_from_slice(&[pixel.r, pixel.g, pixel.b]);
+    }
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, pixmap.width() as u32, pixmap.height() as u32);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_deflate_compression(deflate);
+    if let Some(filter) = filter {
+        encoder.set_filter(filter);
+    }
+    let error = |err: png::EncodingError| PdfrsError::Preview(format!("{err:?}"));
+    let mut writer = encoder.write_header().map_err(error)?;
+    writer.write_image_data(&rgb).map_err(error)?;
+    writer.finish().map_err(error)?;
+    Ok(out)
 }
 
 /// Renders one page of a PDF to a PNG image, reading the whole file for it:
@@ -158,18 +192,18 @@ mod tests {
         assert!(matches!(err, PdfrsError::Preview(_)));
     }
 
-    /// How much keeping the document saves, on a real file:
+    /// Where a thumbnail's time goes, on a real file:
     ///
     ///   PDFRS_BENCH_PDF=path/to/file.pdf cargo test --release --lib \
     ///     preview::tests::bench -- --ignored --nocapture
     ///
-    /// Renders the first `PDFRS_BENCH_PAGES` pages (default 15) at the
-    /// thumbnail scale both ways: reading the file for every page, as before
-    /// `PreviewDocument`, and reading it once.
+    /// Draws the first `PDFRS_BENCH_PAGES` pages (default 15) at the
+    /// thumbnail scale, then encodes each with hayro's own PNG and with a few
+    /// compression and filter settings of ours: how long, how big.
     #[test]
     #[ignore = "a measurement on a file of your choice, not a check"]
     fn bench() {
-        use std::time::Instant;
+        use std::time::{Duration, Instant};
 
         let Ok(path) = std::env::var("PDFRS_BENCH_PDF") else {
             eprintln!("PDFRS_BENCH_PDF not set");
@@ -179,34 +213,60 @@ mod tests {
         let pages: u32 = std::env::var("PDFRS_BENCH_PAGES").ok().and_then(|n| n.parse().ok()).unwrap_or(15);
         let scale = 0.4;
 
-        let start = Instant::now();
-        let read = PreviewDocument::new(bytes.clone()).expect("the document should be read");
-        let read_time = start.elapsed();
-        let pages = pages.min(read.page_count());
-        drop(read);
-
-        let start = Instant::now();
-        for page in 1..=pages {
-            render_page_preview(&bytes, page, scale).expect("render should succeed");
-        }
-        let anew = start.elapsed();
-
-        let start = Instant::now();
         let document = PreviewDocument::new(bytes.clone()).expect("the document should be read");
+        let pages = pages.min(document.page_count());
+        let mut drawn = Duration::ZERO;
+        use png::{DeflateCompression as D, Filter as F};
+        let variants: Vec<(&str, Option<(D, F)>)> = vec![
+            ("hayro RGBA l6", None),
+            ("RGB l6 adapt", Some((D::Level(6), F::Adaptive))),
+            ("RGB l1 adapt", Some((D::Level(1), F::Adaptive))),
+            ("RGB l1 up", Some((D::Level(1), F::Up))),
+            ("RGB l2 up", Some((D::Level(2), F::Up))),
+            ("RGB l3 sub", Some((D::Level(3), F::Sub))),
+            ("RGB fdef up", Some((D::FdeflateUltraFast, F::Up))),
+            ("RGB fdef adapt", Some((D::FdeflateUltraFast, F::Adaptive))),
+        ];
+        let mut encoded = vec![Duration::ZERO; variants.len()];
+        let mut sizes = vec![0usize; variants.len()];
         for page in 1..=pages {
-            document.render_page(page, scale).expect("render should succeed");
+            let start = Instant::now();
+            let pixmap = document.draw(page, scale).expect("render should succeed");
+            drawn += start.elapsed();
+            for (slot, (_, variant)) in variants.iter().enumerate() {
+                let start = Instant::now();
+                let png = match variant {
+                    None => pixmap.clone().into_png().unwrap(),
+                    Some((deflate, filter)) => encode_with(&pixmap, *deflate, Some(*filter)).unwrap(),
+                };
+                encoded[slot] += start.elapsed();
+                sizes[slot] += png.len();
+            }
         }
-        let kept = start.elapsed();
+        eprintln!("{}: {} pages, drawing {:?}", path, pages, drawn);
+        for ((name, _), (time, size)) in variants.iter().zip(encoded.iter().zip(sizes)) {
+            eprintln!("  {:<15} encoding {:>10.1?} ({:>3.0}% of drawing), {} KB", name, time, time.as_secs_f64() / drawn.as_secs_f64() * 100.0, size / 1024);
+        }
+    }
 
-        eprintln!(
-            "{}: {:.1} MB, reading it {:?}; {} pages: read for every page {:?}, read once {:?} ({:.1}x)",
-            path,
-            bytes.len() as f64 / 1e6,
-            read_time,
-            pages,
-            anew,
-            kept,
-            anew.as_secs_f64() / kept.as_secs_f64(),
-        );
+    #[test]
+    fn our_png_has_the_very_pixels_hayro_would_give() {
+        let document = PreviewDocument::new(png_bytes_for(1)).expect("the document should be read");
+        let decode = |png: &[u8]| {
+            let mut reader = png::Decoder::new(std::io::Cursor::new(png)).read_info().unwrap();
+            let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+            let info = reader.next_frame(&mut pixels).unwrap();
+            pixels.truncate(info.buffer_size());
+            let rgb: Vec<u8> = match info.color_type {
+                png::ColorType::Rgba => pixels.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect(),
+                _ => pixels,
+            };
+            (info.width, info.height, rgb)
+        };
+
+        let ours = decode(&document.render_page(1, 0.5).unwrap());
+        let hayros = decode(&document.draw(1, 0.5).unwrap().into_png().unwrap());
+        assert_eq!((ours.0, ours.1), (hayros.0, hayros.1));
+        assert!(ours.2 == hayros.2, "the pixels differ");
     }
 }

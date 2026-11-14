@@ -17,7 +17,7 @@ default = ["console_error_panic_hook", "preview", "image-import"]
 # feature so a build that only needs merge/split/rotate/compose/encrypt/
 # decrypt can drop them - see docs/development.md for the "core"/"full"
 # wasm-pack build split this enables.
-preview = ["dep:hayro", "dep:self_cell"]
+preview = ["dep:hayro", "dep:self_cell", "dep:png"]
 image-import = ["dep:image"]
 
 [dependencies]
@@ -55,6 +55,9 @@ hayro = { version = "0.9", default-features = false, features = ["embed-fonts"],
 # that borrows from it (fonts, glyphs, colour spaces shared between pages),
 # without unsafe code. Tiny, no dependencies.
 self_cell = { version = "1", optional = true }
+# The previews' own PNG encoding (see operations::preview::encode): RGB
+# without alpha and a fast DEFLATE. Already in the tree through hayro.
+png = { version = "0.18", optional = true }
 
 # Used only to read a JPEG's dimensions/color type (header parse, no full
 # pixel decode) and to encode JPEGs for the fixture generator - the JPEG

@@ -10,10 +10,14 @@ previews. Everything runs locally: no file leaves the page.
 | Import | Size (wasm) | What's in it |
 | --- | --- | --- |
 | `pdfrs.js/core` | ~1.2 MB | everything except the five functions on the next line |
-| `pdfrs.js/full` | ~5.9 MB | `core` plus `render_page_preview` and `PreviewDocument` (pages to PNG), `image_to_pdf` (JPEG to PDF page), `extract_image`, `replace_image` and `compress_images` |
+| `pdfrs.js/full` | ~4.9 MB | `core` plus `render_page_preview` and `PreviewDocument` (pages to PNG), `image_to_pdf` (JPEG to PDF page), `extract_image`, `replace_image` and `compress_images` |
 
 The functions in both builds have the same signatures; pick `core` unless you
 need previews or image import.
+
+Both are built with WebAssembly SIMD, which makes page previews about four
+times faster: they need a browser that supports it (Chrome and Edge 91,
+Firefox 89, Safari 16.4 and later).
 
 ## Usage
 
