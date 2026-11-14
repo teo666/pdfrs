@@ -70,6 +70,9 @@ pub struct Placement {
     /// A clipping path is in effect where it's drawn: part of it may not
     /// show, and moved elsewhere it may be cut off.
     pub clipped: bool,
+    /// How the image is turned on the page shown: the angle of its top edge,
+    /// in degrees clockwise, in (-180, 180]. 0 for an upright image.
+    pub rotation: f64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]
@@ -296,6 +299,15 @@ impl Display {
         Ok(Display { left, bottom, width, height, rotation: get_page_rotation(doc, page_id) })
     }
 
+    /// The size of the page shown, in points (the visible box, its sides
+    /// swapped when `/Rotate` turns it a quarter).
+    fn shown_size(&self) -> (f64, f64) {
+        match self.rotation {
+            90 | 270 => (self.height, self.width),
+            _ => (self.width, self.height),
+        }
+    }
+
     fn point(&self, x: f64, y: f64) -> [f64; 2] {
         let u = (x - self.left) / self.width;
         let v = (self.bottom + self.height - y) / self.height;
@@ -425,6 +437,20 @@ pub fn list(doc: &Document) -> Result<ImagesReport> {
             let ys = corners.map(|c| c[1]);
             let (min_x, max_x) = (xs.iter().cloned().fold(f64::MAX, f64::min), xs.iter().cloned().fold(f64::MIN, f64::max));
             let (min_y, max_y) = (ys.iter().cloned().fold(f64::MAX, f64::min), ys.iter().cloned().fold(f64::MIN, f64::max));
+            // The top edge's angle, measured in points: fractions of a page
+            // that isn't square would skew it.
+            let (shown_w, shown_h) = display.shown_size();
+            let top_edge = (
+                (corners[1][0] - corners[0][0]) * shown_w,
+                (corners[1][1] - corners[0][1]) * shown_h,
+            );
+            let mut rotation = top_edge.1.atan2(top_edge.0).to_degrees();
+            if rotation <= -180.0 + 1e-9 {
+                rotation += 360.0;
+            }
+            if rotation.abs() < 1e-6 {
+                rotation = 0.0;
+            }
             report.placements.push(Placement {
                 id: draw.placement_id(),
                 page,
@@ -436,6 +462,7 @@ pub fn list(doc: &Document) -> Result<ImagesReport> {
                 height: max_y - min_y,
                 shared_pages: Vec::new(),
                 clipped: draw.clipped,
+                rotation,
             });
         }
     }
@@ -541,6 +568,10 @@ pub struct ImageMove {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    /// Degrees clockwise, as the page is shown, to turn it by besides -
+    /// about the centre of its new box. 0 when absent.
+    #[serde(default)]
+    pub rotation: f64,
 }
 
 /// The inverse of an affine matrix, if it has one.
@@ -576,7 +607,7 @@ pub fn move_images(doc: &mut Document, moves: &[ImageMove]) -> Result<()> {
         return Ok(());
     }
     for m in moves {
-        let values = [m.x, m.y, m.width, m.height];
+        let values = [m.x, m.y, m.width, m.height, m.rotation];
         if values.iter().any(|v| !v.is_finite()) || m.width <= 0.0 || m.height <= 0.0 {
             return Err(PdfrsError::InvalidArgument(format!("riquadro non valido per l'immagine {}", m.id)));
         }
@@ -625,7 +656,19 @@ pub fn move_images(doc: &mut Document, moves: &[ImageMove]) -> Result<()> {
                 .ok_or_else(|| PdfrsError::InvalidArgument(format!("la pagina {page} ha una misura nulla")))?;
             // The old box onto the new one, in that frame.
             let (sx, sy) = (target.width / placement.width, target.height / placement.height);
-            let boxes = [sx, 0.0, 0.0, sy, target.x - placement.x * sx, target.y - placement.y * sy];
+            let mut boxes = [sx, 0.0, 0.0, sy, target.x - placement.x * sx, target.y - placement.y * sy];
+            if target.rotation != 0.0 {
+                // The turn, about the new box's centre, done in points (on a
+                // page that isn't square, fractions would skew it).
+                let (w, h) = display.shown_size();
+                let (cx, cy) = ((target.x + target.width / 2.0) * w, (target.y + target.height / 2.0) * h);
+                let (sin, cos) = target.rotation.to_radians().sin_cos();
+                // Clockwise with y growing downwards.
+                let turn = [cos, sin, -sin, cos, cx - cx * cos + cy * sin, cy - cx * sin - cy * cos];
+                let to_points = [w, 0.0, 0.0, h, 0.0, 0.0];
+                let to_fractions = [1.0 / w, 0.0, 0.0, 1.0 / h, 0.0, 0.0];
+                boxes = multiply_matrix(multiply_matrix(multiply_matrix(boxes, to_points), turn), to_fractions);
+            }
             // The same, in user space; then as a `cm` put in front of the draw's own transform.
             let user = multiply_matrix(multiply_matrix(to_display, boxes), from_display);
             let undo = invert(draw.matrix)
@@ -919,7 +962,7 @@ mod move_tests {
     }
 
     fn to(id: &str, x: f64, y: f64, width: f64, height: f64) -> ImageMove {
-        ImageMove { id: id.to_string(), x, y, width, height }
+        ImageMove { id: id.to_string(), x, y, width, height, rotation: 0.0 }
     }
 
     fn assert_box(p: &Placement, x: f64, y: f64, width: f64, height: f64) {
@@ -1036,6 +1079,60 @@ mod move_tests {
         assert_box(&placed(&doc, "p1#0"), 0.1, 0.1, 0.2, 0.1);
     }
 
+    fn turned(id: &str, p: &Placement, degrees: f64) -> ImageMove {
+        ImageMove { rotation: degrees, ..to(id, p.x, p.y, p.width, p.height) }
+    }
+
+    #[test]
+    fn tells_how_an_image_is_turned() {
+        let mut doc = multi_page_document(1);
+        let image = add_image(&mut doc, false);
+        // Upright; turned a quarter clockwise as shown (counter-clockwise in PDF space, y up).
+        draw_on(&mut doc, 1, &[("Im0", image)], "q 100 0 0 50 100 600 cm /Im0 Do Q q 0 -100 50 0 300 600 cm /Im0 Do Q");
+        let report = list(&doc).unwrap();
+        assert!(close(report.placements[0].rotation, 0.0), "{:?}", report.placements[0]);
+        assert!(close(report.placements[1].rotation, 90.0), "{:?}", report.placements[1]);
+    }
+
+    #[test]
+    fn turns_about_its_centre() {
+        let mut doc = page_with_image();
+        let before = placed(&doc, "p1#0");
+        move_images(&mut doc, &[turned("p1#0", &before, 90.0)]).unwrap();
+        let after = placed(&doc, "p1#0");
+
+        assert!(close(after.rotation, 90.0), "{:?}", after);
+        // The same centre; its sides swapped, in points (119 x 84.2 on 595 x 842).
+        assert!(close(after.x + after.width / 2.0, before.x + before.width / 2.0));
+        assert!(close(after.y + after.height / 2.0, before.y + before.height / 2.0));
+        assert!(close(after.width * 595.0, 84.2) && close(after.height * 842.0, 119.0), "{:?}", after);
+
+        // Turned back: where it started.
+        move_images(&mut doc, &[turned("p1#0", &after, -90.0)]).unwrap();
+        let back = placed(&doc, "p1#0");
+        assert_box(&back, before.x, before.y, before.width, before.height);
+        assert!(close(back.rotation, 0.0));
+    }
+
+    #[test]
+    fn turns_on_a_turned_page_and_a_cropped_one() {
+        for edit in ["Rotate", "CropBox"] {
+            let mut doc = page_with_image();
+            let page_id = doc.get_pages()[&1];
+            let page = doc.get_object_mut(page_id).unwrap().as_dict_mut().unwrap();
+            match edit {
+                "Rotate" => page.set("Rotate", 90),
+                _ => page.set("CropBox", vec![20.into(), 300.into(), 500.into(), 800.into()]),
+            }
+            let before = placed(&doc, "p1#0");
+            move_images(&mut doc, &[turned("p1#0", &before, 30.0)]).unwrap();
+            let after = placed(&doc, "p1#0");
+            assert!(close(after.rotation, before.rotation + 30.0), "{}: {:?} -> {:?}", edit, before, after);
+            assert!(close(after.x + after.width / 2.0, before.x + before.width / 2.0), "{}", edit);
+            assert!(close(after.y + after.height / 2.0, before.y + before.height / 2.0), "{}", edit);
+        }
+    }
+
     #[test]
     fn numbers_without_exponents() {
         assert_eq!(pdf_number(1e-9), "0");
@@ -1078,11 +1175,27 @@ mod move_render_tests {
     }
 
     #[test]
+    fn drawn_turned() {
+        let mut doc = multi_page_document(1);
+        let image = add_image(&mut doc, false);
+        // 238 x 84.2 points, centred at (0.5, 0.5) of the page.
+        draw_on(&mut doc, 1, &[("Im0", image)], "q 238 0 0 84.2 178.5 378.9 cm /Im0 Do Q");
+        let before = list(&doc).unwrap().placements.remove(0);
+        move_images(&mut doc, &[ImageMove { rotation: 90.0, ..ImageMove { id: before.id.clone(), x: before.x, y: before.y, width: before.width, height: before.height, rotation: 0.0 } }]).unwrap();
+
+        // Standing up now: as wide as it was tall, centred where it was.
+        let [left, top, right, bottom] = red_box(&mut doc);
+        let near = |a: f64, b: f64| (a - b).abs() < 0.01;
+        assert!(near((left + right) / 2.0, 0.5) && near((top + bottom) / 2.0, 0.5), "{:?}", [left, top, right, bottom]);
+        assert!(near(right - left, 84.2 / 595.0) && near(bottom - top, 238.0 / 842.0), "{:?}", [left, top, right, bottom]);
+    }
+
+    #[test]
     fn drawn_where_it_was_moved_and_nowhere_else() {
         let mut doc = multi_page_document(1);
         let image = add_image(&mut doc, false);
         draw_on(&mut doc, 1, &[("Im0", image)], "q 119 0 0 84.2 59.5 673.6 cm /Im0 Do Q");
-        move_images(&mut doc, &[ImageMove { id: "p1#0".to_string(), x: 0.5, y: 0.7, width: 0.4, height: 0.2 }]).unwrap();
+        move_images(&mut doc, &[ImageMove { id: "p1#0".to_string(), x: 0.5, y: 0.7, width: 0.4, height: 0.2, rotation: 0.0 }]).unwrap();
 
         let [left, top, right, bottom] = red_box(&mut doc);
         let near = |a: f64, b: f64| (a - b).abs() < 0.01;

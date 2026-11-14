@@ -163,8 +163,11 @@ export function list_images(file: Uint8Array): Promise<PdfImages> {
 }
 
 /** Takes away the images drawn at `placements` (ids from `list_images`); images nothing draws any more leave the file. */
-/** Moves and resizes images already in the PDF: each placement id to its new box. */
-export function move_images(file: Uint8Array, moves: (ImageBox & { id: string })[]): Promise<Uint8Array> {
+/** Moves, resizes and turns images already in the PDF: each placement id to its new box, turned by `rotation` degrees clockwise about its centre. */
+export function move_images(
+  file: Uint8Array,
+  moves: (ImageBox & { id: string; rotation?: number })[],
+): Promise<Uint8Array> {
   return call("move_images", [file, moves]);
 }
 
