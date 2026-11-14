@@ -133,6 +133,11 @@ export function page_sizes(file: Uint8Array): Promise<PageDimensions[]> {
   return call("page_sizes", [file]);
 }
 
+/** `edited` encrypted as `original` is (same passwords and permissions), for a PDF with restrictions and no password to open it. */
+export function restore_encryption(original: Uint8Array, edited: Uint8Array): Promise<Uint8Array> {
+  return call("restore_encryption", [original, edited]);
+}
+
 /** What opening an encrypted PDF with its user password allows; `null` when it isn't encrypted. Needs no password. */
 export function read_permissions(file: Uint8Array): Promise<PdfPermissions | null> {
   return call("read_permissions", [file]);

@@ -586,6 +586,42 @@ async function main() {
     fourPagesBytes,
   );
 
+  // --- A file with restrictions and no password to open it keeps them
+  // through edits - applied, or changed in place - until dropped.
+  results["a restricted file keeps its restrictions through edits, until dropped"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfDocument } = window.__pdfModel;
+      const source = await PdfDocument.open(new Uint8Array(bytes));
+      await source.encrypt("padrone", "", { print: false });
+      const doc = await PdfDocument.open(source.getBytes());
+      const restrictionsOf = async (file) => (await PdfDocument.open(file)).getOriginalPermissions();
+      const steps = [];
+
+      steps.push(!doc.isLocked() && (await doc.getRestrictions())?.kept === true);
+      doc.rotatePage(1, 90);
+      await doc.commit();
+      steps.push((await restrictionsOf(doc.getBytes()))?.print === false);
+      steps.push((await doc.getPreview(1, 0.2)).png.length > 0);
+
+      // Changed in place, nothing pending: the download still has them.
+      await doc.addWatermark({ text: "COPIA" }, [2]);
+      steps.push(!doc.hasPendingChanges());
+      steps.push((await restrictionsOf(await doc.exportBytes()))?.print === false);
+
+      // Dropped: pending, then gone from what's written; undone, back.
+      await doc.dropRestrictions();
+      steps.push(doc.hasPendingChanges() && (await doc.getRestrictions())?.kept === false);
+      steps.push((await restrictionsOf(await doc.exportBytes())) === null);
+      await doc.commit();
+      steps.push((await restrictionsOf(doc.getBytes())) === null);
+      doc.undo();
+      doc.undo();
+      steps.push((await doc.getRestrictions())?.kept === true);
+      return steps.every(Boolean) || steps.map((ok, i) => (ok ? "" : i)).filter(String).join(",");
+    },
+    fourPagesBytes,
+  );
+
   // --- protectDocument: a locked copy (no pages, encrypted bytes), the
   // source untouched; unlockDocument: a readable copy with either password,
   // a wrong one rejected as such. The protected copy is the document as it

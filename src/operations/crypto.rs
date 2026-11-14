@@ -135,6 +135,37 @@ pub fn encrypt(
         .map_err(|err| PdfrsError::InvalidArgument(err.to_string()))
 }
 
+/// Encrypts `edited` exactly as `original` is: same file key, same
+/// passwords, same permissions. For a PDF that opens without a password but
+/// carries restrictions (an owner password and its `/P`): lopdf saves the
+/// edits unencrypted, which would drop them. The owner password doesn't
+/// have to be known - the encryption dictionary is reused as it is - and
+/// still lifts them afterwards. `/ID` is copied too: before AES-256 it's
+/// part of the key.
+///
+/// Refuses an `original` that needs a password to open (that's a locked
+/// file, not one with restrictions) or isn't encrypted, and an `edited`
+/// that already is.
+pub fn restore_encryption(original: &[u8], edited: &mut Document) -> Result<()> {
+    let source = Document::load_mem(original)?;
+    if source.is_encrypted() {
+        return Err(PdfrsError::InvalidArgument(
+            "il documento originale si apre solo con una password".to_string(),
+        ));
+    }
+    let state = source
+        .encryption_state
+        .as_ref()
+        .ok_or_else(|| PdfrsError::InvalidArgument("il documento originale non è cifrato".to_string()))?;
+    if edited.is_encrypted() {
+        return Err(PdfrsError::InvalidArgument("document is already encrypted".to_string()));
+    }
+    if let Ok(id) = source.trailer.get(b"ID") {
+        edited.trailer.set("ID", id.clone());
+    }
+    edited.encrypt(state).map_err(|err| PdfrsError::InvalidArgument(err.to_string()))
+}
+
 /// Loads an encrypted PDF and returns it already decrypted (no `/Encrypt` entry,
 /// plain strings/streams), ready to be saved as a regular unencrypted PDF.
 ///
@@ -285,5 +316,80 @@ mod tests {
             assemble: false,
         };
         assert_eq!(none.to_lopdf(), Permissions::COPYABLE_FOR_ACCESSIBILITY);
+    }
+
+    /// An edit of `bytes` as the app makes one: loaded (decrypted with the
+    /// empty password), changed, saved as a new document.
+    fn edited(bytes: &[u8]) -> Document {
+        let mut doc = Document::load_mem(bytes).unwrap();
+        let first = doc.get_pages()[&1];
+        doc.get_object_mut(first).unwrap().as_dict_mut().unwrap().set("Rotate", 90);
+        let mut out = Vec::new();
+        doc.save_to(&mut out).unwrap();
+        Document::load_mem(&out).unwrap()
+    }
+
+    #[test]
+    fn an_edited_file_gets_its_restrictions_back_with_the_same_owner_password() {
+        let restricted = PdfPermissions { print: false, copy: false, ..PdfPermissions::default() };
+        let original = restricted_bytes("owner", "", restricted);
+
+        let mut doc = edited(&original);
+        assert!(!doc.is_encrypted(), "saving dropped them");
+        restore_encryption(&original, &mut doc).unwrap();
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+
+        assert!(!needs_password(&bytes).unwrap(), "still opens without a password");
+        assert_eq!(read_permissions(&bytes).unwrap(), Some(PdfPermissions { print_high_quality: false, ..restricted }));
+        let unlocked = load_decrypted(&bytes, "owner").unwrap();
+        let first = unlocked.get_pages()[&1];
+        assert_eq!(unlocked.get_dictionary(first).unwrap().get(b"Rotate").unwrap().as_i64().unwrap(), 90, "the edit is in");
+
+        // The previews read it too, with the empty password.
+        #[cfg(feature = "preview")]
+        assert!(crate::operations::preview::render_page_preview(&bytes, 1, 0.3).is_ok());
+    }
+
+    #[test]
+    fn with_an_older_encryption_the_file_id_comes_along() {
+        // RC4, revision 3: /ID is part of the key.
+        let mut doc = multi_page_document(2);
+        let id = lopdf::Object::string_literal("abcdefghijklmnop");
+        doc.trailer.set("ID", vec![id.clone(), id]);
+        let permissions = PdfPermissions { modify: false, ..PdfPermissions::default() }.to_lopdf();
+        let state = EncryptionState::try_from(EncryptionVersion::V2 {
+            document: &doc,
+            owner_password: "owner",
+            user_password: "",
+            key_length: 128,
+            permissions,
+        })
+        .unwrap();
+        doc.encrypt(&state).unwrap();
+        let mut original = Vec::new();
+        doc.save_to(&mut original).unwrap();
+
+        // A new document, with no /ID of its own.
+        let mut fresh = multi_page_document(2);
+        fresh.trailer.remove(b"ID");
+        restore_encryption(&original, &mut fresh).unwrap();
+        let mut bytes = Vec::new();
+        fresh.save_to(&mut bytes).unwrap();
+
+        assert!(!needs_password(&bytes).unwrap());
+        assert_eq!(read_permissions(&bytes).unwrap().map(|p| p.modify), Some(false));
+        assert_eq!(load_decrypted(&bytes, "owner").unwrap().get_pages().len(), 2);
+    }
+
+    #[test]
+    fn refuses_a_locked_or_a_plain_original() {
+        let locked = restricted_bytes("owner", "user", PdfPermissions::default());
+        let mut plain = Vec::new();
+        multi_page_document(1).save_to(&mut plain).unwrap();
+
+        let mut doc = multi_page_document(1);
+        assert!(restore_encryption(&locked, &mut doc).is_err());
+        assert!(restore_encryption(&plain, &mut doc).is_err());
     }
 }

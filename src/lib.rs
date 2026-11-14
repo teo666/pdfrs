@@ -144,6 +144,18 @@ pub async fn encrypt_pdf(
     Ok(save(&mut doc)?)
 }
 
+/// `edited` encrypted exactly as `original` is - same passwords, same
+/// permissions - for a PDF that opens without a password but has
+/// restrictions: the other functions save their result unencrypted, which
+/// would drop them. The owner password isn't needed. Fails for an
+/// `original` that needs a password to open, or isn't encrypted.
+#[wasm_bindgen]
+pub async fn restore_encryption(original: Uint8Array, edited: Uint8Array) -> std::result::Result<Uint8Array, JsValue> {
+    let mut doc = load(&edited.to_vec())?;
+    operations::crypto::restore_encryption(&original.to_vec(), &mut doc)?;
+    Ok(save(&mut doc)?)
+}
+
 /// The permissions of an encrypted PDF - what opening it with the user
 /// password allows: `{ print, printHighQuality, copy, modify, annotate, fillForms, assemble }`,
 /// or `null` for a PDF that isn't encrypted. Needs no password.

@@ -47,6 +47,7 @@ them, though: for a responsive page, call them from a Web Worker.
 | `booklet_pdf(file, options?)` | pages arranged for folding into a booklet |
 | `encrypt_pdf(file, owner, user, options?)` / `decrypt_pdf(file, password)` | AES-256; `options.permissions` restricts printing, copying, editing… for the user password |
 | `read_permissions(file)` | what an encrypted PDF allows, without the password (`null` if not encrypted) |
+| `restore_encryption(original, edited)` | encrypts an edit like its original (same passwords and permissions), for a file with restrictions and no password to open it |
 | `is_password_protected(file)` | whether opening it needs a password |
 | `page_count(file)` | number of pages |
 | `read_metadata(file)` / `write_metadata(file, patch)` | title, author, dates… (`null` in the patch removes a field) |
