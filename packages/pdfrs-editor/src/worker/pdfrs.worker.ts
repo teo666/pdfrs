@@ -3,6 +3,7 @@
 // it's in progress - see pdfrs-worker-client.ts for the main-thread side.
 import init, {
   annotate_pdf,
+  blank_page_pdf,
   booklet_pdf,
   compose_pdf,
   decrypt_pdf,
@@ -12,12 +13,14 @@ import init, {
   merge_pdfs,
   nup_pdf,
   page_count,
+  page_sizes,
   read_metadata,
   read_outline,
   read_permissions,
   remove_images,
   rotate_pages,
   split_pdf,
+  watermark_pdf,
   write_metadata,
   write_outline,
 } from "pdfrs.js/core";
@@ -32,6 +35,7 @@ import { collectTransferables, type WorkerInitMessage, type WorkerRequest, type 
 // the core/full wasm-pack build split this enables.
 const coreMethods = {
   annotate_pdf,
+  blank_page_pdf,
   booklet_pdf,
   compose_pdf,
   decrypt_pdf,
@@ -41,12 +45,14 @@ const coreMethods = {
   merge_pdfs,
   nup_pdf,
   page_count,
+  page_sizes,
   read_metadata,
   read_outline,
   read_permissions,
   remove_images,
   rotate_pages,
   split_pdf,
+  watermark_pdf,
   write_metadata,
   write_outline,
 } as const satisfies Record<string, (...args: never[]) => Promise<unknown>>;

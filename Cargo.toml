@@ -66,6 +66,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.34"
+# Tests read options as JS would send them (JSON), to check their defaults.
+serde_json = "1"
 
 [profile.release]
 # Tell `rustc` to optimize for small code size.

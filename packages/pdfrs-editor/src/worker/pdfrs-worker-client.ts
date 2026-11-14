@@ -3,7 +3,16 @@
 // round-trip to the worker instead of a direct call, wrapped back into a
 // Promise so call sites don't need to know a worker is involved at all.
 import { createPdfrsWorker } from "./create-pdfrs-worker";
-import type { CompressionLevel, ExtractedImage, ImagePageOptions, OutlineEntry, PdfImages, PdfPermissions } from "../pdf-model/types";
+import type {
+  CompressionLevel,
+  ExtractedImage,
+  ImagePageOptions,
+  OutlineEntry,
+  PageDimensions,
+  PdfImages,
+  PdfPermissions,
+  WatermarkOptions,
+} from "../pdf-model/types";
 import type { TextStyle } from "../text/layout";
 import type { WorkerRequest, WorkerResponse } from "./worker-protocol";
 
@@ -106,6 +115,21 @@ export function encrypt_pdf(
   options: { permissions?: Partial<PdfPermissions> } = {},
 ): Promise<Uint8Array> {
   return call("encrypt_pdf", [file, ownerPassword, userPassword, options]);
+}
+
+/** Draws a text watermark on `options.pages` (1-indexed; every page when absent). */
+export function watermark_pdf(file: Uint8Array, options: WatermarkOptions & { pages?: number[] }): Promise<Uint8Array> {
+  return call("watermark_pdf", [file, options]);
+}
+
+/** A PDF of one empty page, `width` by `height` points. */
+export function blank_page_pdf(width: number, height: number): Promise<Uint8Array> {
+  return call("blank_page_pdf", [width, height]);
+}
+
+/** Every page's size as it's shown, in points, in page order. */
+export function page_sizes(file: Uint8Array): Promise<PageDimensions[]> {
+  return call("page_sizes", [file]);
 }
 
 /** What opening an encrypted PDF with its user password allows; `null` when it isn't encrypted. Needs no password. */

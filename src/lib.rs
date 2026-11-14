@@ -77,6 +77,42 @@ pub async fn compose_pdf(sources: Vec<Uint8Array>, layout: JsValue) -> std::resu
     Ok(save(&mut composed)?)
 }
 
+/// Draws a text watermark on the pages of a PDF. `options` is
+/// `{ text, font?, bold?, italic?, color?: "#rrggbb", align?, opacity?: 0..1, size?: number | "fit", angle?, position?: "center"|"top"|"bottom", layer?: "over"|"under", pages?: number[] }`:
+/// - `size`: a font size in points, or `"fit"` (the default) for as big as
+///   fits in 80% of each page;
+/// - `angle`: degrees counter-clockwise as the page is shown (45 by default,
+///   rising to the right);
+/// - `layer`: over the content (the default) or under it, where anything
+///   opaque on the page - a scan - hides it;
+/// - `pages`: 1-indexed, every page when absent.
+///
+/// Defaults: grey, 30% opacity, centred.
+#[wasm_bindgen]
+pub async fn watermark_pdf(file: Uint8Array, options: JsValue) -> std::result::Result<Uint8Array, JsValue> {
+    let options: operations::watermark::WatermarkOptions = parse_options(options)?;
+    let mut doc = load(&file.to_vec())?;
+    operations::watermark::watermark(&mut doc, &options)?;
+    Ok(save(&mut doc)?)
+}
+
+/// A PDF of one empty page, `width` by `height` points (1 to 14400).
+#[wasm_bindgen]
+pub async fn blank_page_pdf(width: f64, height: f64) -> std::result::Result<Uint8Array, JsValue> {
+    let mut doc = operations::watermark::blank_page(width, height)?;
+    Ok(save(&mut doc)?)
+}
+
+/// Every page's size as it's shown, in points, in page order:
+/// `[{ width, height }]` - the visible part (CropBox within MediaBox), its
+/// sides swapped for a page turned a quarter by `/Rotate`.
+#[wasm_bindgen]
+pub async fn page_sizes(file: Uint8Array) -> std::result::Result<JsValue, JsValue> {
+    let doc = load(&file.to_vec())?;
+    let sizes = operations::watermark::page_sizes(&doc)?;
+    serde_wasm_bindgen::to_value(&sizes).map_err(|err| PdfrsError::Options(err.to_string()).into())
+}
+
 /// Options for `encrypt_pdf`.
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]

@@ -616,6 +616,8 @@ pub(crate) mod tests {
             width: 0.25,
             rotation: 0.0,
             height: None,
+            opacity: 1.0,
+            layer: stamp::Layer::Over,
             kind: AnnotationKind::Image { asset: 0 },
         };
         stamp::annotate(&mut doc, &[asset], &[annotation]).unwrap();
