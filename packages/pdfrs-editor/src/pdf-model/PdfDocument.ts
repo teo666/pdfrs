@@ -11,6 +11,7 @@ import {
   page_count,
   read_metadata,
   read_outline,
+  read_permissions,
   remove_images,
   replace_image,
   rotate_pages,
@@ -37,6 +38,7 @@ import type {
   PageRange,
   PdfImages,
   PdfMetadata,
+  PdfPermissions,
 } from "./types";
 
 export interface GetPreviewsOptions {
@@ -267,8 +269,14 @@ export class PdfDocument {
   /** Can't be read without a password: no pages until decrypted (see `isLocked`). */
   private readonly locked: boolean;
 
+  /** The file as it was opened, for `getOriginalPermissions`. */
+  private readonly openedWith: Uint8Array;
+  /** `getOriginalPermissions`: read once, or handed over by `PdfEditor.unlockDocument`. */
+  private originalPermissions: Promise<PdfPermissions | null> | null = null;
+
   private constructor(bytes: Uint8Array, pageCount: number, locked = false) {
     this.bytes = bytes;
+    this.openedWith = bytes;
     this.pageCount = pageCount;
     this.locked = locked;
     this.appliedPageCount = pageCount;
@@ -295,6 +303,23 @@ export class PdfDocument {
    */
   isLocked(): boolean {
     return this.locked;
+  }
+
+  /**
+   * The restrictions of the file as it was opened - what its user password
+   * allows (see `PdfPermissions`) - or `null` when it wasn't encrypted. For a
+   * copy made by `PdfEditor.unlockDocument`, those of the locked original.
+   * The file doesn't keep them once edited: saving writes it unencrypted.
+   * Read on the first call (it parses the file), then remembered.
+   */
+  getOriginalPermissions(): Promise<PdfPermissions | null> {
+    this.originalPermissions ??= read_permissions(this.openedWith);
+    return this.originalPermissions;
+  }
+
+  /** For `PdfEditor.unlockDocument`: the restrictions of the locked file this one was decrypted from. */
+  inheritPermissions(permissions: PdfPermissions | null): void {
+    this.originalPermissions = Promise.resolve(permissions);
   }
 
   /**
@@ -1447,10 +1472,14 @@ export class PdfDocument {
     return this.hasPendingChanges() ? this.computeCommittedBytes() : this.bytes;
   }
 
-  /** Immediate, whole-document operation - no pending state, nothing to preview. */
-  async encrypt(ownerPassword: string, userPassword: string): Promise<void> {
+  /**
+   * Immediate, whole-document operation - no pending state, nothing to
+   * preview. `permissions`: what the user password allows (see
+   * `PdfPermissions`; each one left out is allowed).
+   */
+  async encrypt(ownerPassword: string, userPassword: string, permissions?: Partial<PdfPermissions>): Promise<void> {
     const before = this.snapshot();
-    this.bytes = await encrypt_pdf(this.bytes, ownerPassword, userPassword);
+    this.bytes = await encrypt_pdf(this.bytes, ownerPassword, userPassword, { permissions });
     this.previewCache.clear();
     this.baselineMetadata = null;
     this.baselineImages = null;

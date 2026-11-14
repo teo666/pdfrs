@@ -168,6 +168,36 @@ export interface ExtractedImage {
 /** How much `compressDocument` gives up for a lighter file: about 220, 150 or 100 dpi. */
 export type CompressionLevel = "high" | "balanced" | "small";
 
+/**
+ * What opening a protected PDF with its *user* password allows (the PDF's
+ * permission flags). Opened with the owner password everything is allowed,
+ * so restrictions only mean something with a different owner password. They
+ * ask the reader to hold back; a reader that ignores them can do anything.
+ */
+export interface PdfPermissions {
+  print: boolean;
+  /** Print at full quality, not a degraded copy. Never without `print`. */
+  printHighQuality: boolean;
+  /** Copy text and images out (always allowed for accessibility tools). */
+  copy: boolean;
+  /** Change the content. */
+  modify: boolean;
+  /** Add or change comments, fill in forms. */
+  annotate: boolean;
+  /** Fill in form fields, even without `annotate`. */
+  fillForms: boolean;
+  /** Insert, rotate or delete pages and change bookmarks, even without `modify`. */
+  assemble: boolean;
+}
+
+/** How `PdfEditor.protectDocument` protects a document. */
+export interface ProtectOptions {
+  /** Opens the file with everything allowed and lifts the restrictions. Required, and different from the password, when `permissions` restricts anything. Defaults to the password. */
+  ownerPassword?: string;
+  /** What the password allows; each permission left out is allowed. */
+  permissions?: Partial<PdfPermissions>;
+}
+
 /** What `PdfEditor.compressDocument` did. */
 export interface CompressResult {
   /** The lighter copy, registered as a new document; `null` when no image came out lighter. */

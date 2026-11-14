@@ -12,7 +12,7 @@ I punti decisi, nell'ordine in cui si fanno. Ogni PR spunta il suo.
 4. [x] **Togliere solo la rotazione** di una o più pagine: il badge «90° ×» della miniatura e del visualizzatore, e un pulsante nella barra delle pagine selezionate (`PdfDocument.resetRotations`, un solo passo di cronologia).
 5. [ ] **Filigrana di testo e pagine bianche** — filigrana sopra o sotto il contenuto, con opacità, angolo, dimensione e pagine scelte, applicata subito e annullabile; «Inserisci pagina bianca» della misura della pagina vicina.
 6. [ ] **Indice, fase 2** — modificare le voci (aggiungere, rinominare, togliere, spostare, rientro); portare nel documento di destinazione le voci delle pagine trasferite; ricordare lo stato aperto/chiuso dei rami dopo un «Applica modifiche»; tenere link URI, colore e stile delle voci.
-7. [ ] **Permessi del PDF protetto** (stampa, copia del testo, modifica…) con una password per togliere le limitazioni diversa da quella di apertura; mostrare le limitazioni di un file aperto.
+7. [x] **Permessi del PDF protetto** — `encrypt_pdf(…, { permissions })` e `read_permissions`. Nel pannello «Proteggi», sette caselle e la «password per togliere le limitazioni», obbligatoria e diversa da quella di apertura. Le limitazioni di un file aperto o sbloccato compaiono in «Proteggi» e «Proprietà».
 8. [ ] **Immagini, fase 3** — spostare e ridimensionare un'immagine già nel PDF (`q <delta> cm … Q` attorno al disegno; niente per le Form condivise tra pagine; avviso per quelle ritagliate).
 9. [ ] **Miniature più veloci da disegnare** — misurare prima quanto pesa la codifica PNG rispetto al disegno; poi scala più bassa, WebP o bitmap, profilo di hayro.
 

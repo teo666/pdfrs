@@ -427,6 +427,55 @@ async function main() {
     return doc.hasPendingChanges() === true && doc.getPageCount() === 4;
   }, fourPagesBytes);
 
+  // --- Permissions: restrictions need a second, different password; the
+  // locked copy reports them without being unlocked, and so does the copy
+  // unlocked from it. A plain document has none.
+  results["protectDocument restricts what the password allows, and the copies tell"] = await page.evaluate(
+    async (bytes) => {
+      const { PdfEditor } = window.__pdfModel;
+      const editor = new PdfEditor();
+      const sourceId = await editor.addDocument(new Uint8Array(bytes));
+      const permissions = { print: false, copy: false };
+
+      const refused = [];
+      for (const options of [{ permissions }, { permissions, ownerPassword: "segreta" }]) {
+        try {
+          await editor.protectDocument(sourceId, "segreta", options);
+        } catch (err) {
+          refused.push(err.message);
+        }
+      }
+
+      const lockedId = await editor.protectDocument(sourceId, "segreta", { ownerPassword: "padrone", permissions });
+      const locked = await editor.getDocument(lockedId).getOriginalPermissions();
+      const unlocked = await editor.getDocument(await editor.unlockDocument(lockedId, "segreta")).getOriginalPermissions();
+      const plain = await editor.getDocument(sourceId).getOriginalPermissions();
+      const free = await editor
+        .getDocument(await editor.unlockDocument(await editor.protectDocument(sourceId, "a"), "a"))
+        .getOriginalPermissions();
+
+      const expected = {
+        print: false,
+        printHighQuality: false,
+        copy: false,
+        modify: true,
+        annotate: true,
+        fillForms: true,
+        assemble: true,
+      };
+      const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+      return (
+        refused.length === 2 &&
+        refused.every((message) => message.includes("seconda password")) &&
+        same(locked, expected) &&
+        same(unlocked, expected) &&
+        plain === null &&
+        Object.values(free).every(Boolean)
+      );
+    },
+    fourPagesBytes,
+  );
+
   // --- protectDocument: a locked copy (no pages, encrypted bytes), the
   // source untouched; unlockDocument: a readable copy with either password,
   // a wrong one rejected as such. The protected copy is the document as it

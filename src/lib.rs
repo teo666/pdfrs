@@ -77,18 +77,48 @@ pub async fn compose_pdf(sources: Vec<Uint8Array>, layout: JsValue) -> std::resu
     Ok(save(&mut composed)?)
 }
 
+/// Options for `encrypt_pdf`.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct EncryptOptions {
+    // An Option so that `permissions: undefined` from JS reads as "not given".
+    permissions: Option<operations::crypto::PdfPermissions>,
+}
+
 /// Encrypts a PDF file with AES-256. `user_password` is required to open the
-/// document; `owner_password` is required to change permissions or remove
-/// the encryption.
+/// document; `owner_password` opens it with everything allowed, and is what
+/// lifts the restrictions. `options` (optional) is
+/// `{ permissions?: { print, printHighQuality, copy, modify, annotate, fillForms, assemble } }`:
+/// what the user password allows, each `true` when left out. Restrictions
+/// only mean something with an owner password different from the user one.
 #[wasm_bindgen]
 pub async fn encrypt_pdf(
     file: Uint8Array,
     owner_password: String,
     user_password: String,
+    options: JsValue,
 ) -> std::result::Result<Uint8Array, JsValue> {
+    let options: EncryptOptions = if options.is_undefined() || options.is_null() {
+        Default::default()
+    } else {
+        parse_options(options)?
+    };
     let mut doc = load(&file.to_vec())?;
-    operations::crypto::encrypt(&mut doc, &owner_password, &user_password)?;
+    operations::crypto::encrypt(&mut doc, &owner_password, &user_password, options.permissions.unwrap_or_default())?;
     Ok(save(&mut doc)?)
+}
+
+/// The permissions of an encrypted PDF - what opening it with the user
+/// password allows: `{ print, printHighQuality, copy, modify, annotate, fillForms, assemble }`,
+/// or `null` for a PDF that isn't encrypted. Needs no password.
+#[wasm_bindgen]
+pub async fn read_permissions(file: Uint8Array) -> std::result::Result<JsValue, JsValue> {
+    match operations::crypto::read_permissions(&file.to_vec())? {
+        None => Ok(JsValue::NULL),
+        Some(permissions) => {
+            serde_wasm_bindgen::to_value(&permissions).map_err(|err| PdfrsError::Options(err.to_string()).into())
+        }
+    }
 }
 
 /// Decrypts a PDF file using its owner or user password.

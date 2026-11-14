@@ -5,13 +5,112 @@ use std::sync::Arc;
 use lopdf::encryption::crypt_filters::{Aes256CryptFilter, CryptFilter};
 use lopdf::{Document, EncryptionState, EncryptionVersion, LoadOptions, Permissions};
 use rand::RngExt as _;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{PdfrsError, Result};
 
+/// What whoever opens the file with the *user* password may do (PDF
+/// permission flags, `/P`). Opened with the owner password, everything is
+/// allowed - so restrictions only mean something with an owner password
+/// different from the user one. They're a request to the reader, not a lock:
+/// a reader that ignores them can still do anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PdfPermissions {
+    pub print: bool,
+    /// Print at full quality, not just a degraded copy. Without `print`, no printing at all.
+    pub print_high_quality: bool,
+    /// Copy text and images out of the file (always allowed for accessibility tools).
+    pub copy: bool,
+    /// Change the content (other than with the specific permissions below).
+    pub modify: bool,
+    /// Add or change comments and fill in forms.
+    pub annotate: bool,
+    /// Fill in form fields, even without `annotate`.
+    pub fill_forms: bool,
+    /// Insert, rotate or delete pages and change bookmarks, even without `modify`.
+    pub assemble: bool,
+}
+
+impl Default for PdfPermissions {
+    fn default() -> Self {
+        Self {
+            print: true,
+            print_high_quality: true,
+            copy: true,
+            modify: true,
+            annotate: true,
+            fill_forms: true,
+            assemble: true,
+        }
+    }
+}
+
+impl PdfPermissions {
+    fn to_lopdf(self) -> Permissions {
+        let mut bits = Permissions::COPYABLE_FOR_ACCESSIBILITY;
+        let flags = [
+            (self.print, Permissions::PRINTABLE),
+            (self.print && self.print_high_quality, Permissions::PRINTABLE_IN_HIGH_QUALITY),
+            (self.copy, Permissions::COPYABLE),
+            (self.modify, Permissions::MODIFIABLE),
+            (self.annotate, Permissions::ANNOTABLE),
+            (self.fill_forms, Permissions::FILLABLE),
+            (self.assemble, Permissions::ASSEMBLABLE),
+        ];
+        for (on, flag) in flags {
+            if on {
+                bits |= flag;
+            }
+        }
+        bits
+    }
+
+    fn from_lopdf(bits: Permissions) -> Self {
+        let print = bits.contains(Permissions::PRINTABLE);
+        Self {
+            print,
+            print_high_quality: print && bits.contains(Permissions::PRINTABLE_IN_HIGH_QUALITY),
+            copy: bits.contains(Permissions::COPYABLE),
+            modify: bits.contains(Permissions::MODIFIABLE),
+            annotate: bits.contains(Permissions::ANNOTABLE),
+            fill_forms: bits.contains(Permissions::FILLABLE),
+            assemble: bits.contains(Permissions::ASSEMBLABLE),
+        }
+    }
+}
+
+/// The permissions an encrypted PDF grants to whoever opens it with the user
+/// password, or `None` for a PDF that isn't encrypted. Needs no password:
+/// the `/P` entry of the encryption dictionary is stored in the clear.
+pub fn read_permissions(bytes: &[u8]) -> Result<Option<PdfPermissions>> {
+    let doc = Document::load_mem(bytes)?;
+    // Opened (no user password): lopdf decrypted it and kept its state.
+    if let Some(state) = &doc.encryption_state {
+        return Ok(Some(PdfPermissions::from_lopdf(state.permissions())));
+    }
+    // Still locked: the dictionary is there, unencrypted.
+    match doc.get_encrypted() {
+        Ok(dict) => {
+            let p = dict.get(b"P").and_then(|p| p.as_i64()).unwrap_or(-1);
+            // A 32-bit signed value: its bit pattern is what counts.
+            Ok(Some(PdfPermissions::from_lopdf(Permissions::from_bits_truncate(p as u32 as u64))))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 /// Encrypts `doc` in place with AES-256 (PDF 2.0 revision 6), the strongest
 /// scheme lopdf supports. `user_password` gates opening the document;
-/// `owner_password` gates changing permissions/removing the encryption.
-pub fn encrypt(doc: &mut Document, owner_password: &str, user_password: &str) -> Result<()> {
+/// `owner_password` gates changing permissions/removing the encryption, and
+/// opening it with everything allowed. `permissions` is what the user
+/// password allows (see [`PdfPermissions`]).
+pub fn encrypt(
+    doc: &mut Document,
+    owner_password: &str,
+    user_password: &str,
+    permissions: PdfPermissions,
+) -> Result<()> {
     if doc.is_encrypted() {
         return Err(PdfrsError::InvalidArgument("document is already encrypted".to_string()));
     }
@@ -28,7 +127,7 @@ pub fn encrypt(doc: &mut Document, owner_password: &str, user_password: &str) ->
         string_filter: b"StdCF".to_vec(),
         owner_password,
         user_password,
-        permissions: Permissions::default(),
+        permissions: permissions.to_lopdf(),
     })
     .map_err(|err| PdfrsError::InvalidArgument(err.to_string()))?;
 
@@ -66,7 +165,7 @@ mod tests {
     fn encrypts_and_decrypts_round_trip() {
         let mut doc = multi_page_document(1);
 
-        encrypt(&mut doc, "owner-secret", "user-secret").expect("encrypt should succeed");
+        encrypt(&mut doc, "owner-secret", "user-secret", PdfPermissions::default()).expect("encrypt should succeed");
         assert!(doc.is_encrypted());
 
         let mut bytes = Vec::new();
@@ -81,7 +180,7 @@ mod tests {
     #[test]
     fn rejects_wrong_password() {
         let mut doc = multi_page_document(1);
-        encrypt(&mut doc, "owner-secret", "user-secret").unwrap();
+        encrypt(&mut doc, "owner-secret", "user-secret", PdfPermissions::default()).unwrap();
 
         let mut bytes = Vec::new();
         doc.save_to(&mut bytes).unwrap();
@@ -91,7 +190,7 @@ mod tests {
 
     fn encrypted_bytes(owner: &str, user: &str) -> Vec<u8> {
         let mut doc = multi_page_document(3);
-        encrypt(&mut doc, owner, user).unwrap();
+        encrypt(&mut doc, owner, user, PdfPermissions::default()).unwrap();
         let mut bytes = Vec::new();
         doc.save_to(&mut bytes).unwrap();
         bytes
@@ -117,9 +216,74 @@ mod tests {
     #[test]
     fn rejects_double_encryption() {
         let mut doc = multi_page_document(1);
-        encrypt(&mut doc, "owner-secret", "user-secret").unwrap();
+        encrypt(&mut doc, "owner-secret", "user-secret", PdfPermissions::default()).unwrap();
 
-        let err = encrypt(&mut doc, "owner-secret", "user-secret").unwrap_err();
+        let err = encrypt(&mut doc, "owner-secret", "user-secret", PdfPermissions::default()).unwrap_err();
         assert!(matches!(err, PdfrsError::InvalidArgument(_)));
+    }
+
+    fn restricted_bytes(owner: &str, user: &str, permissions: PdfPermissions) -> Vec<u8> {
+        let mut doc = multi_page_document(2);
+        encrypt(&mut doc, owner, user, permissions).unwrap();
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn a_plain_pdf_has_no_permissions_to_read() {
+        let mut plain = Vec::new();
+        multi_page_document(1).save_to(&mut plain).unwrap();
+        assert_eq!(read_permissions(&plain).unwrap(), None);
+    }
+
+    #[test]
+    fn restrictions_are_written_and_read_back_even_without_the_password() {
+        let restricted = PdfPermissions {
+            print: false,
+            copy: false,
+            modify: false,
+            ..PdfPermissions::default()
+        };
+        let bytes = restricted_bytes("owner", "user", restricted);
+
+        // Locked: read from /P, no password needed.
+        let read = read_permissions(&bytes).unwrap().expect("encrypted");
+        // No printing at all also means no printing at full quality.
+        assert_eq!(read, PdfPermissions { print_high_quality: false, ..restricted });
+
+        // /Perms agrees with /P: the file still opens with either password.
+        assert_eq!(load_decrypted(&bytes, "user").unwrap().get_pages().len(), 2);
+        assert_eq!(load_decrypted(&bytes, "owner").unwrap().get_pages().len(), 2);
+    }
+
+    #[test]
+    fn restrictions_with_no_password_to_open_are_read_too() {
+        let restricted = PdfPermissions {
+            assemble: false,
+            annotate: false,
+            ..PdfPermissions::default()
+        };
+        let bytes = restricted_bytes("owner", "", restricted);
+
+        assert!(!needs_password(&bytes).unwrap());
+        assert_eq!(read_permissions(&bytes).unwrap(), Some(restricted));
+    }
+
+    #[test]
+    fn everything_allowed_by_default_and_accessibility_copy_always() {
+        let bytes = restricted_bytes("owner", "user", PdfPermissions::default());
+        assert_eq!(read_permissions(&bytes).unwrap(), Some(PdfPermissions::default()));
+
+        let none = PdfPermissions {
+            print: false,
+            print_high_quality: false,
+            copy: false,
+            modify: false,
+            annotate: false,
+            fill_forms: false,
+            assemble: false,
+        };
+        assert_eq!(none.to_lopdf(), Permissions::COPYABLE_FOR_ACCESSIBILITY);
     }
 }
