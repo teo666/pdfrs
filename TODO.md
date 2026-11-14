@@ -8,13 +8,19 @@ I punti decisi, nell'ordine in cui si fanno. Ogni PR spunta il suo.
 
 1. [ ] **Rilascio di `pdfrs.js` 0.3.0** — CropBox, `replace_image`/`compress_images`, `PreviewDocument` e quello che arriva dai punti sotto. Versione e changelog; la pubblicazione su npm la conferma l'utente.
 2. [ ] **Prima release dell'app** (tag `v0.1.0` in pdfrs-app): zip dell'estensione per Chrome e Firefox e della build web, con il workflow `release.yml` che c'è già.
-3. [ ] **Pulizia** — branch già mergiati; action ferme a Node 20 (`configure-pages`, `deploy-pages`, `pnpm/action-setup`, `upload-artifact`).
+3. [x] **Pulizia** — tolti i branch già mergiati (restano `codex/prepare-npm-package`, con la PR #4 aperta, `worktree-undo-redo` e quello del worktree); in pdfrs-app le action sono alle ultime versioni, tutte su Node 24.
 4. [x] **Togliere solo la rotazione** di una o più pagine: il badge «90° ×» della miniatura e del visualizzatore, e un pulsante nella barra delle pagine selezionate (`PdfDocument.resetRotations`, un solo passo di cronologia).
 5. [x] **Filigrana di testo e pagine bianche** — `watermark_pdf` (sopra o sotto il contenuto, opacità con `/ExtGState`, dimensione adatta alla pagina o in punti, angolo, posizione, pagine scelte), `blank_page_pdf`, `page_sizes`; `annotate_pdf` guadagna `opacity` e `layer`. Nell'app lo strumento «Filigrana» (applicata subito, annullabile, con anteprima) e «Pagina bianca» nella barra del documento.
 6. [x] **Indice, fase 2** — nel modello `addOutlineEntry`, `renameOutlineEntry`, `removeOutlineEntry`, `moveOutlineEntry`, `indent…`/`outdentOutlineEntry`: modifiche in sospeso, annullabili. `setOutlineOpen` vale anche dopo «Applica modifiche». Le pagine inserite o spostate da un altro documento portano le loro voci, e `outline.rs` tiene link URI, colore e stile. Nell'app, i comandi del pannello «Indice» e la tastiera (F2, Alt+frecce, Canc).
 7. [x] **Permessi del PDF protetto** — `encrypt_pdf(…, { permissions })` e `read_permissions`. Nel pannello «Proteggi», sette caselle e la «password per togliere le limitazioni», obbligatoria e diversa da quella di apertura. Le limitazioni di un file aperto o sbloccato compaiono in «Proteggi» e «Proprietà».
 8. [x] **Immagini, fase 3** — `move_images` sposta e ridimensiona un'immagine già nel PDF: avvolge il disegno in `q <delta> cm … Q`, così gli id restano gli stessi. Rifiuta le Form condivise tra pagine; `clipped` segnala quelle ritagliate. Nel modello `PdfDocument.moveImage` si applica subito ed è annullabile. Nel visualizzatore dell'app ci sono le maniglie sull'immagine selezionata: la scatola sposta, l'angolo ridimensiona, i lati allungano, Esc annulla.
 9. [ ] **Miniature più veloci da disegnare** — misurare prima quanto pesa la codifica PNG rispetto al disegno; poi scala più bassa, WebP o bitmap, profilo di hayro.
+10. [ ] **Ruotare le immagini del PDF** nel visualizzatore — una maniglia di rotazione come per le firme; il motore regge già qualsiasi trasformazione (`move_images` con un riquadro ruotato).
+11. [ ] **Filigrana con un'immagine** — un logo semitrasparente sopra o sotto il contenuto, con le stesse opzioni della filigrana di testo (dimensione, angolo, posizione, opacità, pagine).
+12. [ ] **Permessi che restano dopo una modifica** — oggi un file con limitazioni le perde appena lo si modifica (lopdf salva senza `/Encrypt`); proporre di riapplicarle quando lo si scarica.
+13. [ ] **Numeri di pagina e intestazioni** — «Pagina 3 di 12», la data o un testo in alto o in basso su tutte le pagine o su alcune; vicino alla filigrana.
+14. [ ] **Ritaglio della pagina** (CropBox) — togliere i margini bianchi o tenere solo una parte della pagina.
+15. [ ] **Moduli PDF** — compilare i campi di un modulo (AcroForm).
 
 ## Altre idee
 
