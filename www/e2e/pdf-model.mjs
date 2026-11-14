@@ -465,6 +465,24 @@ async function main() {
     );
   }, photoJpgBytes);
 
+  results["moveImage turns an image about its centre, as one undo step"] = await page.evaluate(async (photo) => {
+    const { PdfDocument } = window.__pdfModel;
+    const doc = await PdfDocument.fromImage(new Uint8Array(photo), { pageSize: "a4", margin: 28 });
+    const [placement] = (await doc.getImages()).placements;
+    await doc.moveImage(placement.id, placement, 90);
+    const [turned] = (await doc.getImages()).placements;
+    const near = (a, b) => Math.abs(a - b) < 1e-4;
+    const step = doc.history().at(-1);
+    return (
+      near(placement.rotation, 0) &&
+      near(turned.rotation, 90) &&
+      near(turned.x + turned.width / 2, placement.x + placement.width / 2) &&
+      near(turned.y + turned.height / 2, placement.y + placement.height / 2) &&
+      step.label === "Ruota immagine (pagina 1)" &&
+      step.action.type === "rotateImage"
+    );
+  }, photoJpgBytes);
+
   // --- Watermark: applied right away on the pages asked for, their
   // previews redrawn (the others kept), one undo step; pending edits stay.
   results["addWatermark marks the chosen pages at once, as one undo step"] = await page.evaluate(async (bytes) => {

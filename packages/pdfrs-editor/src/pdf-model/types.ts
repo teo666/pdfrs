@@ -158,6 +158,8 @@ export interface PdfImagePlacement {
   sharedPages: PageId[];
   /** A clipping path applies where it's drawn: part of it may not show, and moved it may be cut off. */
   clipped: boolean;
+  /** How it's turned on the page shown: its top edge's angle, degrees clockwise, in (-180, 180]. */
+  rotation: number;
 }
 
 /** A placement's new box (see `PdfDocument.moveImage`), in the frame of `PdfImagePlacement`. */

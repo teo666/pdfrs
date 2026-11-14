@@ -243,10 +243,14 @@ Le immagini già presenti nel PDF:
   - `image` è la `key` dell'immagine disegnata.
   - `sharedPages` elenca le altre pagine che disegnano la stessa Form: togliendo l'immagine da una, sparisce anche da quelle.
   - `clipped` vale `true` quando dove è disegnata c'è un tracciato di ritaglio (`W`/`W*`, o il `/BBox` di una Form): una parte potrebbe non vedersi, e spostata potrebbe essere tagliata.
+  - `rotation` dice quanto è ruotata sulla pagina mostrata: l'angolo del bordo superiore, in gradi in senso orario, tra -180 e 180. Un'immagine dritta ha 0.
 
 ## `move_images(file: Uint8Array, moves): Promise<Uint8Array>`
 
-Sposta e ridimensiona immagini già presenti nel PDF. `moves` è `[{ id, x, y, width, height }]`: un `id` di `list_images` e il suo nuovo riquadro, nello stesso sistema dei piazzamenti (frazioni della pagina come si vede, origine in alto a sinistra).
+Sposta, ridimensiona e ruota immagini già presenti nel PDF. `moves` è `[{ id, x, y, width, height, rotation? }]`:
+- `id` viene da `list_images`;
+- `x`, `y`, `width`, `height` sono il nuovo riquadro, nello stesso sistema dei piazzamenti (frazioni della pagina come si vede, origine in alto a sinistra);
+- `rotation` sono i gradi in senso orario di cui girare l'immagine in più, attorno al centro del nuovo riquadro. Il giro si calcola in punti, così non si deforma su una pagina non quadrata.
 
 Il disegno non viene riscritto. Viene racchiuso in `q <m> cm … Q`, dove `m` porta il vecchio riquadro sul nuovo, quindi:
 - l'immagine conserva specchiature, rotazioni e trasformazioni intorno;
