@@ -17,6 +17,7 @@ import {
   read_permissions,
   remove_images,
   replace_image,
+  restore_encryption,
   rotate_pages,
   watermark_pdf,
   write_metadata,
@@ -109,6 +110,8 @@ interface DocumentSnapshot {
   replacedFrom: Map<PageId, PageId>;
   baselineOutline: OutlineEntry[] | null;
   pendingOutline: OutlineEntry[] | null;
+  restrictionsDropped: boolean;
+  restrictionsDropApplied: boolean;
 }
 
 /** The JPEG a page was made from, and the page it was put on: kept so the page can be made again on another one. */
@@ -294,6 +297,12 @@ export class PdfDocument {
   private readonly openedWith: Uint8Array;
   /** `getOriginalPermissions`: read once, or handed over by `PdfEditor.unlockDocument`. */
   private originalPermissions: Promise<PdfPermissions | null> | null = null;
+  /** The restrictions came from a locked original this copy was unlocked from: they're not kept. */
+  private permissionsInherited = false;
+  /** `dropRestrictions` was asked for (undoable)... */
+  private restrictionsDropped = false;
+  /** ...and a commit has written the file without them. */
+  private restrictionsDropApplied = false;
 
   private constructor(bytes: Uint8Array, pageCount: number, locked = false) {
     this.bytes = bytes;
@@ -330,8 +339,8 @@ export class PdfDocument {
    * The restrictions of the file as it was opened - what its user password
    * allows (see `PdfPermissions`) - or `null` when it wasn't encrypted. For a
    * copy made by `PdfEditor.unlockDocument`, those of the locked original.
-   * The file doesn't keep them once edited: saving writes it unencrypted.
-   * Read on the first call (it parses the file), then remembered.
+   * Read on the first call (it parses the file), then remembered. Whether the
+   * document still keeps them is `getRestrictions`.
    */
   getOriginalPermissions(): Promise<PdfPermissions | null> {
     this.originalPermissions ??= read_permissions(this.openedWith);
@@ -341,6 +350,48 @@ export class PdfDocument {
   /** For `PdfEditor.unlockDocument`: the restrictions of the locked file this one was decrypted from. */
   inheritPermissions(permissions: PdfPermissions | null): void {
     this.originalPermissions = Promise.resolve(permissions);
+    this.permissionsInherited = true;
+  }
+
+  /**
+   * A file opened without a password that has restrictions keeps them: what
+   * it saves (`commit`, `exportBytes`) is encrypted again as the original
+   * was - same owner password, same permissions - though the operations
+   * underneath write it unencrypted. Not so for a copy unlocked from a file
+   * with a password (that's what unlocking is for), nor after
+   * `dropRestrictions`.
+   */
+  private async keepsRestrictions(): Promise<boolean> {
+    if (this.locked || this.permissionsInherited || this.restrictionsDropped) return false;
+    return (await this.getOriginalPermissions()) !== null;
+  }
+
+  /**
+   * The restrictions of the file as it was opened (see
+   * `getOriginalPermissions`), and whether what it saves keeps them; null
+   * when it had none.
+   */
+  async getRestrictions(): Promise<{ permissions: PdfPermissions; kept: boolean } | null> {
+    const permissions = await this.getOriginalPermissions();
+    return permissions ? { permissions, kept: await this.keepsRestrictions() } : null;
+  }
+
+  /**
+   * Lets the file go without its restrictions: from the next commit (or
+   * download) on it's written unencrypted. A pending edit like the others,
+   * undoable. Nothing to do for a file that doesn't keep any.
+   */
+  async dropRestrictions(): Promise<void> {
+    if (!(await this.keepsRestrictions())) return;
+    this.pushUndo("Togli le limitazioni del file", { type: "dropRestrictions", params: {} });
+    this.restrictionsDropped = true;
+  }
+
+  /** The bytes as they leave the document: encrypted again when it keeps its restrictions, or without them once dropped. */
+  private async finished(bytes: Uint8Array): Promise<Uint8Array> {
+    if (await this.keepsRestrictions()) return restore_encryption(this.openedWith, bytes);
+    if (this.restrictionsDropped && !this.restrictionsDropApplied) return decrypt_pdf(bytes, "");
+    return bytes;
   }
 
   /**
@@ -464,6 +515,7 @@ export class PdfDocument {
       this.annotationsById.size > 0 ||
       this.removedImages.size > 0 ||
       this.pendingOutline !== null ||
+      (this.restrictionsDropped && !this.restrictionsDropApplied) ||
       this.hasPendingReorder()
     );
   }
@@ -573,6 +625,8 @@ export class PdfDocument {
       replacedFrom: new Map(this.replacedFrom),
       baselineOutline: this.baselineOutline,
       pendingOutline: this.pendingOutline,
+      restrictionsDropped: this.restrictionsDropped,
+      restrictionsDropApplied: this.restrictionsDropApplied,
     };
   }
 
@@ -609,6 +663,8 @@ export class PdfDocument {
     this.appliedPageCount = snapshot.appliedPageCount;
     this.baselineOutline = snapshot.baselineOutline;
     this.pendingOutline = snapshot.pendingOutline;
+    this.restrictionsDropped = snapshot.restrictionsDropped;
+    this.restrictionsDropApplied = snapshot.restrictionsDropApplied;
     this.replacedFrom.clear();
     for (const [page, old] of snapshot.replacedFrom) this.replacedFrom.set(page, old);
   }
@@ -1704,6 +1760,7 @@ export class PdfDocument {
     this.baselineOutline = null;
     this.pendingOutline = null;
     this.outlineOpenChanged = false;
+    if (this.restrictionsDropped) this.restrictionsDropApplied = true;
     this.order = identityOrder(this.pageCount);
     // Recorded only once the wasm work has succeeded, so a failed commit
     // leaves no phantom history step. `pushUndo()` would snapshot the
@@ -1716,7 +1773,10 @@ export class PdfDocument {
 
   /** Same computation as `commit()`, without mutating this document - a preview of the final result. */
   async exportBytes(): Promise<Uint8Array> {
-    return this.hasPendingChanges() ? this.computeCommittedBytes() : this.bytes;
+    // Without pending edits the baseline may still have been changed in
+    // place (a watermark, an image moved, pages inserted): written
+    // unencrypted, it gets its restrictions back here.
+    return this.hasPendingChanges() ? this.computeCommittedBytes() : this.finished(this.bytes);
   }
 
   /**
@@ -1820,7 +1880,7 @@ export class PdfDocument {
       if (Object.keys(patch).length > 0) bytes = await write_metadata(bytes, patch);
     }
 
-    return bytes;
+    return this.finished(bytes);
   }
 
   private pageInfo(id: PageId): PageInfo {

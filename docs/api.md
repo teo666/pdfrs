@@ -6,7 +6,7 @@ Prima di chiamarle va inizializzato il modulo wasm una sola volta:
 
 ```ts
 import init, {
-  merge_pdfs, split_pdf, rotate_pages, compose_pdf, encrypt_pdf, decrypt_pdf, read_permissions,
+  merge_pdfs, split_pdf, rotate_pages, compose_pdf, encrypt_pdf, decrypt_pdf, read_permissions, restore_encryption,
   watermark_pdf, blank_page_pdf, page_sizes,
   is_password_protected, page_count, read_metadata, write_metadata,
   read_outline, write_outline, list_images, move_images, remove_images, annotate_pdf,
@@ -105,7 +105,20 @@ const noPrinting = await encrypt_pdf(bytes, "owner-secret", "user-secret", { per
 
 Cosa permette un PDF cifrato a chi lo apre con la password utente: `{ print, printHighQuality, copy, modify, annotate, fillForms, assemble }`. Ritorna `null` per un PDF non cifrato. Non serve la password, perché la voce `/P` del dizionario di cifratura non è cifrata. Vale anche per un PDF con le sole limitazioni, che si apre senza password.
 
-Le modifiche fatte con le altre funzioni salvano il file senza cifratura, quindi senza limitazioni. Per rimetterle si usa di nuovo `encrypt_pdf`.
+Le altre funzioni salvano il file senza cifratura, quindi senza limitazioni. Per un file che si apre senza password, `restore_encryption` le rimette uguali.
+
+## `restore_encryption(original: Uint8Array, edited: Uint8Array): Promise<Uint8Array>`
+
+`edited` cifrato esattamente come `original`: stessa chiave, stesse password, stessi permessi. Serve a un PDF che si apre senza password ma ha delle limitazioni, perché le altre funzioni salvano senza cifratura.
+- La password di proprietario non serve: il dizionario di cifratura si riusa così com'è, e dopo continua a togliere le limitazioni.
+- Si copia anche il `/ID`, che prima di AES-256 entra nella chiave.
+
+Fallisce se `original` si apre solo con una password, o se non è cifrato.
+
+```ts
+const edited = await rotate_pages(restricted, [{ page: 1, degrees: 90 }]); // senza cifratura
+const same = await restore_encryption(restricted, edited); // con le limitazioni di prima
+```
 
 ## `decrypt_pdf(file: Uint8Array, password: string): Promise<Uint8Array>`
 

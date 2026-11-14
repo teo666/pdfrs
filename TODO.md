@@ -17,7 +17,7 @@ I punti decisi, nell'ordine in cui si fanno. Ogni PR spunta il suo.
 9. [ ] **Miniature più veloci da disegnare** — misurare prima quanto pesa la codifica PNG rispetto al disegno; poi scala più bassa, WebP o bitmap, profilo di hayro.
 10. [ ] **Ruotare le immagini del PDF** nel visualizzatore — una maniglia di rotazione come per le firme; il motore regge già qualsiasi trasformazione (`move_images` con un riquadro ruotato).
 11. [ ] **Filigrana con un'immagine** — un logo semitrasparente sopra o sotto il contenuto, con le stesse opzioni della filigrana di testo (dimensione, angolo, posizione, opacità, pagine).
-12. [ ] **Permessi che restano dopo una modifica** — oggi un file con limitazioni le perde appena lo si modifica (lopdf salva senza `/Encrypt`); proporre di riapplicarle quando lo si scarica.
+12. [x] **Permessi che restano dopo una modifica** — `restore_encryption` ricifra un file modificato come l'originale (stesso stato di cifratura di lopdf, `/ID` compreso), senza conoscere la password di proprietario. Il modello lo fa da solo, al commit e allo scaricamento, per i file che si aprono senza password; `dropRestrictions` le toglie, e si può annullare. Nell'app la nota di «Proteggi» e «Proprietà» dice che restano e ha «Togli le limitazioni».
 13. [ ] **Numeri di pagina e intestazioni** — «Pagina 3 di 12», la data o un testo in alto o in basso su tutte le pagine o su alcune; vicino alla filigrana.
 14. [ ] **Ritaglio della pagina** (CropBox) — togliere i margini bianchi o tenere solo una parte della pagina.
 15. [ ] **Moduli PDF** — compilare i campi di un modulo (AcroForm).
