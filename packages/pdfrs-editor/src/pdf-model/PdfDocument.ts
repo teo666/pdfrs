@@ -670,6 +670,18 @@ export class PdfDocument {
     }
   }
 
+  /** See `rotatePages`. Pages with no pending rotation are skipped; none left means no history step. */
+  resetRotations(ids: PageId[]): void {
+    const targets = this.distinctPages(ids).filter((id) => this.rotations.has(id));
+    if (targets.length === 1) return this.resetRotation(targets[0] as PageId);
+    if (targets.length === 0) return;
+    this.pushUndo(`Azzera la rotazione di ${targets.length} pagine`, {
+      type: "resetRotations",
+      params: { count: targets.length },
+    });
+    for (const id of targets) this.rotations.delete(id);
+  }
+
   /** See `rotatePages`. Pages already marked are skipped; nothing left to mark means no history step. */
   deletePages(ids: PageId[]): void {
     const targets = this.distinctPages(ids).filter((id) => !this.deletions.has(id));
