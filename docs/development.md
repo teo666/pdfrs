@@ -25,7 +25,7 @@ Vedi docs/architecture.md ("Build \"core\" e \"full\"") per il perché dello spl
 La versione è quella di `Cargo.toml`: `./scripts/build-npm-package.sh` la copia in `pkg-npm/package.json`, insieme a descrizione, licenza e repository. Il README mostrato su npm è `scripts/npm-package/README.md`, in inglese; le licenze sono `LICENSE-MIT` e `LICENSE-APACHE`.
 
 ```bash
-# 1. alza "version" in Cargo.toml, poi:
+# 1. alza "version" in Cargo.toml, scrivi la sezione in CHANGELOG.md, poi:
 ./scripts/build-npm-package.sh
 cd pkg-npm
 npm publish --dry-run   # controlla file e dimensioni senza pubblicare

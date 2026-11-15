@@ -6,7 +6,7 @@ Idee di funzionalità discusse e non ancora implementate.
 
 I punti decisi, nell'ordine in cui si fanno. Ogni PR spunta il suo.
 
-1. [ ] **Rilascio di `pdfrs.js` 0.3.0** — CropBox, `replace_image`/`compress_images`, `PreviewDocument` e quello che arriva dai punti sotto. Versione e changelog; la pubblicazione su npm la conferma l'utente.
+1. [x] **Rilascio di `pdfrs.js` 0.3.0** — versione in `Cargo.toml`, `CHANGELOG.md`, pubblicazione su npm, tag `v0.3.0` con release su GitHub.
 2. [ ] **Prima release dell'app** (tag `v0.1.0` in pdfrs-app): zip dell'estensione per Chrome e Firefox e della build web, con il workflow `release.yml` che c'è già.
 3. [x] **Pulizia** — tolti i branch già mergiati (restano `codex/prepare-npm-package`, con la PR #4 aperta, `worktree-undo-redo` e quello del worktree); in pdfrs-app le action sono alle ultime versioni, tutte su Node 24.
 4. [x] **Togliere solo la rotazione** di una o più pagine: il badge «90° ×» della miniatura e del visualizzatore, e un pulsante nella barra delle pagine selezionate (`PdfDocument.resetRotations`, un solo passo di cronologia).
@@ -21,6 +21,10 @@ I punti decisi, nell'ordine in cui si fanno. Ogni PR spunta il suo.
 13. [x] **Numeri di pagina e intestazioni** — `page_labels_pdf` scrive un testo breve per pagina, in uno dei sei punti. `PdfDocument.addPageLabels` compone «{n}» e «{total}» nell'ordine mostrato, senza le pagine da eliminare, con un numero di partenza e la possibilità di saltare la prima pagina. Si applica subito ed è annullabile. Nell'app c'è lo strumento «Numeri», con modelli pronti, testo libero con `{date}`, posizione e anteprima.
 14. [ ] **Ritaglio della pagina** (CropBox) — togliere i margini bianchi o tenere solo una parte della pagina.
 15. [ ] **Moduli PDF** — compilare i campi di un modulo (AcroForm).
+16. [ ] **Manopola di rotazione delle firme** — in `AnnotationLayer` sta sempre sopra il riquadro: una firma in cima alla pagina la porta sotto le barre del visualizzatore. Stessa regola delle immagini del PDF (`ImageLayer`: sopra, dentro i riquadri grandi, sotto quelli in cima).
+17. [ ] **e2e dell'app anche su Firefox e WebKit** in locale — oggi girano solo su Chromium, perché i browser di Playwright non sono installati (`pnpm exec playwright install`); poi farli girare anche in CI.
+18. [ ] **PR #4 di pdfrs** (`codex/prepare-npm-package`) — superata dal pacchetto npm che c'è già: chiuderla.
+19. [ ] **Branch `worktree-undo-redo`** su GitHub, senza PR — decidere se tenerlo.
 
 ## Altre idee
 

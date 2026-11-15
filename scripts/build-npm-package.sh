@@ -24,7 +24,7 @@ done
 
 # README and licences: npm shows the README on the package page. The
 # licences go in "files" below, as npm only picks up a bare LICENSE on its own.
-cp scripts/npm-package/README.md LICENSE-MIT LICENSE-APACHE pkg-npm/
+cp scripts/npm-package/README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE pkg-npm/
 
 cat > pkg-npm/package.json <<EOF
 {
@@ -54,6 +54,7 @@ cat > pkg-npm/package.json <<EOF
   "files": [
     "core",
     "full",
+    "CHANGELOG.md",
     "LICENSE-MIT",
     "LICENSE-APACHE"
   ],
